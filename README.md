@@ -11,7 +11,7 @@ and run.
 
 ```
 $ make && ./bin/elpis -d
-elpis 1.0.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
+elpis 1.1.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
               4096 MiB RAM detected, cache budget 819 MiB
 msg-cache: 32 shards, budget 409 MiB
 rrset-cache: 32 shards, budget 262 MiB
@@ -143,7 +143,7 @@ with the scalar one byte for byte, so the only difference is speed.
 Startup says which it picked, and what the CPU offered:
 
 ```
-elpis 1.0.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll, ...
+elpis 1.1.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll, ...
 ```
 
 **Memory.** The cache sizes itself from the memory this process can actually
@@ -207,6 +207,7 @@ Then point AdGuard Home's upstream at `[2402:4e20::1111]:53`. The shipped
 | [Troubleshooting](docs/troubleshooting.md) | queries arriving but answers not coming back, port conflicts, malformed input |
 | [Status page](docs/status-page.md) | the read-only web interface, and how to reach it safely |
 | [Licensing](docs/licensing.md) | signed deployment licences, what a signature can and cannot prove |
+| [Changelog](CHANGELOG.md) | what changed in each release |
 | [Internals](docs/internals.md) | why the hot paths look the way they do, and what is deliberately missing |
 
 ## Status page
