@@ -5,13 +5,19 @@ Where the config file lives, what the settings do, and how to run it.
 ## The config file
 
 `elpis.conf` is looked for next to the binary; then one directory up if the
-binary sits in a `bin/` directory, which is where the build puts it and how an
-installed tree is laid out; then in `/etc/elpis/`, then in `/etc/`. The first
-that exists wins; without one the defaults are a working
-recursive resolver on `127.0.0.1:5335`. (Not 5353 — that is mDNS, and
-avahi-daemon holds it on most Linux hosts; because both sides set
-`SO_REUSEADDR` the clash is silent rather than an error.) The shipped file documents every
-setting at its default value.
+binary sits in a `bin/` directory; then in `/etc/elpis/`, then in `/etc/`. The
+first that exists wins.
+
+In practice the first one is what you get: `make` seeds `bin/elpis.conf` from
+the copy shipped in the source tree and never overwrites it afterwards, so the
+shipped file stays a reference and `bin/elpis.conf` is the one you edit. It
+survives rebuilds and `make clean`; `make distclean` is what removes it.
+
+Without any config at all the defaults are a working recursive resolver on
+`127.0.0.1:5335`. (Not 5353 — that is mDNS, and avahi-daemon holds it on most
+Linux hosts; because both sides set `SO_REUSEADDR` the clash is silent rather
+than an error.) Every setting is documented in the file at its default value,
+so a config that is entirely comments behaves exactly like no config.
 
 ```
 listen: 127.0.0.1@5335

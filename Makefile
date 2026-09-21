@@ -7,8 +7,12 @@ PROG      := elpis
 BINDIR    := bin
 BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
+BINCONF   := $(BINDIR)/$(PROG).conf
 VERSION   := 1.0.0
-PREFIX    ?= /usr/local
+# This is a self-contained program: one binary and one config file beside it.
+# /opt keeps it out of the way of anything the distribution manages, and the
+# shipped systemd unit expects it here.
+PREFIX    ?= /opt/elpis-resolver
 SYSCONFDIR?= /etc
 
 CC        ?= cc
@@ -77,12 +81,20 @@ endif
 OBJ += $(SIMD_OBJ)
 
 # ---- targets ---------------------------------------------------------------
-.PHONY: all static debug asan clean install uninstall test check fmt
+.PHONY: all static debug asan clean distclean install uninstall test check fmt
 
-all: $(BIN)
+all: $(BIN) $(BINCONF)
 
 $(BINDIR):
 	@mkdir -p $(BINDIR)
+
+# bin/ is meant to be a complete, portable bundle: copy the directory to a
+# machine and it runs.  The config is seeded from the shipped defaults once and
+# never touched again -- your edits survive every rebuild, and `make clean`
+# leaves it alone.  Use `make distclean` to start over.
+$(BINCONF): | $(BINDIR)
+	@cp elpis.conf $(BINCONF)
+	@echo "  seeded $(BINCONF) from the shipped defaults"
 
 $(BIN): $(OBJ) | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $(OBJ) $(ALL_LDFLAGS) $(LIBS)
@@ -128,20 +140,29 @@ $(TESTBIN): $(TEST_OBJ) tests/test_main.o | $(BINDIR)
 test check: $(TESTBIN)
 	./$(TESTBIN)
 
+# Installs the same shape as the build tree, so the config lookup behaves
+# identically whether you run it from bin/ or from /opt.  An existing config is
+# never overwritten.
 install: $(BIN)
-	install -d $(DESTDIR)$(PREFIX)/sbin
-	install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/sbin/$(PROG)
-	install -d $(DESTDIR)$(SYSCONFDIR)/elpis
-	test -f $(DESTDIR)$(SYSCONFDIR)/elpis/elpis.conf || \
-	  install -m 0644 elpis.conf $(DESTDIR)$(SYSCONFDIR)/elpis/elpis.conf
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/bin/$(PROG)
+	test -f $(DESTDIR)$(PREFIX)/bin/$(PROG).conf || \
+	  install -m 0644 elpis.conf $(DESTDIR)$(PREFIX)/bin/$(PROG).conf
+	@echo "installed $(PREFIX)/bin/$(PROG) and its config"
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/sbin/$(PROG)
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(PROG)
+	@echo "left $(PREFIX)/bin/$(PROG).conf in place; remove it yourself if you meant to"
+	-rmdir $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX) 2>/dev/null || true
 
 clean:
 	rm -f $(OBJ) tests/test_main.o $(BIN) $(TESTBIN)
 	rm -f src/*.d src/crypto/*.d tests/*.d
 	@rmdir $(BINDIR) 2>/dev/null || true
+
+# clean keeps bin/elpis.conf because it is yours by then; this drops it too.
+distclean: clean
+	rm -rf $(BINDIR)
 
 # The test object is built outside $(OBJ), so its own .d has to be named here
 # as well -- otherwise a change to a header leaves tests/test_main.o stale and

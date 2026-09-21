@@ -61,8 +61,15 @@ shared-library dependencies, so it runs on any reasonably recent Linux without
 installing anything:
 
 ```bash
-chmod +x elpis && ./elpis -V
+sudo mkdir -p /opt/elpis-resolver/bin
+sudo cp elpis elpis.conf /opt/elpis-resolver/bin/
+sudo chmod +x /opt/elpis-resolver/bin/elpis
+/opt/elpis-resolver/bin/elpis -t        # check the config and exit
 ```
+
+The binary reads the `elpis.conf` sitting beside it, so those two files are the
+whole installation. Without a config it still runs, on `127.0.0.1:5335` with
+built-in defaults.
 
 ### Building it yourself
 
@@ -88,17 +95,39 @@ Use `-march=native` only when you build on the same machine you run on — the
 binary will not start on an older CPU.
 
 ```bash
-make            # ordinary build      -> bin/elpis
+make            # ordinary build      -> bin/elpis + bin/elpis.conf
 make static     # one relocatable binary, no shared libraries
 make test       # 242 self tests, no network needed
 make debug      # -O0 -g3
 make asan       # address and UB sanitizers
-make clean      # removes bin/ and every object file
+make clean      # objects and binaries; keeps your bin/elpis.conf
+make distclean  # bin/ and everything in it
 ```
 
 Everything the build produces goes in `bin/`, which is in `.gitignore`, so
 `git pull && make clean && make` never leaves anything behind for git to
 notice.
+
+`bin/` is a complete bundle — the binary plus a config seeded from the shipped
+defaults — so you can copy the directory to another machine and run it. The
+seeding happens once: your edits to `bin/elpis.conf` survive every rebuild and
+`make clean`, and the copy in the source tree stays the untouched reference.
+
+### Installing it
+
+```bash
+sudo make install          # -> /opt/elpis-resolver/bin/{elpis,elpis.conf}
+```
+
+`/opt` keeps it clear of anything the distribution manages, which is what you
+want for a program that ships as one binary and one file beside it. The
+installed layout is the same shape as `bin/`, so the config is found the same
+way in both. An existing config is never overwritten, and `make uninstall`
+leaves it alone. `PREFIX=/usr/local make install` if you would rather.
+
+A systemd unit is in [contrib/elpis.service](contrib/elpis.service); it expects
+exactly this path and binds port 53 with `CAP_NET_BIND_SERVICE` instead of
+running as root.
 
 Strict C99 plus POSIX.1-2008. epoll on Linux, kqueue on the BSDs and macOS,
 poll everywhere else.
@@ -141,10 +170,10 @@ a 4 GB container spends its time answering from cache rather than evicting.
 
 ## Configure
 
-`elpis.conf` is looked for next to the binary, then one directory up if the
-binary is in `bin/` (so the copy in the source tree is found by `./bin/elpis`),
-then `/etc/elpis/`, then `/etc/`. Without one the defaults are a working
-recursive resolver on `127.0.0.1:5335`. A minimal config for the setup above:
+`make` puts a config beside the binary at `bin/elpis.conf`, seeded from the
+shipped defaults, and that is the one it reads. (Failing that it looks one
+directory up, then in `/etc/elpis/`, then `/etc/`.) A minimal config for the
+setup above:
 
 ```
 listen: [2402:4e20::1111]@53
