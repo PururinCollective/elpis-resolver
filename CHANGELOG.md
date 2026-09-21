@@ -10,6 +10,29 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.3 — 2026-09-22
+
+### Fixed
+
+**A DS lookup that failed was treated as proof that no DS exists.** An empty
+result carries a denial — NXDOMAIN or NODATA — when the absence is real. A
+lookup that simply did not come back carries nothing, and the validator could
+not tell the two apart: it walked straight past the zone cut, concluded the
+zone was unsigned, and served whatever arrived, forged signatures included.
+
+Harmless while lookups succeed. When DS lookups start failing in bulk — which
+they do on a busy resolver — every signed zone turns insecure at the same
+moment, and a validator that was working a minute ago quietly stops. The log
+says what is happening if you know to look for it:
+
+```
+WARN  dnssec: no DS for google.com. after 2 attempts (+145 suppressed in the last 10s)
+WARN  dnssec: no DS for test-alg13.dnscheck.tools. after 2 attempts
+```
+
+Unknown now fails closed: a DS that could not be fetched is indeterminate, and
+the answer is SERVFAIL rather than served unvalidated.
+
 ## 1.1.2 — 2026-09-22
 
 ### Fixed

@@ -1625,8 +1625,24 @@ static void val_run(elpis_task_t *t)
             if (!val_need(t, &next, ELPIS_T_DS, scratch))
                 return;
 
-            if (scratch->count == 0 ||
-                (scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) ||
+            /*
+             * An empty result with no denial on it is a lookup that failed,
+             * not a zone that has no DS.  They are not the same thing and the
+             * difference is the whole security property: treating "I could
+             * not fetch it" as "it is not there" walks straight past the zone
+             * cut, leaves the zone looking unsigned, and serves whatever
+             * arrives -- forged signatures included.  Under load, when DS
+             * lookups start timing out, that turns every signed zone insecure
+             * at once.  Unknown must fail closed.
+             */
+            if (scratch->count == 0 &&
+                !(scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))) {
+                t->val_unavailable = 1;
+                val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
+                return;
+            }
+
+            if ((scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) ||
                 !elpis_name_eq(&scratch->name, &next)) {
                 /*
                  * No DS here: either this name is not a zone cut, or it is an
