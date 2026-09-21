@@ -17,6 +17,7 @@
 #include "elpis/webui.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -276,6 +277,84 @@ static void publish_stats(elpis_worker_t *w)
     last = w->stats;
 }
 
+typedef struct {
+    elpis_worker_t w;
+    pthread_t      th;
+    int            started;
+} wslot_t;
+
+static wslot_t *g_workers;
+static unsigned g_nworkers;
+
+/*
+ * Keep an eye on how the event loop is spending its time.
+ *
+ * A worker pinned at 100% looks the same in `top` whether it is resolving flat
+ * out or going round an empty loop, and the second is very hard to find from
+ * the outside.  The numbers that tell them apart are collected here every
+ * second and reported by SIGUSR1 and on the status page.
+ *
+ * Only one case warns on its own, because only one is unambiguous: a healthy
+ * loop turns over a few hundred times a second and almost never idly, so
+ * hundreds of thousands of turns that did nothing cannot be anything but a
+ * spin.  A single long turn is deliberately not warned about -- under load a
+ * worker can legitimately spend most of a second working through one batch,
+ * and calling that a bug would be crying wolf.
+ */
+static void report_spin(elpis_worker_t *w)
+{
+    static ELPIS_TLS uint64_t last_iters, last_idle, last_nosleep;
+    static ELPIS_TLS uint64_t warned_at;
+    uint64_t iters = 0, idle = 0, nosleep = 0;
+    uint32_t slowest = 0;
+    unsigned pending = 0;
+
+    elpis_loop_spin_stats(w->loop, &iters, &idle, &nosleep, &pending, &slowest);
+    w->loop_turns   = iters - last_iters;
+    w->loop_idle    = idle - last_idle;
+    w->loop_nosleep = nosleep - last_nosleep;
+    w->loop_slowest = slowest;
+    w->loop_timers  = pending;
+    last_iters = iters; last_idle = idle; last_nosleep = nosleep;
+
+    /*
+     * Worker 0 publishes the sum for the whole process.  Exactness does not
+     * matter here -- this is a health reading, not a counter -- so it is
+     * gathered without locking the workers against each other.
+     */
+    if (w->index == 0) {
+        elpis_loopstat_t sum;
+        unsigned k;
+        memset(&sum, 0, sizeof sum);
+        for (k = 0; k < g_nworkers; k++) {
+            const elpis_worker_t *o = &g_workers[k].w;
+            sum.turns   += o->loop_turns;
+            sum.idle    += o->loop_idle;
+            sum.nosleep += o->loop_nosleep;
+            sum.timers  += o->loop_timers;
+            if (o->loop_slowest > sum.slowest_ms)
+                sum.slowest_ms = o->loop_slowest;
+        }
+        w->ctx->loop = sum;
+    }
+
+    if (w->loop_turns > 100000u &&
+        w->loop_idle > w->loop_turns - w->loop_turns / 8u) {
+        uint64_t now = elpis_now_ms();
+        if (now - warned_at > 30000u) {
+            warned_at = now;
+            elpis_warn("worker %u: the event loop went round %llu times in "
+                       "the last second and %llu of those did nothing -- it "
+                       "is spinning, not working. %llu turns did not wait, "
+                       "%u timers pending. This is a bug; please report this "
+                       "line.", w->index,
+                       (unsigned long long)w->loop_turns,
+                       (unsigned long long)w->loop_idle,
+                       (unsigned long long)w->loop_nosleep, w->loop_timers);
+        }
+    }
+}
+
 static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_worker_t *w = (elpis_worker_t *)tm->data;
@@ -284,6 +363,7 @@ static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
 
     publish_stats(w);
     elpis_tm_publish(&w->tm);
+    report_spin(w);
 
     /* Bounded incremental expiry so no single tick stalls the loop. */
     elpis_cache_expire(ctx->mcache, now, 512);
@@ -314,14 +394,6 @@ void elpis_worker_run(elpis_worker_t *w)
 /* Threads                                                             */
 /* ================================================================== */
 
-typedef struct {
-    elpis_worker_t w;
-    pthread_t      th;
-    int            started;
-} wslot_t;
-
-static wslot_t *g_workers;
-static unsigned g_nworkers;
 
 static void *worker_main(void *arg)
 {

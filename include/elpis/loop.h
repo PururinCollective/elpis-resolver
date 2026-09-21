@@ -51,6 +51,16 @@ int  elpis_loop_once(elpis_loop_t *lp, int max_wait_ms);
 void elpis_loop_stop(elpis_loop_t *lp);
 int  elpis_loop_stopped(const elpis_loop_t *lp);
 
+/*
+ * How the loop has been spending its time: total turns, turns that did no
+ * work, turns that did not wait, and how many timers are pending.  A loop
+ * doing real work and a loop spinning look identical in `top`; these tell
+ * them apart.
+ */
+void elpis_loop_spin_stats(elpis_loop_t *lp, uint64_t *iters,
+                           uint64_t *idle, uint64_t *nosleep, unsigned *timers,
+                           uint32_t *max_turn_ms);
+
 void elpis_timer_add(elpis_loop_t *lp, elpis_timer_t *t, uint64_t delay_ms,
                      elpis_timer_cb cb, void *data);
 void elpis_timer_del(elpis_loop_t *lp, elpis_timer_t *t);

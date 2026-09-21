@@ -28,6 +28,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 
 #define REQ_MAX      8192u        /* a GET and its headers, nothing more    */
 #define OUT_MAX      262144u      /* one JSON snapshot                      */
@@ -437,6 +438,14 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     }
     bputs(b, "]},");
 
+    bputs(b, "\"loop\":{\"turns\":");
+    bputu(b, ctx->loop.turns);
+    bputs(b, ",\"idle\":");    bputu(b, ctx->loop.idle);
+    bputs(b, ",\"nosleep\":"); bputu(b, ctx->loop.nosleep);
+    bputs(b, ",\"timers\":");  bputu(b, ctx->loop.timers);
+    bputs(b, ",\"slowest\":"); bputu(b, ctx->loop.slowest_ms);
+    bputs(b, "},");
+
     bputs(b, "\"proc\":{\"cpu\":");
     bputu(b, cpu_milli);
     bputs(b, ",\"rss\":");     bputu(b, rss);
@@ -782,8 +791,7 @@ void *elpis_webui_main(void *ctxv)
                ctx->conf.web_user);
 
     while (!ctx->shutdown) {
-        struct timeval tv;
-        fd_set rf;
+        struct pollfd pfd;
         int rc, cfd;
         uint64_t now = elpis_now_ms();
 
@@ -793,12 +801,24 @@ void *elpis_webui_main(void *ctxv)
             last_tick = now;
         }
 
-        FD_ZERO(&rf);
-        FD_SET(lfd, &rf);
-        tv.tv_sec = 0;
-        tv.tv_usec = 250000;
-        rc = select(lfd + 1, &rf, NULL, NULL, &tv);
-        if (rc <= 0)
+        /*
+         * poll(), not select(): a resolver has hundreds of sockets open and a
+         * descriptor at or past FD_SETSIZE makes select() undefined, which in
+         * practice means it fails every time -- and `continue` on a failure
+         * that never clears is a loop that burns a core silently.  A real
+         * error now backs off instead of spinning.
+         */
+        pfd.fd = lfd;
+        pfd.events = POLLIN;
+        rc = poll(&pfd, 1, 250);
+        if (rc < 0) {
+            if (errno == EINTR)
+                continue;
+            elpis_error("status page: poll failed (%s); stopping",
+                        strerror(errno));
+            break;
+        }
+        if (rc == 0)
             continue;
 
         cfd = accept(lfd, NULL, NULL);

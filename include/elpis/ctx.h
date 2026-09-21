@@ -24,6 +24,17 @@ typedef struct {
     uint64_t cookie_ok, cookie_bad;
 } elpis_stats_t;
 
+/*
+ * What the event loops did in the last second, summed over the workers.  Not
+ * a counter like the rest -- it is replaced each second, not accumulated --
+ * so it lives outside elpis_stats_t, which publish_stats() folds by delta.
+ */
+typedef struct {
+    uint64_t turns, idle, nosleep;
+    uint32_t slowest_ms;
+    unsigned timers;
+} elpis_loopstat_t;
+
 typedef struct {
     elpis_conf_t        conf;
     elpis_cache_plan_t  plan;
@@ -37,6 +48,7 @@ typedef struct {
     elpis_ta_store_t   *ta;
 
     elpis_stats_t       stats;
+    elpis_loopstat_t    loop;
     uint64_t            start_ms;
 
     volatile int        shutdown;

@@ -407,11 +407,21 @@ var VIEWS = [
   icon:"<svg viewBox='0 0 24 24'><rect x='6' y='6' width='12' height='12' rx='1'/><path d='M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4'/></svg>",
   render: function(b, d){
     var pct = (last(d.history.cpu)/10).toFixed(1);
+    var L = d.loop || {turns:0,idle:0,nosleep:0,timers:0,slowest:0};
     b.innerHTML = gpanel('% of one core', pct + '%') +
       "<div class='kv' style='margin-top:6px'>" +
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
-      "<b>event loop</b><span>" + esc(d.server.loop) + "</span></div>";
+      "<b>event loop</b><span>" + esc(d.server.loop) + "</span></div>" +
+      "<h4 style='margin-top:10px'>Event loop, last second</h4><div class='kv'>" +
+      "<b>turns</b><span>" + num(L.turns) + "</span>" +
+      "<b>turns that did nothing</b><span>" + num(L.idle) + "</span>" +
+      "<b>turns that did not wait</b><span>" + num(L.nosleep) + "</span>" +
+      "<b>timers pending</b><span>" + num(L.timers) + "</span>" +
+      "<b>longest turn</b><span>" + num(L.slowest) + " ms</span></div>" +
+      "<div style='color:var(--dim);margin-top:6px'>A healthy loop turns a few " +
+      "hundred times a second and almost never idly. Hundreds of thousands of " +
+      "idle turns means it is spinning.</div>";
     graph(b.querySelector('canvas'),
       [{ data: d.history.cpu, color: '#2f9ee0' }], { h: 104 });
   }},

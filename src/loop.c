@@ -35,6 +35,18 @@ struct elpis_loop {
 #endif
     elpis_timer_t  **heap;
     unsigned         nheap, cheap;
+
+    /*
+     * Spin accounting.  The loop is allowed not to sleep -- a timer that fired
+     * may have queued work -- but a loop that never sleeps is burning a core
+     * for nothing, and from the outside that is indistinguishable from being
+     * busy.  These count what actually happened so it can say which it is.
+     */
+    uint64_t         iters;        /* times round the loop                 */
+    uint64_t         idle_iters;   /* ... that did no work at all          */
+    uint64_t         nosleep;      /* ... that chose not to wait           */
+    uint64_t         work_start_ms;/* when the previous turn stopped waiting */
+    uint32_t         max_turn_ms;  /* longest time spent working, not waiting */
 };
 
 /* ------------------------------------------------------------------ */
@@ -340,10 +352,29 @@ int elpis_loop_once(elpis_loop_t *lp, int max_wait_ms)
     int wait_ms, handled = 0;
 
     elpis_clock_tick();
+    lp->iters++;
+    {
+        /*
+         * How long the previous turn spent working, measured from the moment
+         * it stopped waiting.  The wait itself must not count: an idle worker
+         * sleeps up to half a second in epoll_wait quite legitimately, and
+         * timing the whole turn would call that a stall.  A loop that is not
+         * spinning but still pins a core is stuck inside a callback, and this
+         * is what shows it.
+         */
+        uint64_t now = elpis_cached_now_ms();
+        if (lp->work_start_ms != 0 && now > lp->work_start_ms) {
+            uint64_t d = now - lp->work_start_ms;
+            if (d > lp->max_turn_ms && d < 60000u)
+                lp->max_turn_ms = (uint32_t)d;
+        }
+    }
     handled += timers_run(lp);
     wait_ms = timers_next_ms(lp, max_wait_ms);
     if (handled > 0 && wait_ms > 0)
         wait_ms = 0;          /* a timer may have queued work; do not sleep */
+    if (wait_ms == 0)
+        lp->nosleep++;
 
 #if defined(USE_EPOLL)
     {
@@ -353,9 +384,12 @@ int elpis_loop_once(elpis_loop_t *lp, int max_wait_ms)
         if (n < 0) {
             if (errno != EINTR)
                 elpis_error("epoll_wait: %s", strerror(errno));
+            if (handled == 0)
+                lp->idle_iters++;
             return handled;
         }
         elpis_clock_tick();
+        lp->work_start_ms = elpis_cached_now_ms();
         for (i = 0; i < n; i++) {
             int fd = evs[i].data.fd;
             elpis_ev_t *ev;
@@ -457,6 +491,8 @@ int elpis_loop_once(elpis_loop_t *lp, int max_wait_ms)
 
     elpis_clock_tick();
     handled += timers_run(lp);
+    if (handled == 0)
+        lp->idle_iters++;
     return handled;
 }
 
@@ -472,4 +508,18 @@ const char *elpis_loop_backend(void)
 #else
     return "poll";
 #endif
+}
+
+void elpis_loop_spin_stats(elpis_loop_t *lp, uint64_t *iters,
+                           uint64_t *idle, uint64_t *nosleep, unsigned *timers,
+                           uint32_t *max_turn_ms)
+{
+    if (iters)  *iters  = lp->iters;
+    if (idle)   *idle   = lp->idle_iters;
+    if (nosleep) *nosleep = lp->nosleep;
+    if (timers) *timers = lp->nheap;
+    if (max_turn_ms) {
+        *max_turn_ms = lp->max_turn_ms;
+        lp->max_turn_ms = 0;            /* read and reset, once a second */
+    }
 }

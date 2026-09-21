@@ -241,6 +241,11 @@ struct elpis_worker {
     elpis_timer_t   maint;
     elpis_stats_t   stats;
     elpis_wtm_t     tm;          /* status-page tallies, worker-local */
+
+    /* Last second of event-loop behaviour; see report_spin() in main.c. */
+    uint64_t        loop_turns, loop_idle, loop_nosleep;
+    uint32_t        loop_slowest;
+    unsigned        loop_timers;
 };
 
 /* ---- lifecycle ---- */
