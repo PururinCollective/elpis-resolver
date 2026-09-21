@@ -14,6 +14,7 @@
 #include "elpis/simd.h"
 #include "elpis/util.h"
 #include "elpis/log.h"
+#include "elpis/webui.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -282,6 +283,7 @@ static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
     uint32_t now = elpis_cached_now_s();
 
     publish_stats(w);
+    elpis_tm_publish(&w->tm);
 
     /* Bounded incremental expiry so no single tick stalls the loop. */
     elpis_cache_expire(ctx->mcache, now, 512);
@@ -305,6 +307,7 @@ void elpis_worker_run(elpis_worker_t *w)
     while (!w->ctx->shutdown && !elpis_loop_stopped(w->loop))
         elpis_loop_once(w->loop, 500);
     publish_stats(w);
+    elpis_tm_publish(&w->tm);
 }
 
 /* ================================================================== */
@@ -781,6 +784,8 @@ int main(int argc, char **argv)
     unsigned nthreads, i;
     pthread_t axfr_th, probe_th;
     int axfr_started = 0, probe_started = 0;
+    pthread_t web_th;
+    int web_started = 0;
 
     for (i = 1; i < (unsigned)argc; i++) {
         const char *a = argv[i];
@@ -864,6 +869,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    elpis_tm_init(ctx.conf.web ? 1 : 0);
+    if (ctx.conf.web)
+        elpis_webui_prepare(&ctx);
+
     write_pidfile(ctx.conf.pidfile);
     install_signals();
 
@@ -880,6 +889,12 @@ int main(int argc, char **argv)
             probe_started = 1;
         else
             elpis_warn("could not start the root probe thread");
+    }
+    if (ctx.conf.web) {
+        if (pthread_create(&web_th, NULL, elpis_webui_main, &ctx) == 0)
+            web_started = 1;
+        else
+            elpis_warn("could not start the status page thread");
     }
 
     for (i = 1; i < nthreads; i++) {
@@ -949,6 +964,8 @@ int main(int argc, char **argv)
         pthread_join(axfr_th, NULL);
     if (probe_started)
         pthread_join(probe_th, NULL);
+    if (web_started)
+        pthread_join(web_th, NULL);
 
     elpis_stats_report(&ctx);
 

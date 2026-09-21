@@ -9,6 +9,7 @@
  *    an amplification target of its own.
  */
 #include "elpis/log.h"
+#include "elpis/telemetry.h"
 #include "elpis/util.h"
 #include "elpis/atomic.h"
 
@@ -149,6 +150,14 @@ static void log_emit(elpis_loglevel_t lvl, const char *file, int line,
         return;
     if ((size_t)n >= sizeof msg)
         elpis_strlcpy(msg + sizeof msg - 5, "...", 5);
+
+    /*
+     * Keep anything a person would want to see on the status page, whatever
+     * the log destination is -- the page is a destination of its own, and a
+     * resolver logging to syslog should still be able to show its own errors.
+     */
+    if (lvl <= ELPIS_LOG_WARN)
+        elpis_tm_log_add(k_level_name[lvl], msg);
 
     if (g_dst == ELPIS_LOG_DST_NONE)
         return;

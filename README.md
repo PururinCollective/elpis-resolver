@@ -205,7 +205,33 @@ Then point AdGuard Home's upstream at `[2402:4e20::1111]:53`. The shipped
 | [DNSSEC](docs/dnssec.md) | validation, RSA / ECDSA / Ed25519 / ML-DSA-44, cookies, standards |
 | [Configuration](docs/configuration.md) | every setting, privileged ports, binding, signals |
 | [Troubleshooting](docs/troubleshooting.md) | queries arriving but answers not coming back, port conflicts, malformed input |
+| [Status page](docs/status-page.md) | the read-only web interface, and how to reach it safely |
 | [Internals](docs/internals.md) | why the hot paths look the way they do, and what is deliberately missing |
+
+## Status page
+
+Optional, read-only, off by default:
+
+```
+webgui: yes
+webgui-password: choose-something
+```
+
+It shows cache hit rate, response times split between answered-from-cache and
+resolved-upstream, CPU and memory, queries and SERVFAIL per second, the busiest
+names and clients, the upstream servers that have gone quiet, and the recent
+log — in draggable windows with light and dark themes.
+
+It speaks plain HTTP and binds loopback, because a DNS resolver has no business
+carrying a TLS stack for a status page. Reach it over an SSH tunnel, a VPN, or
+a reverse proxy that already terminates TLS with your certificate:
+
+```bash
+ssh -L 8082:127.0.0.1:8082 user@resolver
+```
+
+There is no endpoint that changes anything. See
+[docs/status-page.md](docs/status-page.md).
 
 ## Not here
 

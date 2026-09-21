@@ -14,6 +14,7 @@
 #include "elpis/rrlist.h"
 #include "elpis/msg.h"
 #include "elpis/edns.h"
+#include "elpis/telemetry.h"
 
 typedef struct elpis_worker  elpis_worker_t;
 typedef struct elpis_task    elpis_task_t;
@@ -239,6 +240,7 @@ struct elpis_worker {
 
     elpis_timer_t   maint;
     elpis_stats_t   stats;
+    elpis_wtm_t     tm;          /* status-page tallies, worker-local */
 };
 
 /* ---- lifecycle ---- */

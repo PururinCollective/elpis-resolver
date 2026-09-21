@@ -307,3 +307,77 @@ int elpis_hash(int alg, const void *p, size_t n, uint8_t *out)
     default:                return ELPIS_ERR;
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* HMAC-SHA-256 and PBKDF2                                             */
+/* ------------------------------------------------------------------ */
+
+void elpis_hmac_sha256(const uint8_t *key, size_t keylen,
+                       const uint8_t *msg, size_t msglen, uint8_t out[32])
+{
+    uint8_t k[64], pad[64], inner[32];
+    elpis_sha256_t c;
+    unsigned i;
+
+    memset(k, 0, sizeof k);
+    if (keylen > sizeof k)
+        elpis_sha256(key, keylen, k);
+    else
+        memcpy(k, key, keylen);
+
+    for (i = 0; i < sizeof k; i++)
+        pad[i] = (uint8_t)(k[i] ^ 0x36u);
+    elpis_sha256_init(&c);
+    elpis_sha256_update(&c, pad, sizeof pad);
+    elpis_sha256_update(&c, msg, msglen);
+    elpis_sha256_final(&c, inner);
+
+    for (i = 0; i < sizeof k; i++)
+        pad[i] = (uint8_t)(k[i] ^ 0x5Cu);
+    elpis_sha256_init(&c);
+    elpis_sha256_update(&c, pad, sizeof pad);
+    elpis_sha256_update(&c, inner, sizeof inner);
+    elpis_sha256_final(&c, out);
+
+    memset(k, 0, sizeof k);
+    memset(pad, 0, sizeof pad);
+    memset(inner, 0, sizeof inner);
+}
+
+void elpis_pbkdf2_sha256(const char *pass, size_t passlen,
+                         const uint8_t *salt, size_t saltlen,
+                         uint32_t iters, uint8_t *out, size_t outlen)
+{
+    uint8_t block[32], u[32], in[64 + 4];
+    uint32_t counter = 1;
+    size_t done = 0;
+
+    if (saltlen > sizeof in - 4u)
+        saltlen = sizeof in - 4u;
+
+    while (done < outlen) {
+        size_t take = outlen - done < sizeof block ? outlen - done : sizeof block;
+        uint32_t it;
+        unsigned i;
+
+        memcpy(in, salt, saltlen);
+        in[saltlen + 0] = (uint8_t)(counter >> 24);
+        in[saltlen + 1] = (uint8_t)(counter >> 16);
+        in[saltlen + 2] = (uint8_t)(counter >> 8);
+        in[saltlen + 3] = (uint8_t)counter;
+
+        elpis_hmac_sha256((const uint8_t *)pass, passlen, in, saltlen + 4u, u);
+        memcpy(block, u, sizeof block);
+
+        for (it = 1; it < iters; it++) {
+            elpis_hmac_sha256((const uint8_t *)pass, passlen, u, sizeof u, u);
+            for (i = 0; i < sizeof block; i++)
+                block[i] ^= u[i];
+        }
+        memcpy(out + done, block, take);
+        done += take;
+        counter++;
+    }
+    memset(block, 0, sizeof block);
+    memset(u, 0, sizeof u);
+}

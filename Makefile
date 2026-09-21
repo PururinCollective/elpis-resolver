@@ -48,8 +48,8 @@ CORE_SRC := \
   src/edns.c src/rrlist.c src/cache.c src/mcache.c src/rcache.c src/infra.c src/loop.c \
   src/sock.c src/server.c src/outbound.c src/resolver.c src/delegation.c \
   src/roots.c src/tld.c src/axfr.c src/probe.c src/dns64.c src/localzone.c src/ratelimit.c \
-  src/stats.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
-  src/cookie.c src/rrl.c src/conflict.c src/main.c
+  src/stats.c src/telemetry.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
+  src/cookie.c src/rrl.c src/conflict.c src/webui.c src/main.c
 
 CRYPTO_SRC := \
   src/crypto/sha1.c src/crypto/sha2.c src/crypto/keccak.c src/crypto/bn.c \

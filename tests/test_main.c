@@ -771,6 +771,48 @@ static void test_dnssec(void)
               "the owner name is part of the digest");
     }
 
+    section("HMAC-SHA-256 and PBKDF2");
+    {
+        /*
+         * RFC 4231 cases 1 and 2, and the PBKDF2-HMAC-SHA-256 vectors from
+         * RFC 7914 section 11.  These back the status page's password check,
+         * so a mistake here would either lock everyone out or let anyone in.
+         */
+        uint8_t mac[32], dk[32];
+        uint8_t k1[20];
+        char hex[65];
+        unsigned i;
+
+        memset(k1, 0x0b, sizeof k1);
+        elpis_hmac_sha256(k1, sizeof k1, (const uint8_t *)"Hi There", 8, mac);
+        for (i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", mac[i]);
+        CHECK(strcmp(hex, "b0344c61d8db38535ca8afceaf0bf12b"
+                          "881dc200c9833da726e9376c2e32cff7") == 0,
+              "RFC 4231 case 1 (got %s)", hex);
+
+        elpis_hmac_sha256((const uint8_t *)"Jefe", 4,
+                          (const uint8_t *)"what do ya want for nothing?", 28,
+                          mac);
+        for (i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", mac[i]);
+        CHECK(strcmp(hex, "5bdcc146bf60754e6a042426089575c7"
+                          "5a003f089d2739839dec58b964ec3843") == 0,
+              "RFC 4231 case 2 (got %s)", hex);
+
+        elpis_pbkdf2_sha256("password", 8, (const uint8_t *)"salt", 4,
+                            1, dk, sizeof dk);
+        for (i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", dk[i]);
+        CHECK(strcmp(hex, "120fb6cffcf8b32c43e7225256c4f837"
+                          "a86548c92ccc35480805987cb70be17b") == 0,
+              "PBKDF2 c=1 (got %s)", hex);
+
+        elpis_pbkdf2_sha256("password", 8, (const uint8_t *)"salt", 4,
+                            4096, dk, sizeof dk);
+        for (i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", dk[i]);
+        CHECK(strcmp(hex, "c5e478d59288c841aa530db6845c4c8d"
+                          "962893a001ce4e11a4963873aa98134a") == 0,
+              "PBKDF2 c=4096 (got %s)", hex);
+    }
+
     section("ML-DSA-44 in DNSSEC");
     {
         /*

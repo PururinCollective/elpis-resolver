@@ -19,6 +19,7 @@
 #include "elpis/deleg.h"
 #include "elpis/infra.h"
 #include "elpis/log.h"
+#include "elpis/telemetry.h"
 #include "elpis/crypto.h"
 #include "elpis/simd.h"
 
@@ -1277,9 +1278,12 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
 
 void elpis_resolver_on_timeout(elpis_task_t *t, elpis_outq_t *q)
 {
-    (void)q;
     if (t->state == ELPIS_TS_DEAD)
         return;
+    /* Which servers have gone quiet is the first thing anyone asks when
+     * resolution slows down, and this is the only place it is known. */
+    if (q != NULL)
+        elpis_tm_timeout(&t->w->tm, &q->server);
     next_server(t, ELPIS_EDE_NO_REACHABLE_AUTH);
 }
 

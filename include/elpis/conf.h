@@ -152,6 +152,13 @@ typedef struct {
     uint8_t      log_drops;
     char         nsid[128];
 
+    /* --- status page ---------------------------------------------- */
+    uint8_t      web;                      /* serve it at all            */
+    elpis_addr_t web_listen;
+    char         web_user[64];
+    char         web_pass[256];            /* "$pbkdf2-sha256$..." once  */
+                                           /* startup has hashed it      */
+
     /* --- control -------------------------------------------------- */
     unsigned     stats_interval;           /* seconds, 0 = off           */
 

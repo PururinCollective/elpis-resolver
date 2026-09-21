@@ -40,6 +40,14 @@ void elpis_sha256_update(elpis_sha256_t *c, const void *p, size_t n);
 void elpis_sha256_final(elpis_sha256_t *c, uint8_t *out);
 void elpis_sha256(const void *p, size_t n, uint8_t out[32]);
 
+/* HMAC-SHA-256 (RFC 2104) and PBKDF2 (RFC 8018), for the status page's
+ * password only.  Nothing in the resolver's own protocol work uses them. */
+void elpis_hmac_sha256(const uint8_t *key, size_t keylen,
+                       const uint8_t *msg, size_t msglen, uint8_t out[32]);
+void elpis_pbkdf2_sha256(const char *pass, size_t passlen,
+                         const uint8_t *salt, size_t saltlen,
+                         uint32_t iters, uint8_t *out, size_t outlen);
+
 /* ---- SHA-384/512 -------------------------------------------------- */
 typedef struct {
     uint64_t h[8];

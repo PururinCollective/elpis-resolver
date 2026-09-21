@@ -51,6 +51,10 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->prefetch           = 1;
     c->prefetch_pct       = 10;
     c->refresh_nx_confirm = 3;
+    c->web                = 0;
+    elpis_addr_parse(&c->web_listen, "127.0.0.1@8082", 8082);
+    elpis_strlcpy(c->web_user, "admin", sizeof c->web_user);
+    c->web_pass[0]        = '\0';
 
     c->prime_root         = 1;
     c->probe_roots        = 1;
@@ -230,6 +234,22 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
             return ELPIS_ERR;
         }
         c->nlisten++;
+        return ELPIS_OK;
+    }
+    if (KEY("webgui"))     return want_bool(&p, key, val, &c->web);
+    if (KEY("webgui-listen")) {
+        if (elpis_addr_parse(&c->web_listen, val, 8082) != 0) {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        return ELPIS_OK;
+    }
+    if (KEY("webgui-username")) {
+        elpis_strlcpy(c->web_user, val, sizeof c->web_user);
+        return ELPIS_OK;
+    }
+    if (KEY("webgui-password")) {
+        elpis_strlcpy(c->web_pass, val, sizeof c->web_pass);
         return ELPIS_OK;
     }
     if (KEY("listen-udp")) return want_bool(&p, key, val, &c->listen_udp);

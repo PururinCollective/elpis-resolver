@@ -12,6 +12,7 @@
 #include "elpis/rdata.h"
 #include "elpis/simd.h"
 #include "elpis/log.h"
+#include "elpis/telemetry.h"
 
 #include <errno.h>
 #include <unistd.h>
@@ -105,8 +106,10 @@ static int send_udp(elpis_worker_t *w, int fd, const uint8_t *buf, size_t len,
     ssize_t n = elpis_sock_send(fd, buf, len, to, from);
     int err;
 
-    if (n == (ssize_t)len)
+    if (n == (ssize_t)len) {
+        elpis_tm_bytes(&w->tm, 0, len);
         return ELPIS_OK;
+    }
     err = errno;
 
     elpis_stat_inc(&w->stats.dropped, 1);
@@ -132,6 +135,7 @@ static int tcp_queue(elpis_tcpconn_t *c, const uint8_t *buf, size_t len);
 void elpis_task_respond(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
+    uint64_t now_ms;
     elpis_bld_t b;
     elpis_edns_t e;
     uint16_t flags;
@@ -142,6 +146,13 @@ void elpis_task_respond(elpis_task_t *t)
 
     if (!t->has_client)
         return;
+
+    now_ms = elpis_cached_now_ms();
+    elpis_tm_observe(&w->tm,
+                     (now_ms > t->start_ms ? now_ms - t->start_ms : 0u) * 1000u,
+                     !t->from_cache);
+    elpis_tm_answer(&w->tm, &t->orig_qname, &t->client, t->rcode,
+                    t->sec == ELPIS_SEC_BOGUS);
 
     flags = (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA);
     if (t->client_rd)
@@ -440,6 +451,7 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     uint8_t kflags;
 
     elpis_stat_inc(&w->stats.queries, 1);
+    elpis_tm_bytes(&w->tm, len, 0);
 
     if (elpis_msg_parse(&m, wire, len, ELPIS_PARSE_QUERY, &drop) != ELPIS_OK) {
         elpis_drop_log((elpis_drop_t)drop, from, wire, len, "client query");
@@ -535,6 +547,15 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
 
     if (try_cache_fast(w, &m, to, kflags, conn != NULL,
                        w->txbuf, ELPIS_MAX_MSG, &outlen)) {
+        /*
+         * A cache hit never becomes a task, so this is the only place it can
+         * be counted.  Its service time is the few microseconds spent here,
+         * which rounds to nothing -- and that is the honest number: it is why
+         * the cache exists.
+         */
+        unsigned rc = outlen >= 4 ? (unsigned)(elpis_get16(w->txbuf + 2) & 0x0Fu) : 0u;
+        elpis_tm_observe(&w->tm, 0, 0);
+        elpis_tm_answer(&w->tm, &m.qname, from, rc, 0);
         if (conn != NULL)
             tcp_queue(conn, w->txbuf, outlen);
         else

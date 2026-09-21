@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang='en' data-theme='dark'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>ELPIS Resolver</title>
+<style>
+:root{
+  --desk:#252a31; --win:#2f343c; --title:#3a4049; --titlefg:#e8ebee;
+  --fg:#d5d9de; --dim:#8d949d; --line:#454b55; --accent:#2f9ee0;
+  --grid:#3a4049; --ok:#4caf50; --warn:#e0a32f; --bad:#e05252; --bar:#1b1e24;
+}
+:root[data-theme='light']{
+  --desk:#c9ccd1; --win:#f6f7f9; --title:#e4e6ea; --titlefg:#20242a;
+  --fg:#20242a; --dim:#5f666f; --line:#b6bac0; --accent:#1f7fbf;
+  --grid:#d8dbe0; --ok:#2e7d32; --warn:#a96b00; --bad:#c22; --bar:#e4e6ea;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--desk);color:var(--fg);
+  font:12px/1.45 'Segoe UI',system-ui,-apple-system,Roboto,sans-serif;
+  overflow:hidden;-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer}
+
+/* ---------- login ---------- */
+#login{position:fixed;inset:0;display:flex;align-items:center;
+  justify-content:center;flex-direction:column;gap:22px;background:var(--desk)}
+.brand{display:flex;align-items:center;gap:12px;letter-spacing:.22em;
+  font-size:19px;font-weight:600;color:var(--fg)}
+.brand svg{width:30px;height:30px}
+.card{background:var(--win);border:1px solid var(--line);border-radius:8px;
+  padding:26px 30px;min-width:330px;box-shadow:0 12px 34px rgba(0,0,0,.28)}
+.row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.row label{width:74px;text-align:right;color:var(--dim)}
+.row input{flex:1;background:var(--desk);color:var(--fg);padding:7px 9px;
+  border:1px solid var(--line);border-radius:4px;font:inherit;min-width:0}
+.row input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.card button{width:100%;margin-top:6px;padding:8px;border:0;border-radius:4px;
+  background:var(--accent);color:#fff;font-weight:600}
+.card button:hover{filter:brightness(1.1)}
+#err{color:var(--bad);min-height:16px;text-align:center;margin-top:8px}
+.hint{color:var(--dim);text-align:center;max-width:430px;line-height:1.6}
+
+/* ---------- desktop ---------- */
+#desk{display:none;height:100%;flex-direction:column}
+#top{height:30px;background:var(--bar);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:12px;padding:0 10px;flex:0 0 auto}
+#top .brand{font-size:12px;letter-spacing:.16em}
+#top .brand svg{width:16px;height:16px}
+.spacer{flex:1}
+.tbtn{background:transparent;border:1px solid var(--line);color:var(--fg);
+  padding:3px 9px;border-radius:4px}
+.tbtn:hover{border-color:var(--accent);color:var(--accent)}
+#surface{position:relative;flex:1;overflow:hidden}
+#icons{position:absolute;inset:0;padding:14px;display:flex;flex-direction:column;
+  flex-wrap:wrap;align-content:flex-start;gap:6px}
+.icon{width:86px;padding:9px 4px;text-align:center;border-radius:6px;
+  cursor:pointer;user-select:none;border:1px solid transparent}
+.icon:hover{background:rgba(127,127,127,.16);border-color:var(--line)}
+.icon svg{width:30px;height:30px;stroke:var(--accent);fill:none;stroke-width:1.6}
+.icon div{margin-top:5px;font-size:11px;color:var(--fg)}
+
+/* ---------- windows ---------- */
+.win{position:absolute;background:var(--win);border:1px solid var(--line);
+  border-radius:5px;box-shadow:0 10px 30px rgba(0,0,0,.34);display:flex;
+  flex-direction:column;min-width:270px;min-height:130px;overflow:hidden}
+.win.active{border-color:var(--accent)}
+.wt{height:26px;background:var(--title);color:var(--titlefg);display:flex;
+  align-items:center;gap:7px;padding:0 4px 0 8px;cursor:move;user-select:none;
+  flex:0 0 auto;font-size:11px;font-weight:600}
+.wt svg{width:13px;height:13px;stroke:var(--accent);fill:none;stroke-width:1.8}
+.wt .x{margin-left:auto;width:21px;height:19px;border:0;background:transparent;
+  color:var(--titlefg);border-radius:3px;line-height:1;font-size:14px}
+.wt .x:hover{background:var(--bad);color:#fff}
+.wb{padding:10px;overflow:auto;flex:1}
+.rz{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
+
+/* ---------- content ---------- */
+table{border-collapse:collapse;width:100%;font-size:11px}
+th{text-align:left;color:var(--dim);font-weight:600;padding:3px 6px;
+  border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--win)}
+td{padding:2px 6px;border-bottom:1px solid var(--line);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px}
+.kv b{color:var(--dim);font-weight:400}
+.kv span{text-align:right;font-variant-numeric:tabular-nums}
+.big{font-size:26px;font-weight:300;font-variant-numeric:tabular-nums}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(122px,1fr));gap:9px}
+.tile{border:1px solid var(--line);border-radius:5px;padding:9px}
+.tile b{display:block;color:var(--dim);font-weight:400;font-size:11px;
+  margin-bottom:2px}
+.gwrap{margin-bottom:10px}
+.ghead{display:flex;font-size:11px;color:var(--dim);margin-bottom:3px}
+canvas{width:100%;display:block;border:1px solid var(--line);background:transparent}
+.log{font:11px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;
+  word-break:break-word}
+.log div{padding:1px 4px;border-bottom:1px solid var(--line)}
+.lv-FATAL,.lv-ERROR{color:var(--bad)}
+.lv-WARN{color:var(--warn)}
+h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
+  text-transform:uppercase;letter-spacing:.06em}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px}
+#status{height:24px;background:var(--bar);border-top:1px solid var(--line);
+  display:flex;align-items:center;gap:16px;padding:0 10px;font-size:11px;
+  color:var(--dim);flex:0 0 auto}
+#status b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<div id='login'>
+  <div class='brand'>
+    <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5'>
+      <path d='M12 2 3 7v10l9 5 9-5V7z'/><path d='M12 7v10M8 9v6M16 9v6'/>
+    </svg>
+    <span>&#917;&#923;&#928;&#921;&#931;</span>
+  </div>
+  <div class='card'>
+    <form id='lf'>
+      <div class='row'><label for='u'>Login</label><input id='u' value='admin' autocomplete='username'></div>
+      <div class='row'><label for='p'>Password</label><input id='p' type='password' autocomplete='current-password'></div>
+      <button type='submit'>Login</button>
+    </form>
+    <div id='err'></div>
+  </div>
+  <div class='hint'>Read-only status for the ELPIS recursive resolver.
+    Nothing here changes how it resolves.</div>
+</div>
+
+<div id='desk'>
+  <div id='top'>
+    <div class='brand'>
+      <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5'>
+        <path d='M12 2 3 7v10l9 5 9-5V7z'/><path d='M12 7v10M8 9v6M16 9v6'/>
+      </svg><span>&#917;&#923;&#928;&#921;&#931;</span>
+    </div>
+    <span id='sub' style='color:var(--dim)'></span>
+    <span class='spacer'></span>
+    <button class='tbtn' id='theme'>Light</button>
+    <button class='tbtn' id='tile'>Tile</button>
+    <button class='tbtn' id='out'>Log out</button>
+  </div>
+  <div id='surface'><div id='icons'></div></div>
+  <div id='status'>
+    <span>CPU <b id='s-cpu'>-</b></span>
+    <span>RAM <b id='s-ram'>-</b></span>
+    <span>QPS <b id='s-qps'>-</b></span>
+    <span>Hit <b id='s-hit'>-</b></span>
+    <span>Cached <b id='s-rtt'>-</b></span>
+    <span>Resolved <b id='s-rec'>-</b></span>
+    <span class='spacer'></span>
+    <span id='s-ver'></span>
+    <span>Up <b id='s-up'>-</b></span>
+  </div>
+</div>
+
+<script>
+'use strict';
+var D = null, timer = null, zTop = 10, wins = {};
+
+/* ---------- helpers ---------- */
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function bytes(v){
+  var u = ['B','KiB','MiB','GiB','TiB'], i = 0;
+  v = Number(v) || 0;
+  while (v >= 1024 && i < u.length - 1){ v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + ' ' + u[i];
+}
+function num(v){ return (Number(v)||0).toLocaleString(); }
+function dur(s){
+  s = Number(s)||0;
+  var d = Math.floor(s/86400), h = Math.floor(s%86400/3600),
+      m = Math.floor(s%3600/60);
+  return (d ? d+'d ' : '') + h + 'h ' + m + 'm';
+}
+function last(a){ return (a && a.length) ? a[a.length-1] : 0; }
+/* Query-weighted mean over the kept history: one idle second must not make
+   the figure read zero, and a busy second must count for more than a quiet
+   one. */
+function wmean(vals, weights){
+  var s = 0, n = 0, i;
+  if (!vals) return 0;
+  for (i = 0; i < vals.length; i++){ s += vals[i]*weights[i]; n += weights[i]; }
+  return n ? s/n : 0;
+}
+function ms(us){ return us >= 1000 ? (us/1000).toFixed(1) + ' ms'
+                                   : (us/1000).toFixed(2) + ' ms'; }
+
+/* ---------- graphs (Task Manager style) ---------- */
+function graph(el, series, opts){
+  opts = opts || {};
+  var dpr = window.devicePixelRatio || 1;
+  var w = el.clientWidth, h = opts.h || 96;
+  el.width = Math.max(1, Math.floor(w*dpr));
+  el.height = Math.floor(h*dpr);
+  el.style.height = h + 'px';
+  var g = el.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+
+  var css = getComputedStyle(document.documentElement);
+  var grid = css.getPropertyValue('--grid').trim();
+  var i, j, x, y;
+
+  g.strokeStyle = grid; g.lineWidth = 1;
+  for (i = 1; i < 6; i++){
+    y = Math.round(h*i/6) + 0.5;
+    g.beginPath(); g.moveTo(0,y); g.lineTo(w,y); g.stroke();
+  }
+  for (i = 1; i < 10; i++){
+    x = Math.round(w*i/10) + 0.5;
+    g.beginPath(); g.moveTo(x,0); g.lineTo(x,h); g.stroke();
+  }
+
+  var max = opts.max || 0;
+  for (j = 0; j < series.length; j++)
+    for (i = 0; i < series[j].data.length; i++)
+      if (series[j].data[i] > max) max = series[j].data[i];
+  if (max <= 0) max = 1;
+
+  var n = opts.points || 120;
+  for (j = 0; j < series.length; j++){
+    var d = series[j].data, col = series[j].color;
+    var start = Math.max(0, d.length - n);
+    var cnt = d.length - start;
+    if (cnt < 1) continue;
+    var step = w / (n - 1);
+    g.beginPath();
+    for (i = 0; i < cnt; i++){
+      x = w - (cnt - 1 - i)*step;
+      y = h - (d[start+i]/max)*(h-2) - 1;
+      if (i === 0) g.moveTo(x,y); else g.lineTo(x,y);
+    }
+    if (series[j].fill !== false){
+      g.lineTo(w, h); g.lineTo(w - (cnt-1)*step, h); g.closePath();
+      g.fillStyle = col + '33'; g.fill();
+      g.beginPath();
+      for (i = 0; i < cnt; i++){
+        x = w - (cnt - 1 - i)*step;
+        y = h - (d[start+i]/max)*(h-2) - 1;
+        if (i === 0) g.moveTo(x,y); else g.lineTo(x,y);
+      }
+    }
+    g.strokeStyle = col; g.lineWidth = 1.4; g.stroke();
+  }
+  return max;
+}
+
+function gpanel(label, right){
+  return "<div class='gwrap'><div class='ghead'><span>" + label +
+         "</span><span class='spacer' style='flex:1'></span><span>" +
+         right + "</span></div><canvas></canvas></div>";
+}
+
+/* ---------- window manager ---------- */
+function focusWin(w){
+  var k;
+  for (k in wins) if (wins[k]) wins[k].el.classList.remove('active');
+  w.el.classList.add('active');
+  w.el.style.zIndex = ++zTop;
+}
+
+function drag(w, handle){
+  handle.addEventListener('mousedown', function(e){
+    if (e.target.tagName === 'BUTTON') return;
+    focusWin(w);
+    var sx = e.clientX, sy = e.clientY;
+    var ox = w.el.offsetLeft, oy = w.el.offsetTop;
+    var surf = $('surface');
+    function mv(ev){
+      var nx = ox + ev.clientX - sx, ny = oy + ev.clientY - sy;
+      nx = Math.max(0, Math.min(nx, surf.clientWidth - 60));
+      ny = Math.max(0, Math.min(ny, surf.clientHeight - 26));
+      w.el.style.left = nx + 'px'; w.el.style.top = ny + 'px';
+    }
+    function up(){ document.removeEventListener('mousemove', mv);
+                   document.removeEventListener('mouseup', up); }
+    document.addEventListener('mousemove', mv);
+    document.addEventListener('mouseup', up);
+    e.preventDefault();
+  });
+}
+
+function resize(w, grip){
+  grip.addEventListener('mousedown', function(e){
+    focusWin(w);
+    var sx = e.clientX, sy = e.clientY;
+    var ow = w.el.offsetWidth, oh = w.el.offsetHeight;
+    function mv(ev){
+      w.el.style.width  = Math.max(270, ow + ev.clientX - sx) + 'px';
+      w.el.style.height = Math.max(130, oh + ev.clientY - sy) + 'px';
+      if (w.def.render && D) w.def.render(w.body, D);
+    }
+    function up(){ document.removeEventListener('mousemove', mv);
+                   document.removeEventListener('mouseup', up); }
+    document.addEventListener('mousemove', mv);
+    document.addEventListener('mouseup', up);
+    e.preventDefault(); e.stopPropagation();
+  });
+}
+
+var placed = 0;
+function openWin(def){
+  if (wins[def.id]){ focusWin(wins[def.id]); return; }
+  var el = document.createElement('div');
+  el.className = 'win';
+  var off = (placed++ % 7) * 26;
+  el.style.left = (26 + off) + 'px';
+  el.style.top  = (16 + off) + 'px';
+  el.style.width  = (def.w || 460) + 'px';
+  el.style.height = (def.h || 320) + 'px';
+  el.innerHTML = "<div class='wt'>" + def.icon + "<span>" + def.title +
+                 "</span><button class='x' title='Close'>&#10005;</button></div>" +
+                 "<div class='wb'></div><div class='rz'></div>";
+  $('surface').appendChild(el);
+
+  var w = { el: el, body: el.querySelector('.wb'), def: def };
+  wins[def.id] = w;
+  el.querySelector('.x').onclick = function(){
+    el.remove(); wins[def.id] = null;
+  };
+  el.addEventListener('mousedown', function(){ focusWin(w); });
+  drag(w, el.querySelector('.wt'));
+  resize(w, el.querySelector('.rz'));
+  focusWin(w);
+  if (D) def.render(w.body, D);
+}
+
+function tile(){
+  var ks = Object.keys(wins).filter(function(k){ return wins[k]; });
+  if (!ks.length) return;
+  var surf = $('surface');
+  var cols = Math.ceil(Math.sqrt(ks.length));
+  var rows = Math.ceil(ks.length / cols);
+  var cw = Math.floor(surf.clientWidth / cols);
+  var ch = Math.floor(surf.clientHeight / rows);
+  ks.forEach(function(k, i){
+    var w = wins[k];
+    w.el.style.left = ((i % cols) * cw) + 'px';
+    w.el.style.top  = (Math.floor(i / cols) * ch) + 'px';
+    w.el.style.width  = (cw - 6) + 'px';
+    w.el.style.height = (ch - 6) + 'px';
+    if (D) w.def.render(w.body, D);
+  });
+}
+
+/* ---------- renderers ---------- */
+function rows(list, label){
+  if (!list || !list.length)
+    return "<table><tr><td style='color:var(--dim)'>nothing yet</td></tr></table>";
+  var h = "<table><tr><th>" + label + "</th><th class='n'>count</th></tr>";
+  list.forEach(function(r){
+    h += "<tr><td title='" + esc(r.k) + "'>" + esc(r.k) + "</td><td class='n'>" +
+         num(r.n) + "</td></tr>";
+  });
+  return h + "</table>";
+}
+
+var VIEWS = [
+{ id:'overview', title:'Overview', w:600, h:380,
+  icon:"<svg viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='2'/><path d='M3 9h18M9 21V9'/></svg>",
+  render: function(b, d){
+    var st = d.stats;
+    b.innerHTML =
+      "<div class='tiles'>" +
+      "<div class='tile'><b>Cache hit</b><div class='big'>" + st.hitpct + "%</div></div>" +
+      "<div class='tile'><b>Answered from cache</b><div class='big'>" +
+        ms(wmean(d.history.rtt, d.history.rttn)) + "</div></div>" +
+      "<div class='tile'><b>Resolved upstream</b><div class='big'>" +
+        ms(wmean(d.history.rec, d.history.recn)) + "</div></div>" +
+      "<div class='tile'><b>Queries/s</b><div class='big'>" + num(last(d.history.qps)) + "</div></div>" +
+      "<div class='tile'><b>SERVFAIL/s</b><div class='big'>" + num(last(d.history.servfail)) + "</div></div>" +
+      "</div><div style='height:10px'></div><div class='cols'>" +
+      "<div><h4>Answers</h4><div class='kv'>" +
+        "<b>queries</b><span>" + num(st.queries) + "</span>" +
+        "<b>cache hits</b><span>" + num(st.hits) + "</span>" +
+        "<b>served stale</b><span>" + num(st.stale) + "</span>" +
+        "<b>recursions</b><span>" + num(st.recursions) + "</span>" +
+        "<b>upstream</b><span>" + num(st.upstream) + "</span>" +
+        "<b>prefetches</b><span>" + num(st.prefetch) + "</span>" +
+      "</div></div>" +
+      "<div><h4>Trouble</h4><div class='kv'>" +
+        "<b>NXDOMAIN</b><span>" + num(st.nxdomain) + "</span>" +
+        "<b>SERVFAIL</b><span>" + num(st.servfail) + "</span>" +
+        "<b>REFUSED</b><span>" + num(st.refused) + "</span>" +
+        "<b>timeouts</b><span>" + num(st.timeouts) + "</span>" +
+        "<b>dropped</b><span>" + num(st.dropped) + "</span>" +
+        "<b>bad cookie</b><span>" + num(st.cookiebad) + "</span>" +
+      "</div></div>" +
+      "<div><h4>DNSSEC</h4><div class='kv'>" +
+        "<b>secure</b><span>" + num(st.secure) + "</span>" +
+        "<b>insecure</b><span>" + num(st.insecure) + "</span>" +
+        "<b>bogus</b><span>" + num(st.bogus) + "</span>" +
+        "<b>validating</b><span>" + (d.server.dnssec ? 'yes' : 'no') + "</span>" +
+      "</div></div>" +
+      "<div><h4>Transport</h4><div class='kv'>" +
+        "<b>TCP</b><span>" + num(st.tcp) + "</span>" +
+        "<b>truncated</b><span>" + num(st.truncated) + "</span>" +
+        "<b>cookie ok</b><span>" + num(st.cookieok) + "</span>" +
+      "</div></div></div>";
+  }},
+
+{ id:'cpu', title:'CPU', w:470, h:260,
+  icon:"<svg viewBox='0 0 24 24'><rect x='6' y='6' width='12' height='12' rx='1'/><path d='M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4'/></svg>",
+  render: function(b, d){
+    var pct = (last(d.history.cpu)/10).toFixed(1);
+    b.innerHTML = gpanel('% of one core', pct + '%') +
+      "<div class='kv' style='margin-top:6px'>" +
+      "<b>workers</b><span>" + d.server.workers + "</span>" +
+      "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
+      "<b>event loop</b><span>" + esc(d.server.loop) + "</span></div>";
+    graph(b.querySelector('canvas'),
+      [{ data: d.history.cpu, color: '#2f9ee0' }], { h: 104 });
+  }},
+
+{ id:'mem', title:'Memory', w:470, h:300,
+  icon:"<svg viewBox='0 0 24 24'><rect x='2' y='7' width='20' height='10' rx='1'/><path d='M6 17v3M10 17v3M14 17v3M18 17v3'/></svg>",
+  render: function(b, d){
+    var h = gpanel('Resident set', bytes(last(d.history.rss)));
+    h += "<div class='kv' style='margin:6px 0 10px'>" +
+      "<b>usable memory</b><span>" + bytes(d.proc.ram) + "</span>" +
+      "<b>cache budget</b><span>" + bytes(d.proc.budget) + "</span></div>";
+    h += "<table><tr><th>cache</th><th class='n'>entries</th><th class='n'>used</th>" +
+         "<th class='n'>of</th><th class='n'>hit</th></tr>";
+    d.caches.forEach(function(c){
+      h += "<tr><td>" + esc(c.name) + "</td><td class='n'>" + num(c.entries) +
+           "</td><td class='n'>" + bytes(c.bytes) + "</td><td class='n'>" +
+           bytes(c.max) + "</td><td class='n'>" + c.hit + "%</td></tr>";
+    });
+    b.innerHTML = h + "</table>";
+    graph(b.querySelector('canvas'),
+      [{ data: d.history.rss, color: '#9b59d0' }], { h: 96 });
+  }},
+
+{ id:'net', title:'Network', w:490, h:320,
+  icon:"<svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3c3 3.5 3 14 0 18M12 3c-3 3.5-3 14 0 18'/></svg>",
+  render: function(b, d){
+    var h = gpanel('Receive / send per second',
+        bytes(last(d.history.rx)) + '/s &#8595; &nbsp; ' +
+        bytes(last(d.history.tx)) + '/s &#8593;');
+    h += "<h4 style='margin-top:8px'>Listening on</h4><table>";
+    if (!d.server.listen.length)
+      h += "<tr><td style='color:var(--dim)'>(defaults)</td></tr>";
+    d.server.listen.forEach(function(a){ h += "<tr><td>" + esc(a) + "</td></tr>"; });
+    b.innerHTML = h + "</table>";
+    graph(b.querySelector('canvas'),
+      [{ data: d.history.rx, color: '#4caf50' },
+       { data: d.history.tx, color: '#2f9ee0', fill: false }], { h: 104 });
+  }},
+
+{ id:'qps', title:'Queries', w:560, h:380,
+  icon:"<svg viewBox='0 0 24 24'><path d='M3 17l5-6 4 3 5-8 4 5'/><path d='M3 21h18'/></svg>",
+  render: function(b, d){
+    var h = gpanel('Queries per second', num(last(d.history.qps)) + '/s');
+    h += gpanel('SERVFAIL and bogus per second',
+        num(last(d.history.servfail)) + ' / ' + num(last(d.history.bogus)));
+    h += gpanel('Cache hits vs upstream per second',
+        num(last(d.history.hits)) + ' / ' + num(last(d.history.upstream)));
+    b.innerHTML = h;
+    var cv = b.querySelectorAll('canvas');
+    graph(cv[0], [{ data: d.history.qps, color: '#2f9ee0' }], { h: 84 });
+    graph(cv[1], [{ data: d.history.servfail, color: '#e05252' },
+                  { data: d.history.bogus, color: '#e0a32f', fill: false }], { h: 70 });
+    graph(cv[2], [{ data: d.history.hits, color: '#4caf50' },
+                  { data: d.history.upstream, color: '#9b59d0', fill: false }], { h: 70 });
+  }},
+
+{ id:'names', title:'Top names', w:620, h:380,
+  icon:"<svg viewBox='0 0 24 24'><path d='M4 6h16M4 12h16M4 18h10'/></svg>",
+  render: function(b, d){
+    b.innerHTML = "<div class='cols'>" +
+      "<div><h4>Most queried</h4>" + rows(d.top.qname, 'name') + "</div>" +
+      "<div><h4>SERVFAIL</h4>" + rows(d.top.servfail, 'name') + "</div>" +
+      "<div><h4>Bogus (DNSSEC)</h4>" + rows(d.top.bogus, 'name') + "</div></div>" +
+      "<div style='color:var(--dim);margin-top:8px'>Successful lookups are " +
+      "sampled 1 in 16 and scaled; failures are counted individually.</div>";
+  }},
+
+{ id:'clients', title:'Top clients', w:620, h:380,
+  icon:"<svg viewBox='0 0 24 24'><circle cx='9' cy='8' r='3'/><path d='M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6'/><path d='M17 11h4M19 9v4'/></svg>",
+  render: function(b, d){
+    b.innerHTML = "<div class='cols'>" +
+      "<div><h4>Busiest</h4>" + rows(d.top.client, 'client') + "</div>" +
+      "<div><h4>Getting SERVFAIL</h4>" + rows(d.top.clientfail, 'client') + "</div>" +
+      "<div><h4>Asking for bogus</h4>" + rows(d.top.clientbogus, 'client') + "</div>" +
+      "<div><h4>Upstream not answering</h4>" + rows(d.top.timeout, 'server') + "</div>" +
+      "</div>";
+  }},
+
+{ id:'log', title:'Log', w:640, h:330,
+  icon:"<svg viewBox='0 0 24 24'><path d='M5 3h10l4 4v14H5z'/><path d='M15 3v4h4M8 13h8M8 17h5'/></svg>",
+  render: function(b, d){
+    var h = "<div class='log'>";
+    if (!d.log.length) h += "<div style='color:var(--dim)'>nothing logged yet</div>";
+    for (var i = d.log.length - 1; i >= 0; i--){
+      var p = d.log[i].split('\t');
+      h += "<div class='lv-" + esc(p[0]) + "'>[" + esc(p[0]) + "] " +
+           esc(p.slice(1).join(' ')) + "</div>";
+    }
+    b.innerHTML = h + "</div>";
+  }},
+
+{ id:'about', title:'About', w:400, h:230,
+  icon:"<svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='9'/><path d='M12 11v6M12 8h.01'/></svg>",
+  render: function(b, d){
+    b.innerHTML = "<div class='kv'>" +
+      "<b>version</b><span>" + esc(d.server.version) + "</span>" +
+      "<b>uptime</b><span>" + dur(d.server.uptime) + "</span>" +
+      "<b>workers</b><span>" + d.server.workers + "</span>" +
+      "<b>SIMD</b><span>" + esc(d.server.simd) + "</span>" +
+      "<b>event loop</b><span>" + esc(d.server.loop) + "</span>" +
+      "<b>DNSSEC</b><span>" + (d.server.dnssec ? 'validating' : 'off') + "</span>" +
+      "</div><div style='color:var(--dim);margin-top:10px'>" +
+      "This page is read-only. It has no endpoint that changes anything.</div>";
+  }}
+];
+
+/* ---------- data ---------- */
+function paint(){
+  var k;
+  for (k in wins) if (wins[k]) wins[k].def.render(wins[k].body, D);
+  $('s-cpu').textContent = (last(D.history.cpu)/10).toFixed(0) + '%';
+  $('s-ram').textContent = bytes(last(D.history.rss));
+  $('s-qps').textContent = num(last(D.history.qps));
+  $('s-hit').textContent = D.stats.hitpct + '%';
+  $('s-rtt').textContent = ms(wmean(D.history.rtt, D.history.rttn));
+  $('s-rec').textContent = ms(wmean(D.history.rec, D.history.recn));
+  $('s-up').textContent  = dur(D.server.uptime);
+  $('s-ver').textContent = 'elpis ' + D.server.version;
+  $('sub').textContent   = D.server.listen.length ? D.server.listen[0] : '';
+}
+
+function poll(){
+  fetch('/api/status', { credentials:'same-origin' })
+    .then(function(r){
+      if (r.status === 401){ showLogin(); throw new Error('auth'); }
+      return r.json();
+    })
+    .then(function(j){ D = j; paint(); })
+    .catch(function(){});
+}
+
+function showDesk(){
+  $('login').style.display = 'none';
+  $('desk').style.display = 'flex';
+  if (!Object.keys(wins).length){
+    openWin(VIEWS[0]); openWin(VIEWS[4]);
+  }
+  poll();
+  if (timer) clearInterval(timer);
+  timer = setInterval(poll, 1000);
+}
+
+function showLogin(){
+  if (timer){ clearInterval(timer); timer = null; }
+  $('desk').style.display = 'none';
+  $('login').style.display = 'flex';
+  $('p').value = '';
+  setTimeout(function(){ $('p').focus(); }, 30);
+}
+
+/* ---------- wiring ---------- */
+$('icons').innerHTML = VIEWS.map(function(v, i){
+  return "<div class='icon' data-i='" + i + "'>" + v.icon +
+         "<div>" + v.title + "</div></div>";
+}).join('');
+$('icons').addEventListener('dblclick', function(e){
+  var t = e.target.closest('.icon');
+  if (t) openWin(VIEWS[+t.dataset.i]);
+});
+$('icons').addEventListener('click', function(e){
+  var t = e.target.closest('.icon');
+  if (t && e.detail === 1) openWin(VIEWS[+t.dataset.i]);
+});
+
+$('lf').addEventListener('submit', function(e){
+  e.preventDefault();
+  $('err').textContent = '';
+  var body = 'user=' + encodeURIComponent($('u').value) +
+             '&pass=' + encodeURIComponent($('p').value);
+  fetch('/api/login', { method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body })
+    .then(function(r){
+      if (r.ok) showDesk();
+      else $('err').textContent = 'Wrong user name or password.';
+    })
+    .catch(function(){ $('err').textContent = 'Cannot reach the resolver.'; });
+});
+
+$('out').onclick = function(){
+  fetch('/api/logout', { method:'POST', credentials:'same-origin' })
+    .then(showLogin).catch(showLogin);
+};
+$('tile').onclick = tile;
+$('theme').onclick = function(){
+  var r = document.documentElement;
+  var light = r.getAttribute('data-theme') === 'light';
+  r.setAttribute('data-theme', light ? 'dark' : 'light');
+  this.textContent = light ? 'Light' : 'Dark';
+  try { localStorage.setItem('elpis-theme', light ? 'dark' : 'light'); } catch(_){}
+  if (D) paint();
+};
+try {
+  var saved = localStorage.getItem('elpis-theme');
+  if (saved){
+    document.documentElement.setAttribute('data-theme', saved);
+    $('theme').textContent = saved === 'light' ? 'Dark' : 'Light';
+  }
+} catch(_){}
+
+window.addEventListener('resize', function(){ if (D) paint(); });
+
+fetch('/api/session', { credentials:'same-origin' })
+  .then(function(r){ return r.json(); })
+  .then(function(j){ if (j.ok) showDesk(); else showLogin(); })
+  .catch(showLogin);
+</script>
+</body>
+</html>
