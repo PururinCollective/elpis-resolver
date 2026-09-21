@@ -280,6 +280,24 @@ static int rrlist_add_t(elpis_task_t *t, elpis_section_t sec,
 }
 
 /*
+ * The same provenance stamp accept_rr() puts on an answer record, for records
+ * added from the authority section.  Without it the validator cannot place
+ * the record in a zone, and a record it cannot place is one it declines to
+ * judge -- which for the SOA of a negative answer meant a denial with its
+ * proof stripped was filed as merely unsigned rather than as an attack.
+ */
+static int rrlist_add_stamped(elpis_task_t *t, elpis_section_t sec,
+                              const elpis_name_t *n, uint16_t type,
+                              uint16_t klass, uint32_t ttl,
+                              const uint8_t *rd, uint16_t rdlen)
+{
+    t->ans.zone_labels =
+        (t->have_deleg && elpis_name_covers(&t->deleg.zone, n))
+            ? t->deleg.zone.labels : 0;
+    return elpis_rrlist_add(&t->ans, sec, n, type, klass, ttl, rd, rdlen);
+}
+
+/*
  * Reconstruct the authority section of a cached negative answer from the
  * packed (owner, SOA rdata) blob.
  */
@@ -826,6 +844,50 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
     }
 }
 
+/*
+ * Carry the denial itself into the task, with the signatures over it.
+ *
+ * Without this the validator saw a negative answer as one unsigned SOA and
+ * nothing else: no NSEC, no NSEC3, and none of the authority-section RRSIGs.
+ * An unsigned set makes tally() decide the answer is insecure, and it decides
+ * that before check_denial() is ever called -- so the denial proof code ran
+ * for nothing, no negative answer was ever validated, and none carried AD.
+ *
+ * That is the hole DNSSEC exists to close: a signed zone saying "that name
+ * does not exist" was taken on trust, so anyone able to put a response on the
+ * wire could deny any name in any signed zone and be believed.
+ */
+static void copy_denial_records(elpis_task_t *t, const elpis_msg_t *m)
+{
+    elpis_rr_iter_t it;
+    elpis_rr_t rr;
+    int drop = 0;
+
+    elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
+    while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+        uint8_t rd[ELPIS_MAX_MSG];
+        size_t rdlen;
+
+        if (rr.klass != t->qclass)
+            continue;
+        if (rr.type != ELPIS_T_NSEC && rr.type != ELPIS_T_NSEC3 &&
+            rr.type != ELPIS_T_RRSIG)
+            continue;
+        /*
+         * Uncompressed and in canonical form: these are about to be verified,
+         * and a name left compressed points into a message that will not be
+         * there by then.
+         */
+        if (elpis_rdata_canonical(rr.type, m->wire, m->len, rr.rdoff,
+                                  rr.rdlen, rd, sizeof rd, &rdlen, 1) != ELPIS_OK)
+            continue;
+        if (rdlen > 0xFFFFu)
+            continue;
+        rrlist_add_stamped(t, ELPIS_SEC_AUTHORITY, &rr.name, rr.type,
+                           rr.klass, rr.ttl, rd, (uint16_t)rdlen);
+    }
+}
+
 /* Find the SOA that proves a negative answer and cache the marker. */
 static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
 {
@@ -878,9 +940,11 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
         elpis_rrset_buf_add(b, rdp, rdl);
         elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
 
-        /* Carry the SOA into the reply so the client sees the proof. */
-        rrlist_add_t(t, ELPIS_SEC_AUTHORITY, &rr.name, ELPIS_T_SOA,
-                     rr.klass, ttl, rd, (uint16_t)rdlen);
+        /* Carry the SOA into the reply so the client sees the proof, and the
+         * denial records with it so the validator can check that proof. */
+        rrlist_add_stamped(t, ELPIS_SEC_AUTHORITY, &rr.name, ELPIS_T_SOA,
+                           rr.klass, ttl, rd, (uint16_t)rdlen);
+        copy_denial_records(t, m);
         return;
     }
 }

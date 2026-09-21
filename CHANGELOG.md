@@ -10,6 +10,30 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.1 — 2026-09-22
+
+### Fixed
+
+**Negative answers were never validated.** A signed zone saying "that name does
+not exist" was taken on trust: no NXDOMAIN and no NODATA ever carried AD, and
+the NSEC and NSEC3 proof code, though present and correct, was never reached.
+
+The resolver copied only the SOA out of a negative answer and discarded the
+NSEC, the NSEC3 and every authority-section signature. An unsigned SOA made the
+verdict *insecure*, and that verdict was returned before the denial check ran.
+The SOA also carried no record of which zone it came from, so a denial with its
+proof stripped was filed as merely unsigned rather than as an attack.
+
+That is the hole DNSSEC exists to close. Anyone able to put a response on the
+wire could deny any name in any signed zone and be believed — a way to make a
+signed name disappear without forging a signature.
+
+Denial records now reach the validator with their signatures and with the same
+zone provenance answer records get. Negative answers in signed zones validate
+and carry AD, matching what other validating resolvers return, and a denial
+whose proof has been removed is refused with `EDE 10 (RRSIGs Missing)` instead
+of served.
+
 ## 1.1.0 — 2026-09-22
 
 The first release with a status page, and the one where DNSSEC validation
