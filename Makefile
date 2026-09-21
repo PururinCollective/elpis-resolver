@@ -81,9 +81,12 @@ $(PROG): $(OBJ)
 
 # Fully static, relocatable binary.  Note: we never call getaddrinfo()/NSS, so
 # a static glibc link carries no dlopen() surprises.
+# OPT is passed through rather than hardcoded, so a tuned static build works:
+#   make static OPT="-O3 -fno-strict-aliasing -march=znver3 -mtune=znver3"
+STATIC_OPT ?= $(OPT)
 static:
 	$(MAKE) clean
-	$(MAKE) LDFLAGS="-static" OPT="-O3 -fno-strict-aliasing" $(PROG)
+	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(PROG)
 	-strip $(PROG)
 
 debug:
