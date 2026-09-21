@@ -238,12 +238,17 @@
 #define ELPIS_ALG_PRIVATEOID         254
 
 /*
- * ML-DSA (FIPS 204) DNSSEC codepoints are still TBD at IANA; see
- * draft-ietf-dnsop-dnssec-mldsa.  These are the defaults Elpis uses and they
- * are overridable from elpis.conf so a deployment can follow the assignment
- * once it lands:  mldsa44-algorithm: <n>
+ * ML-DSA (FIPS 204) for DNSSEC: draft-westerbaan-dnssec-mldsa section 5 gives
+ * ML-DSA-44 the algorithm number 18, mnemonic MLDSA44, and that is what the
+ * deployed test zones sign with.  IANA has not made the assignment final, and
+ * the draft registers no number for the 65 and 87 parameter sets at all, so
+ * all three stay overridable from elpis.conf:  mldsa44-algorithm: <n>
+ *
+ * The 65 and 87 values below are placeholders in unassigned space.  They are
+ * not interoperable with anything and exist only so a deployment that has
+ * agreed on numbers locally can say so.
  */
-#define ELPIS_ALG_MLDSA44_DEFAULT    24
+#define ELPIS_ALG_MLDSA44_DEFAULT    18
 #define ELPIS_ALG_MLDSA65_DEFAULT    25
 #define ELPIS_ALG_MLDSA87_DEFAULT    26
 

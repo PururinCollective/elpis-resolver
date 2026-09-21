@@ -639,7 +639,7 @@ enum {
     VS_TALLY
 };
 
-#define VAL_MAX_SIGNERS 8
+#define VAL_MAX_SIGNERS 12
 #define VAL_MAX_SETS    256
 
 #define SS_UNKNOWN  0
@@ -650,6 +650,14 @@ enum {
 typedef struct {
     int               stage;
     elpis_name_t      signers[VAL_MAX_SIGNERS];
+    /*
+     * A signers[] entry is normally a zone that signed something here.  An
+     * entry may additionally -- or instead -- be a zone we walk the chain to
+     * purely to find out whether it is signed at all, because some RRset it
+     * serves arrived with no signature.  That is the only way to tell an
+     * unsigned zone from one whose signatures were stripped in flight.
+     */
+    uint8_t           probe[VAL_MAX_SIGNERS];
     unsigned          nsigners, si;
 
     elpis_name_t      anchor;     /* trust anchor covering signers[si]   */
@@ -972,6 +980,109 @@ static void collect_signers(elpis_task_t *t, val_t *v)
     }
 }
 
+/*
+ * Which zone served the RRset led by record `i`?
+ *
+ * For an RRset that arrived with no signature at all, this is the question
+ * that separates "the zone is not signed" from "someone stripped the
+ * signatures".  Comparing against the other RRsets in the same message cannot
+ * answer it: a CNAME crossing a zone cut legitimately puts a signed set and an
+ * unsigned set side by side, while a wholly stripped answer has nothing signed
+ * left to compare against.
+ *
+ * The answer has to be exact.  Guessing from the deepest cached delegation is
+ * not good enough -- the cache holds the cuts we happen to have walked, so a
+ * name in an unsigned zone we have not visited reads as belonging to its
+ * signed grandparent, and a legitimate answer gets called forged.  So the
+ * resolver stamps each record with the zone that produced it, and a record
+ * that carries no stamp is one we decline to judge.
+ */
+static int serving_zone(elpis_task_t *t, unsigned i, elpis_name_t *out)
+{
+    elpis_name_t owner;
+    unsigned labels = t->ans.rr[i].zone_labels;
+
+    if (labels == 0)
+        return 0;
+    if (elpis_trr_get_name(&t->ans, i, &owner) != ELPIS_OK)
+        return 0;
+    if (labels > owner.labels)
+        return 0;
+    return elpis_name_suffix(&owner, labels, out) == 0;
+}
+
+/* Does this leading record have no signature, in a place that needs one? */
+static int set_is_unsigned(elpis_task_t *t, unsigned i)
+{
+    elpis_name_t sn;
+    return set_must_be_signed(t, &t->ans.rr[i]) && set_leader(t, i) &&
+           !set_signer(t, i, &sn);
+}
+
+/*
+ * Add the zones behind unsigned RRsets to the list of chains to walk.
+ *
+ * These are not signers -- nothing here signed anything -- but each one still
+ * needs the descent, because whether it turns out to be signed is precisely
+ * what decides between an insecure answer and a forged one.
+ */
+static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
+{
+    unsigned i, j;
+
+    for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
+        elpis_name_t zone;
+        int dup = 0;
+
+        if (!set_is_unsigned(t, i))
+            continue;
+        if (!serving_zone(t, i, &zone))
+            continue;
+
+        for (j = 0; j < v->nsigners; j++)
+            if (elpis_name_eq(&v->signers[j], &zone)) {
+                v->probe[j] = 1;    /* also signs here: walk it once, do both */
+                dup = 1;
+                break;
+            }
+        if (dup || v->nsigners >= VAL_MAX_SIGNERS)
+            continue;
+        v->probe[v->nsigners]     = 1;
+        v->signers[v->nsigners++] = zone;
+    }
+}
+
+/*
+ * Settle the unsigned RRsets served by the zone we just walked to.
+ *
+ * Reaching that zone with validated keys means it is signed, so an RRset of
+ * its own that carries no signature is an answer somebody tampered with.
+ * Falling short of it means the chain went insecure on the way down, which is
+ * the ordinary case of a CNAME pointing into an unsigned zone.
+ */
+static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached)
+{
+    unsigned i;
+
+    for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
+        elpis_name_t zone;
+
+        if (v->status[i] != SS_UNKNOWN || !set_is_unsigned(t, i))
+            continue;
+        if (!serving_zone(t, i, &zone) ||
+            !elpis_name_eq(&zone, &v->signers[v->si]))
+            continue;
+
+        if (reached && t->w->ctx->conf.harden_dnssec_stripped) {
+            v->status[i] = SS_BOGUS;
+            if (t->ede < 0)
+                t->ede = ELPIS_EDE_RRSIGS_MISSING;
+        } else {
+            v->status[i] = SS_INSECURE;
+        }
+    }
+}
+
 /* Validate every RRset signed by the zone we currently hold keys for. */
 static void verify_for_current(elpis_task_t *t, val_t *v)
 {
@@ -1030,35 +1141,39 @@ static void mark_insecure_for_current(elpis_task_t *t, val_t *v)
 static void tally(elpis_task_t *t, val_t *v)
 {
     unsigned i;
-    unsigned nsecure = 0, ninsecure = 0, nbogus = 0, nunsigned = 0;
-    const elpis_conf_t *c = &t->w->ctx->conf;
+    unsigned nsecure = 0, ninsecure = 0, nbogus = 0;
 
+    /*
+     * Every RRset has been settled on its own merits by now, including the
+     * ones that arrived without a signature: each was traced back to the zone
+     * that serves it and judged against whether that zone is signed.  Counting
+     * unsigned sets against the signed ones in the same message -- as this
+     * used to -- cannot work in either direction.  A CNAME leaving a signed
+     * zone for an unsigned one legitimately puts both side by side, and calling
+     * that forged took out a large slice of the CDN-hosted internet; while an
+     * answer with every signature stripped has nothing signed left to be
+     * suspicious of, and calling that merely unsigned let the attack through.
+     */
     for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
         if (!set_must_be_signed(t, &t->ans.rr[i]) || !set_leader(t, i))
             continue;
         switch (v->status[i]) {
-        case SS_SECURE:   nsecure++;   break;
-        case SS_INSECURE: ninsecure++; break;
-        case SS_BOGUS:    nbogus++;    break;
-        default:          nunsigned++; break;   /* no signature at all */
+        case SS_SECURE: nsecure++;   break;
+        case SS_BOGUS:  nbogus++;    break;
+        default:
+            /*
+             * Either proven insecure, or a set whose serving zone we could not
+             * place at all -- and an unplaceable zone is one we cannot claim is
+             * signed, so it counts the same way.
+             */
+            ninsecure++;
+            break;
         }
     }
 
     if (nbogus > 0) {
-        val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_DNSSEC_BOGUS);
-        return;
-    }
-
-    /*
-     * An unsigned RRset alongside signed ones is the stripped-signature case.
-     * On its own it just means the zone is not signed.
-     */
-    if (nunsigned > 0) {
-        if (nsecure > 0 && c->harden_dnssec_stripped) {
-            val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_RRSIGS_MISSING);
-            return;
-        }
-        val_done(t, ELPIS_SEC_INSECURE, -1);
+        val_done(t, ELPIS_SEC_BOGUS,
+                 t->ede >= 0 ? t->ede : ELPIS_EDE_DNSSEC_BOGUS);
         return;
     }
     if (ninsecure > 0 || nsecure == 0) {
@@ -1093,6 +1208,7 @@ static void val_run(elpis_task_t *t)
             const elpis_name_t *anchor;
 
             collect_signers(t, v);
+            collect_unsigned_zones(t, v);
             if (v->nsigners == 0) {
                 /*
                  * Nothing is signed.  Decide between "the zone is unsigned"
@@ -1209,10 +1325,14 @@ static void val_run(elpis_task_t *t)
         }
 
         case VS_VERIFY: {
-            if (elpis_name_eq(&v->cur, &v->signers[v->si]))
+            int reached = elpis_name_eq(&v->cur, &v->signers[v->si]);
+
+            if (reached)
                 verify_for_current(t, v);
             else
                 mark_insecure_for_current(t, v);
+            if (v->probe[v->si])
+                classify_unsigned_for_current(t, v, reached);
 
             v->si++;
             if (v->si < v->nsigners) {
@@ -1220,6 +1340,8 @@ static void val_run(elpis_task_t *t)
                     elpis_ta_closest(w->ctx->ta, &v->signers[v->si]);
                 if (anchor == NULL) {
                     mark_insecure_for_current(t, v);
+                    if (v->probe[v->si])
+                        classify_unsigned_for_current(t, v, 0);
                     v->stage = VS_VERIFY;   /* falls through to the next one */
                     continue;
                 }

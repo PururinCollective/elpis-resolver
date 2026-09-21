@@ -698,6 +698,16 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
         return ELPIS_EFORMAT;
     if (elpis_rrlist_has(&t->ans, &rr->name, rr->type, rd, (uint16_t)rdlen))
         return ELPIS_OK;
+    /*
+     * Record which zone this came from while we still know: the delegation we
+     * queried, when it covers the owner.  A CNAME chase restarts this task
+     * against a new zone each hop, so by the time the validator looks at the
+     * assembled answer this is the only place the provenance survives -- and
+     * without it an unsigned RRset cannot be told apart from a stripped one.
+     */
+    t->ans.zone_labels =
+        (t->have_deleg && elpis_name_covers(&t->deleg.zone, &rr->name))
+            ? t->deleg.zone.labels : 0;
     return elpis_rrlist_add(&t->ans, sec, &rr->name, rr->type, rr->klass,
                             elpis_clamp_ttl(&t->w->ctx->conf, rr->ttl),
                             rd, (uint16_t)rdlen);

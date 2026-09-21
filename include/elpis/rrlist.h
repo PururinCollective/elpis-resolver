@@ -22,6 +22,13 @@ typedef struct {
     uint16_t rdlen;
     uint8_t  namelen;
     uint8_t  section;     /* elpis_section_t */
+    /*
+     * How many labels of this record's owner name make up the zone that
+     * served it, or 0 when that is not known.  An answer assembled across a
+     * CNAME chain spans several zones, and an RRset that arrives with no
+     * signature can only be judged against the one that actually produced it.
+     */
+    uint8_t  zone_labels;
 } elpis_trr_t;
 
 typedef struct {
@@ -29,6 +36,9 @@ typedef struct {
     unsigned     n, cap;
     uint8_t     *pool;
     uint32_t     plen, pcap;
+    /* Stamped onto the next record added, then cleared: set it immediately
+     * before each add, or the record is marked as unknown provenance. */
+    uint8_t      zone_labels;
 } elpis_rrlist_t;
 
 void elpis_rrlist_init(elpis_rrlist_t *l);

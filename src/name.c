@@ -355,6 +355,17 @@ int elpis_name_suffix(const elpis_name_t *n, unsigned keep, elpis_name_t *out)
     return 0;
 }
 
+int elpis_name_covers(const elpis_name_t *zone, const elpis_name_t *name)
+{
+    elpis_name_t tail;
+
+    if (zone->labels > name->labels)
+        return 0;
+    if (elpis_name_suffix(name, zone->labels, &tail) != 0)
+        return 0;
+    return elpis_name_eq(&tail, zone);
+}
+
 int elpis_name_is_subdomain(const elpis_name_t *sub, const elpis_name_t *parent)
 {
     size_t off;

@@ -771,6 +771,95 @@ static void test_dnssec(void)
               "the owner name is part of the digest");
     }
 
+    section("ML-DSA-44 in DNSSEC");
+    {
+        /*
+         * The draft's worked example, end to end: key tag, DS digest and a
+         * real RRSIG over a real RRset.  Verifying the signature here exercises
+         * the canonical form of the RRset as well as the ML-DSA verifier, so a
+         * mistake in either one shows up as a failure rather than as a zone
+         * that quietly will not validate.
+         */
+        static uint8_t key[4 + ELPIS_MLDSA44_PK_BYTES];
+        static uint8_t sig[18 + 16 + ELPIS_MLDSA44_SIG_BYTES];
+        uint8_t ds[4 + 32], mx[2 + ELPIS_MAX_NAME];
+        elpis_name_t owner, signer, exch;
+        elpis_conf_t c;
+        const uint8_t *rdp;
+        uint16_t rdl;
+        size_t keylen, siglen, dslen, mxlen, n;
+        int ede = -1;
+
+        elpis_conf_defaults(&c);
+        elpis_name_from_text(&owner,  "example.com.");
+        elpis_name_from_text(&signer, "example.com.");
+        elpis_name_from_text(&exch,   "mail.example.com.");
+
+        /* DNSKEY rdata: flags 257, protocol 3, algorithm 18, then the key. */
+        elpis_put16(key, 257);
+        key[2] = 3;
+        key[3] = (uint8_t)c.alg_mldsa44;
+        keylen = 4 + unhex(TV_MLDSA44_DNSSEC_KEY, key + 4, sizeof key - 4);
+        CHECK(keylen == 4 + ELPIS_MLDSA44_PK_BYTES,
+              "DNSKEY rdata is %u octets (got %zu)",
+              (unsigned)(4 + ELPIS_MLDSA44_PK_BYTES), keylen);
+        CHECK(c.alg_mldsa44 == 18,
+              "ML-DSA-44 defaults to algorithm 18 (got %u)",
+              (unsigned)c.alg_mldsa44);
+        CHECK(elpis_dnskey_tag(key, keylen) == TV_MLDSA44_DNSSEC_TAG,
+              "key tag is %u (got %u)", TV_MLDSA44_DNSSEC_TAG,
+              elpis_dnskey_tag(key, keylen));
+
+        /* DS rdata: key tag, algorithm, SHA-256, digest. */
+        elpis_put16(ds, TV_MLDSA44_DNSSEC_TAG);
+        ds[2] = (uint8_t)c.alg_mldsa44;
+        ds[3] = ELPIS_DS_SHA256;
+        dslen = 4 + unhex(TV_MLDSA44_DNSSEC_DS_SHA256, ds + 4, sizeof ds - 4);
+        CHECK(elpis_ds_matches(&owner, key, (uint16_t)keylen, ds, dslen) == 1,
+              "the draft's DS matches the draft's DNSKEY");
+
+        /* RRSIG rdata: the fixed fields, the signer name, then the signature. */
+        elpis_put16(sig, ELPIS_T_MX);
+        sig[2] = (uint8_t)c.alg_mldsa44;
+        sig[3] = 2;                       /* labels in example.com. */
+        elpis_put32(sig + 4,  3600);      /* original TTL           */
+        elpis_put32(sig + 8,  1440021600);/* expiration             */
+        elpis_put32(sig + 12, 1438207200);/* inception              */
+        elpis_put16(sig + 16, TV_MLDSA44_DNSSEC_TAG);
+        memcpy(sig + 18, signer.d, signer.len);
+        n = 18 + signer.len;
+        siglen = n + unhex(TV_MLDSA44_DNSSEC_SIG, sig + n, sizeof sig - n);
+        CHECK(siglen == n + ELPIS_MLDSA44_SIG_BYTES,
+              "RRSIG rdata carries a %u-octet signature",
+              (unsigned)ELPIS_MLDSA44_SIG_BYTES);
+
+        /* MX rdata: preference 10, exchange mail.example.com. */
+        elpis_put16(mx, 10);
+        memcpy(mx + 2, exch.d, exch.len);
+        mxlen = 2 + exch.len;
+
+        rdp = mx;
+        rdl = (uint16_t)mxlen;
+        CHECK(elpis_rrsig_verify(&c, &owner, ELPIS_T_MX, ELPIS_CLASS_IN,
+                                 &rdp, &rdl, 1, sig, siglen, key, keylen,
+                                 1439000000, &ede) == ELPIS_OK,
+              "the draft's ML-DSA-44 RRSIG verifies over the MX RRset");
+
+        /* One flipped octet of rdata must break it. */
+        mx[0] ^= 1;
+        CHECK(elpis_rrsig_verify(&c, &owner, ELPIS_T_MX, ELPIS_CLASS_IN,
+                                 &rdp, &rdl, 1, sig, siglen, key, keylen,
+                                 1439000000, &ede) != ELPIS_OK,
+              "altering the MX rdata breaks the signature");
+        mx[0] ^= 1;
+
+        /* And so must a signature outside its validity window. */
+        CHECK(elpis_rrsig_verify(&c, &owner, ELPIS_T_MX, ELPIS_CLASS_IN,
+                                 &rdp, &rdl, 1, sig, siglen, key, keylen,
+                                 1440021601, &ede) != ELPIS_OK,
+              "an expired ML-DSA signature is refused");
+    }
+
     section("algorithm policy");
     {
         elpis_conf_t c;

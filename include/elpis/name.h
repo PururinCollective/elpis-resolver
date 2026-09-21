@@ -53,6 +53,9 @@ ELPIS_INLINE int elpis_name_is_root(const elpis_name_t *n) { return n->len == 1;
 int elpis_name_parent(const elpis_name_t *n, elpis_name_t *out);
 /* Keep only the rightmost `keep` labels (keep == 0 yields the root). */
 int elpis_name_suffix(const elpis_name_t *n, unsigned keep, elpis_name_t *out);
+
+/* 1 when `zone` is equal to, or an ancestor of, `name`. */
+int elpis_name_covers(const elpis_name_t *zone, const elpis_name_t *name);
 /* 1 when `sub` is equal to or below `parent`. */
 int elpis_name_is_subdomain(const elpis_name_t *sub, const elpis_name_t *parent);
 /* Number of trailing labels `a` and `b` share. */

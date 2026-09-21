@@ -19,6 +19,7 @@ void elpis_rrlist_clear(elpis_rrlist_t *l)
 {
     l->n = 0;
     l->plen = 0;
+    l->zone_labels = 0;
 }
 
 void elpis_rrlist_free(elpis_rrlist_t *l)
@@ -85,6 +86,15 @@ int elpis_rrlist_add(elpis_rrlist_t *l, elpis_section_t sec,
     e->klass   = klass;
     e->ttl     = ttl;
     e->section = (uint8_t)sec;
+    /*
+     * The stamp applies to exactly one record and then clears itself.  Only
+     * the caller that took the answer off the wire knows which zone served it,
+     * so every other path -- cache replay, DNS64 synthesis, local data -- must
+     * leave the record marked unknown rather than silently inherit whatever
+     * the previous hop set.  Consuming it here makes that the default.
+     */
+    e->zone_labels = l->zone_labels;
+    l->zone_labels = 0;
     l->n++;
     return ELPIS_OK;
 }
