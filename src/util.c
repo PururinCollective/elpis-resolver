@@ -835,7 +835,14 @@ int elpis_prefix_match(const elpis_prefix_t *p, const elpis_addr_t *a)
 /* ------------------------------------------------------------------ */
 
 static char g_exe_dir[1024];
+static char g_exe_path[1024];
 static int  g_exe_dir_done;
+
+const char *elpis_exe_path(void)
+{
+    (void)elpis_exe_dir();            /* fills both */
+    return g_exe_path[0] ? g_exe_path : "elpis";
+}
 
 const char *elpis_exe_dir(void)
 {
@@ -847,6 +854,7 @@ const char *elpis_exe_dir(void)
         return g_exe_dir;
     g_exe_dir_done = 1;
     g_exe_dir[0] = '\0';
+    g_exe_path[0] = '\0';
 
 #if defined(__linux__)
     n = readlink("/proc/self/exe", path, sizeof path - 1);
@@ -872,6 +880,7 @@ const char *elpis_exe_dir(void)
     if (n <= 0)
         return g_exe_dir;
     path[n] = '\0';
+    elpis_strlcpy(g_exe_path, path, sizeof g_exe_path);
     slash = strrchr(path, '/');
     if (slash == NULL)
         return g_exe_dir;

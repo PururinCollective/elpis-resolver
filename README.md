@@ -37,6 +37,22 @@ Entries are refreshed in the background before they expire, so a popular name
 never goes cold and stale data is only ever served while a refresh is actually
 in flight.
 
+**Measures the roots before it needs them.** At startup it asks all twenty-six
+root addresses — thirteen names on IPv4 and IPv6 — the same small question a
+few times and seeds the round-trip estimates from the answers, so the first
+real recursion already goes to the closest server instead of a default guess.
+On this host that cut cold TLD lookups from 11.9s to 6.7s. A host whose IPv6
+is configured but not working is detected the same way, and outbound IPv6 is
+disabled for the run rather than burning a timeout on every other query.
+
+```
+root probe: 26 of 26 addresses answered (IPv4 13/13, IPv6 13/13), 3 rounds
+   1. e.root-servers.net.    192.203.230.10:53          11 ms  (3/3)
+   2. m.root-servers.net.    [2001:dc3::35]:53          11 ms  (3/3)
+   ...
+  26. c.root-servers.net.    [2001:500:2::c]:53        209 ms  (3/3)
+```
+
 **Never walks back to the root.** Every TLD delegation the resolver learns is
 pinned and exempt from eviction, so once `.com` is known a lookup for anything
 under it goes straight to a `.com` server. With `root-zone-transfer: yes` it
@@ -133,6 +149,28 @@ stub-zone: corp.example 10.1.0.53               # iterative, treated as authorit
 
 Behind AdGuard Home, point its upstream at `127.0.0.1:5353` and leave Elpis on
 loopback.
+
+### Privileged ports
+
+If a `listen` line asks for a port below the system's privileged threshold
+(1024, or whatever `net.ipv4.ip_unprivileged_port_start` says), Elpis checks
+for the right to bind it *before* opening any socket and, if it is missing,
+says so with the port named and the ways to fix it:
+
+```
+FATAL cannot listen on 0.0.0.0:53: port 53 is privileged on this system
+      (ports below 1024 need root or CAP_NET_BIND_SERVICE), and this
+      process is uid 1000 with neither
+FATAL   pick one:
+FATAL     - grant the capability once: sudo setcap cap_net_bind_service=+ep /usr/local/sbin/elpis
+FATAL     - start as root and set 'user:' in elpis.conf so it drops privilege after binding
+FATAL     - listen on an unprivileged port instead, e.g. 'listen: 127.0.0.1@5353'
+FATAL     - or lower the range system-wide: sysctl net.ipv4.ip_unprivileged_port_start=53
+```
+
+Sockets are bound before privileges are dropped, so `user:` works with either
+of the first two. Running as root with no `user:` configured is allowed but
+warned about once.
 
 ## Operating
 

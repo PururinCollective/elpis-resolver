@@ -306,6 +306,28 @@ static void *axfr_main(void *arg)
     return NULL;
 }
 
+/*
+ * Root latency ranking.  It runs alongside the workers rather than before
+ * them: the resolver is perfectly usable with default estimates, and blocking
+ * startup for several seconds to measure is the wrong trade.
+ */
+static void *probe_main(void *arg)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)arg;
+
+    elpis_probe_roots(ctx);
+
+    while (ctx->conf.probe_interval > 0 && !ctx->shutdown) {
+        uint32_t left = ctx->conf.probe_interval;
+        while (left-- > 0 && !ctx->shutdown)
+            sleep(1);
+        if (ctx->shutdown)
+            break;
+        elpis_probe_roots(ctx);
+    }
+    return NULL;
+}
+
 /* ================================================================== */
 /* Signals                                                             */
 /* ================================================================== */
@@ -404,6 +426,97 @@ static int lookup_id(const char *file, const char *name, unsigned *id,
     return found ? ELPIS_OK : ELPIS_ERR;
 }
 
+/*
+ * Can this process bind the ports the config asks for?
+ *
+ * Failing at bind() time produces "Permission denied" from inside a worker,
+ * which tells the operator nothing about what to do next.  Checking here lets
+ * us name the port, say exactly why it is refused, and list the three ways to
+ * fix it.
+ */
+
+/* The privileged range is a sysctl on Linux; 1024 is only the default. */
+static unsigned privileged_port_limit(void)
+{
+#if defined(__linux__)
+    FILE *fp = fopen("/proc/sys/net/ipv4/ip_unprivileged_port_start", "r");
+    if (fp != NULL) {
+        unsigned v = 0;
+        int got = fscanf(fp, "%u", &v);
+        fclose(fp);
+        if (got == 1 && v <= 65535)
+            return v;
+    }
+#endif
+    return 1024;
+}
+
+/* CAP_NET_BIND_SERVICE (capability 10) in the effective set. */
+static int have_bind_capability(void)
+{
+#if defined(__linux__)
+    FILE *fp = fopen("/proc/self/status", "r");
+    char line[256];
+    int found = 0;
+
+    if (fp == NULL)
+        return 0;
+    while (fgets(line, sizeof line, fp) != NULL) {
+        unsigned long long eff;
+        if (strncmp(line, "CapEff:", 7) != 0)
+            continue;
+        if (sscanf(line + 7, "%llx", &eff) == 1)
+            found = (eff & (1ULL << 10)) != 0;
+        break;
+    }
+    fclose(fp);
+    return found;
+#else
+    return 0;
+#endif
+}
+
+static int check_bind_privilege(const elpis_conf_t *c)
+{
+    unsigned limit = privileged_port_limit();
+    unsigned i;
+    uint16_t lowest = 0;
+    char buf[80];
+    int idx = -1;
+
+    for (i = 0; i < c->nlisten; i++) {
+        uint16_t port = elpis_addr_port(&c->listen[i]);
+        if (port < limit && (idx < 0 || port < lowest)) {
+            lowest = port;
+            idx = (int)i;
+        }
+    }
+    if (idx < 0)
+        return ELPIS_OK;               /* nothing privileged is requested */
+
+    if (geteuid() == 0 || have_bind_capability())
+        return ELPIS_OK;
+
+    elpis_fatal("cannot listen on %s: port %u is privileged on this system "
+                "(ports below %u need root or CAP_NET_BIND_SERVICE), and this "
+                "process is uid %ld with neither",
+                elpis_addr_str(&c->listen[idx], buf, sizeof buf),
+                (unsigned)lowest, limit, (long)geteuid());
+    elpis_fatal("  pick one:");
+    elpis_fatal("    - grant the capability once: "
+                "sudo setcap cap_net_bind_service=+ep %s", elpis_exe_path());
+    elpis_fatal("    - start as root and set 'user:' in elpis.conf so it "
+                "drops privilege after binding");
+    elpis_fatal("    - listen on an unprivileged port instead, e.g. "
+                "'listen: 127.0.0.1@5353', and point AdGuard or Pi-hole at it");
+#if defined(__linux__)
+    if (limit == 1024)
+        elpis_fatal("    - or lower the range system-wide: "
+                    "sysctl net.ipv4.ip_unprivileged_port_start=53");
+#endif
+    return ELPIS_ERR;
+}
+
 static int drop_privilege(const elpis_conf_t *c)
 {
     unsigned uid = 0, gid = 0;
@@ -498,8 +611,8 @@ int main(int argc, char **argv)
     const char *conf_path = NULL;
     int foreground = 0, testonly = 0, verbose = 0;
     unsigned nthreads, i;
-    pthread_t axfr_th;
-    int axfr_started = 0;
+    pthread_t axfr_th, probe_th;
+    int axfr_started = 0, probe_started = 0;
 
     for (i = 1; i < (unsigned)argc; i++) {
         const char *a = argv[i];
@@ -552,6 +665,17 @@ int main(int argc, char **argv)
     }
     g_nworkers = nthreads;
 
+    if (check_bind_privilege(&ctx.conf) != ELPIS_OK)
+        return 1;
+
+    /*
+     * Running as root with nowhere to drop to is a choice, not a mistake, but
+     * it is worth saying out loud once.
+     */
+    if (geteuid() == 0 && ctx.conf.user[0] == '\0')
+        elpis_warn("running as root and no 'user:' is configured; "
+                   "the resolver will keep full privileges");
+
     /* Sockets are bound before privileges are dropped. */
     for (i = 0; i < nthreads; i++) {
         if (elpis_worker_init(&g_workers[i].w, &ctx, i) != ELPIS_OK) {
@@ -579,6 +703,12 @@ int main(int argc, char **argv)
             axfr_started = 1;
         else
             elpis_warn("could not start the root zone transfer thread");
+    }
+    if (ctx.conf.probe_roots) {
+        if (pthread_create(&probe_th, NULL, probe_main, &ctx) == 0)
+            probe_started = 1;
+        else
+            elpis_warn("could not start the root probe thread");
     }
 
     for (i = 1; i < nthreads; i++) {
@@ -646,6 +776,8 @@ int main(int argc, char **argv)
             pthread_join(g_workers[i].th, NULL);
     if (axfr_started)
         pthread_join(axfr_th, NULL);
+    if (probe_started)
+        pthread_join(probe_th, NULL);
 
     elpis_stats_report(&ctx);
 

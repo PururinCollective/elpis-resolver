@@ -414,7 +414,14 @@ static void mark_tried(elpis_task_t *t, const elpis_addr_t *a)
  * Choose the cheapest untried address in the current delegation.  "Cheapest"
  * is the smoothed RTT plus a timeout penalty, so a server that just failed is
  * skipped without being forgotten.
+ *
+ * Servers we have never measured get a little random jitter added.  Without
+ * it every unmeasured delegation resolves to the same nameserver -- whichever
+ * the parent happened to list first -- so one slow server in a popular zone
+ * would slow down every cold lookup in it, and the load would land on one
+ * machine instead of spreading.
  */
+#define UNKNOWN_JITTER_MS 64u
 static int choose_server(elpis_task_t *t, elpis_addr_t *out)
 {
     elpis_worker_t *w = t->w;
@@ -440,6 +447,8 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
                 continue;
             elpis_infra_get(w->ctx->infra, &a, &inf);
             cost = elpis_infra_cost(&inf);
+            if (inf.queries == 0)
+                cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (!c->prefer_ipv6)
                 cost += 20;      /* mild bias: v4 paths are still more reliable */
             if (cost < best_cost) { best_cost = cost; best = a; found = 1; }
@@ -453,6 +462,8 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
                 continue;
             elpis_infra_get(w->ctx->infra, &a, &inf);
             cost = elpis_infra_cost(&inf);
+            if (inf.queries == 0)
+                cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (c->prefer_ipv6)
                 cost += 20;
             if (cost < best_cost) { best_cost = cost; best = a; found = 1; }

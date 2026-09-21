@@ -296,6 +296,7 @@ int  elpis_rrl_decide(elpis_worker_t *w, const elpis_addr_t *client,
 int  elpis_prime_start(elpis_worker_t *w);
 int  elpis_tld_warm_start(elpis_worker_t *w);
 int  elpis_axfr_root(elpis_ctx_t *ctx);
+int  elpis_probe_roots(elpis_ctx_t *ctx);
 
 /* ---- helpers shared between the modules ---- */
 uint32_t elpis_clamp_ttl(const elpis_conf_t *c, uint32_t ttl);

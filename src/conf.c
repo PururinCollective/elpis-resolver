@@ -44,6 +44,9 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->prefetch_pct       = 10;
 
     c->prime_root         = 1;
+    c->probe_roots        = 1;
+    c->probe_rounds       = 3;
+    c->probe_interval     = 3600;
     c->warm_tlds          = 1;
     c->root_zone_transfer = 0;
     c->tld_refresh        = 86400;
@@ -285,6 +288,9 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         return ELPIS_OK;
     }
     if (KEY("prime-root"))      return want_bool(&p, key, val, &c->prime_root);
+    if (KEY("probe-roots"))     return want_bool(&p, key, val, &c->probe_roots);
+    if (KEY("probe-rounds"))    return want_u32(&p, key, val, &c->probe_rounds);
+    if (KEY("probe-interval"))  return want_dur(&p, key, val, &c->probe_interval);
     if (KEY("warm-tlds") || KEY("prefetch-tld"))
                                 return want_bool(&p, key, val, &c->warm_tlds);
     if (KEY("root-zone-transfer")) return want_bool(&p, key, val, &c->root_zone_transfer);

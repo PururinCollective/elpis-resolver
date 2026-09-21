@@ -62,6 +62,9 @@ typedef struct {
     /* --- roots and TLDs ------------------------------------------- */
     char         root_hints[512];
     uint8_t      prime_root;
+    uint8_t      probe_roots;       /* latency-rank the roots at startup */
+    unsigned     probe_rounds;
+    uint32_t     probe_interval;    /* seconds; 0 = once at startup only */
     uint8_t      warm_tlds;
     uint8_t      root_zone_transfer;
     elpis_addr_t root_xfr_addr[4];

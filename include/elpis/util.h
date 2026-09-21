@@ -90,6 +90,8 @@ int elpis_prefix_match(const elpis_prefix_t *p, const elpis_addr_t *a);
 /* ---------------- misc -------------------------------------------- */
 /* Directory holding the running executable; "" when undiscoverable. */
 const char *elpis_exe_dir(void);
+/* Full path to the running executable, or "elpis" when undiscoverable. */
+const char *elpis_exe_path(void);
 /* Highest-quality randomness the platform offers. */
 void elpis_random_bytes(void *buf, size_t n);
 uint32_t elpis_random_u32(void);
