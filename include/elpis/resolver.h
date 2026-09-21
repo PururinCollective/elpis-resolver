@@ -129,6 +129,12 @@ struct elpis_task {
     elpis_deleg_t   deleg;
     unsigned        have_deleg : 1;
     unsigned        forwarding : 1;   /* talking to a forwarder, RD set   */
+    /*
+     * The delegation came from a forward-zone or stub-zone rather than from
+     * the network, so it belongs to the configuration and must never be
+     * written back into the delegation cache.
+     */
+    unsigned        deleg_from_route : 1;
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;

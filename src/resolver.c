@@ -571,6 +571,20 @@ static void nsaddr_done(elpis_task_t *child, void *ctxp)
     if (p->nchild)
         p->nchild--;
     if (p->nchild == 0 && p->state == ELPIS_TS_NSADDR) {
+        /*
+         * Now that the nameservers have addresses, the delegation is worth
+         * keeping.  A referral only gets cached when the parent volunteers
+         * glue, and a parent can only do that for names inside its own zone --
+         * so every zone whose nameservers live elsewhere (anything on a
+         * third-party DNS provider in a different TLD) was rebuilt from
+         * scratch on every single lookup: the referral again, then an A and a
+         * AAAA for each nameserver, before the real question could be asked.
+         * Caching it here is what makes the second name under such a zone as
+         * cheap as the second name under a glued one.
+         */
+        if (!p->deleg_from_route && elpis_deleg_addr_count(&p->deleg) > 0)
+            elpis_dcache_put(p->w->ctx->dcache, &p->deleg, p->deleg.ttl,
+                             p->deleg.zone.labels == 1);
         p->state = ELPIS_TS_SEND;
         elpis_task_step(p);
     }
@@ -1325,6 +1339,7 @@ void elpis_task_step(elpis_task_t *t)
                 const elpis_zoneroute_t *r = route_lookup(c, &start);
                 if (r != NULL && route_to_deleg(r, &t->deleg)) {
                     t->forwarding = r->is_stub ? 0u : 1u;
+                    t->deleg_from_route = 1;
                     t->have_deleg = 1;
                     t->ntried = 0;
                     t->qmin_active = 0;   /* never minimise to a forwarder */
@@ -1338,6 +1353,7 @@ void elpis_task_step(elpis_task_t *t)
                                      elpis_cached_now_s(), &t->deleg) != ELPIS_OK) {
                 t->deleg = w->ctx->root_hints;
             }
+            t->deleg_from_route = 0;
             t->have_deleg = 1;
             t->ntried = 0;
             /*

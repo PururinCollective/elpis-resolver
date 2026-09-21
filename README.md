@@ -67,11 +67,37 @@ root probe: 26 of 26 addresses answered (IPv4 13/13, IPv6 13/13), 3 rounds
   26. c.root-servers.net.    [2001:500:2::c]:53        209 ms  (3/3)
 ```
 
-**Never walks back to the root.** Every TLD delegation the resolver learns is
-pinned and exempt from eviction, so once `.com` is known a lookup for anything
-under it goes straight to a `.com` server. With `root-zone-transfer: yes` it
-pulls the whole root zone by AXFR at startup and has all ~1,438 of them before
-the first query arrives.
+**Never walks back to the root.** Every level of the delegation chain is
+cached, so a lookup restarts as deep as anything already known allows:
+
+```
+.                 root hints, pinned
+com.              pinned, exempt from eviction
+example.com.      cached for the delegation's TTL
+sub.example.com.  cached the same way, when it is a zone cut of its own
+```
+
+Only the root and the TLDs are pinned — there are about 1,438 of the latter,
+which is a bounded set worth holding forever, and `root-zone-transfer: yes`
+fetches all of them by AXFR at startup so they are there before the first
+query. Everything below expires on its own TTL, which is the point: a domain's
+nameservers change, and a delegation pinned past its TTL is just a stale answer
+that never heals.
+
+A delegation is kept as soon as its nameservers have addresses, whether the
+parent supplied glue or not. That distinction matters more than it sounds. A
+parent can only glue names inside its own zone, so every domain whose
+nameservers live somewhere else — anything on a third-party DNS provider in a
+different TLD — arrives glueless. Keeping only the glued ones meant those
+domains were rebuilt from scratch on every lookup: back to the TLD for the
+referral, then an A and a AAAA for each nameserver, before the real question
+could be asked. Now the second name under such a domain starts where the first
+one finished:
+
+```
+before   datatracker.ietf.org -> start at zone org.        (12 addrs)
+after    datatracker.ietf.org -> start at zone ietf.org.   (5 addrs)
+```
 
 **Follows the awkward parts.** CNAME chains that cross zones (each link signed
 by a different zone, each validated against its own chain of trust), DNAME
