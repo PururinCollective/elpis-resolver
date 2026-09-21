@@ -97,8 +97,15 @@ licence: elpis1.AQEAAAPparF1_GySqXwURXhhbXBsZSBJU1AsIEFTNjQ1MDA.5oQtWOS5ft8...
 ```
 
 `--edition` is one of `commercial`, `community`, `homelab`, `evaluation`.
-`--perpetual` issues one that never expires; `--days` with a negative number
-back-dates the expiry, which is how you see what a lapsed customer sees.
+
+**`--perpetual` is how you issue one that never expires** — not a very large
+`--days`. It records no expiry at all, so the probe and the status page say
+`never` rather than naming a date a century out that somebody then has to
+reason about.
+
+`--days` with a negative number back-dates the expiry, which is how you see
+what a customer whose licence has lapsed sees. Beyond a thousand years either
+way it is refused, pointing at `--perpetual`.
 
 ### Checking one
 
@@ -126,10 +133,16 @@ typical licence near 140 characters:
 | 0 | 1 | format version |
 | 1 | 1 | edition |
 | 2 | 4 | serial |
-| 6 | 4 | issued, unix seconds |
-| 10 | 4 | expires, unix seconds, 0 = perpetual |
-| 14 | 1 | length of org |
-| 15 | N | org, UTF-8 |
+| 6 | 8 | issued, signed unix seconds |
+| 14 | 8 | expires, signed unix seconds, 0 = perpetual |
+| 22 | 1 | length of org |
+| 23 | N | org, UTF-8 |
+
+The dates are 64-bit rather than the obvious 32. Unix seconds in 32 bits run
+out in 2106, which sounds comfortably distant until someone issues a
+hundred-year licence: `--days 36500` lands past the wrap and comes back out as
+1990. A date field that can silently travel backwards is a worse thing to ship
+than eleven extra characters of token.
 
 What is signed is `elpis-licence-v1` followed by those bytes. The context
 prefix is domain separation: a signature made for a licence cannot be replayed

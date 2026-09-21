@@ -33,6 +33,10 @@ void elpis_tm_log_add(const char *level, const char *msg)
     (void)level; (void)msg;
 }
 
+/* Far enough out that nobody means it literally, near enough that the
+ * arithmetic below cannot overflow whatever time_t is. */
+#define MAX_DAYS 365000L
+
 static int die(const char *msg)
 {
     fprintf(stderr, "elpis-licence: %s\n", msg);
@@ -118,7 +122,7 @@ static int cmd_issue(int argc, char **argv)
 
     memset(&l, 0, sizeof l);
     l.edition = ELPIS_ED_COMMERCIAL;
-    l.issued  = (uint32_t)time(NULL);
+    l.issued  = (int64_t)time(NULL);
 
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
@@ -142,9 +146,17 @@ static int cmd_issue(int argc, char **argv)
         return die("org is too long");
 
     /* --days is a plain offset, so a negative one back-dates the expiry and
-     * mints something already lapsed -- useful for testing what a customer
-     * will see.  Perpetual is its own flag rather than a magic zero. */
-    l.expires = perpetual ? 0u : (uint32_t)((int64_t)l.issued + (int64_t)days * 86400);
+     * mints something already lapsed -- useful for seeing what a customer
+     * whose licence ran out will see.  Perpetual is its own flag rather than
+     * a magic zero, and the range check below names it, because reaching for
+     * a very large --days is what people do when they want one. */
+    if (days > MAX_DAYS || days < -MAX_DAYS)
+        return die("--days is beyond a thousand years either way; "
+                   "use --perpetual for a licence that never expires");
+    l.expires = perpetual ? 0 : l.issued + (int64_t)days * 86400;
+    if (!perpetual && l.expires <= 0)
+        return die("--days puts the expiry before 1970; "
+                   "use --perpetual for a licence that never expires");
 
     if ((rc = read_key(keyfile, sk)) != 0)
         return rc;
@@ -194,7 +206,7 @@ static int cmd_verify(int argc, char **argv)
     if (!elpis_licence_enabled())
         return die("this build has no issuer key, so it cannot check anything");
 
-    elpis_licence_parse(token, (uint32_t)time(NULL), &l);
+    elpis_licence_parse(token, (int64_t)time(NULL), &l);
     elpis_licence_date(l.expires, when, sizeof when);
     elpis_licence_date(l.issued, issued, sizeof issued);
 
@@ -215,8 +227,11 @@ int main(int argc, char **argv)
         fprintf(stderr,
             "usage:\n"
             "  elpis-licence keygen <file>\n"
-            "  elpis-licence issue --key <file> --org <name> "
-            "[--edition commercial] [--days 365 | --perpetual] [--serial N]\n"
+            "  elpis-licence issue --key <file> --org <name>\n"
+            "        [--edition commercial|community|homelab|evaluation]\n"
+            "        [--days 365]     how long it lasts; negative back-dates it\n"
+            "        [--perpetual]    never expires -- use this rather than a huge --days\n"
+            "        [--serial N]\n"
             "  elpis-licence verify <token>\n");
         return 2;
     }

@@ -1325,7 +1325,7 @@ static void test_licence(void)
         uint8_t sig[64], buf[ELPIS_LICENCE_MAX_TOKEN + 32];
         char token[512], b1[256], b2[128];
         size_t plen, ctxlen = strlen(ELPIS_LICENCE_CONTEXT);
-        uint32_t now = 1800000000u;
+        int64_t now = 1800000000;
 
         CHECK(elpis_licence_enabled() == 1, "the test build carries an issuer key");
 
@@ -1333,8 +1333,8 @@ static void test_licence(void)
         memset(&l, 0, sizeof l);
         l.edition = ELPIS_ED_COMMERCIAL;
         l.serial  = 1001;
-        l.issued  = now - 86400u;
-        l.expires = now + 86400u;
+        l.issued  = now - 86400;
+        l.expires = now + 86400;
         elpis_strlcpy(l.org, "Example ISP, AS64500", sizeof l.org);
 
         plen = elpis_licence_payload(&l, payload, sizeof payload);
@@ -1359,7 +1359,7 @@ static void test_licence(void)
         CHECK(got.expired == 0, "an in-date licence is not expired");
 
         /* Expiry is reported, never enforced. */
-        CHECK(elpis_licence_parse(token, now + 200000u, &got) == ELPIS_OK &&
+        CHECK(elpis_licence_parse(token, now + 200000, &got) == ELPIS_OK &&
               got.valid && got.expired,
               "an expired licence still verifies, and says it expired");
 
@@ -1380,6 +1380,61 @@ static void test_licence(void)
             snprintf(bad, sizeof bad, "%s.%s.%s", ELPIS_LICENCE_MAGIC, b1, b2);
             CHECK(elpis_licence_parse(bad, now, &got) != ELPIS_OK && !got.valid,
                   "a licence signed by anyone else is refused");
+        }
+
+        {   /* 36500 days out is past 2106 and used to wrap to 1990. */
+            elpis_licence_t far;
+            uint8_t fp[ELPIS_LICENCE_MAX_TOKEN];
+            char t2[512], f1[256], f2[128];
+            size_t flen;
+            memset(&far, 0, sizeof far);
+            far.edition = ELPIS_ED_COMMERCIAL;
+            far.serial  = 2;
+            far.issued  = now;
+            far.expires = now + 36500LL * 86400LL;
+            elpis_strlcpy(far.org, "Century Ltd", sizeof far.org);
+            flen = elpis_licence_payload(&far, fp, sizeof fp);
+            memcpy(buf, ELPIS_LICENCE_CONTEXT, ctxlen);
+            memcpy(buf + ctxlen, fp, flen);
+            elpis_ed25519_sign(sk, buf, ctxlen + flen, sig);
+            elpis_b64url_encode(fp, flen, f1, sizeof f1);
+            elpis_b64url_encode(sig, 64, f2, sizeof f2);
+            snprintf(t2, sizeof t2, "%s.%s.%s", ELPIS_LICENCE_MAGIC, f1, f2);
+            CHECK(elpis_licence_parse(t2, now, &got) == ELPIS_OK && got.valid,
+                  "a hundred-year licence verifies");
+            CHECK(got.expires == far.expires && !got.expired,
+                  "and its expiry does not wrap past 2106");
+            CHECK(strlen(t2) < 255,
+                  "a 64-bit-dated licence still fits one character-string");
+        }
+
+        {   /* Perpetual stays perpetual through the round trip. */
+            elpis_licence_t p;
+            uint8_t pp[ELPIS_LICENCE_MAX_TOKEN];
+            char t3[512], g1[256], g2[128];
+            size_t glen;
+            memset(&p, 0, sizeof p);
+            p.edition = ELPIS_ED_COMMERCIAL;
+            p.issued  = now;
+            p.expires = 0;
+            elpis_strlcpy(p.org, "Forever Ltd", sizeof p.org);
+            glen = elpis_licence_payload(&p, pp, sizeof pp);
+            memcpy(buf, ELPIS_LICENCE_CONTEXT, ctxlen);
+            memcpy(buf + ctxlen, pp, glen);
+            elpis_ed25519_sign(sk, buf, ctxlen + glen, sig);
+            elpis_b64url_encode(pp, glen, g1, sizeof g1);
+            elpis_b64url_encode(sig, 64, g2, sizeof g2);
+            snprintf(t3, sizeof t3, "%s.%s.%s", ELPIS_LICENCE_MAGIC, g1, g2);
+            CHECK(elpis_licence_parse(t3, now, &got) == ELPIS_OK && got.valid,
+                  "a perpetual licence verifies");
+            CHECK(got.expires == 0 && !got.expired,
+                  "a perpetual licence never expires");
+            {
+                char when[32];
+                elpis_licence_date(got.expires, when, sizeof when);
+                CHECK(strcmp(when, "never") == 0,
+                      "and prints as never, not as 1970");
+            }
         }
 
         CHECK(elpis_licence_parse("not-a-token", now, &got) != ELPIS_OK &&

@@ -848,7 +848,7 @@ static void check_licence(elpis_ctx_t *ctx)
     if (c->licence[0] == '\0')
         return;
 
-    elpis_licence_parse(c->licence, (uint32_t)time(NULL), &ctx->licence);
+    elpis_licence_parse(c->licence, (int64_t)time(NULL), &ctx->licence);
     elpis_licence_date(ctx->licence.expires, expires, sizeof expires);
 
     if (!ctx->licence.valid) {

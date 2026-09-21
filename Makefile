@@ -116,6 +116,17 @@ src/gitrev.h: FORCE
 
 src/util.o: src/gitrev.h
 
+# Changing LICENCE_ISSUER changes a -D, and make does not watch flags: without
+# this, `make LICENCE_ISSUER=...` over an existing build leaves the old key
+# compiled in and silently rejects every licence.  The stamp holds the value,
+# so it is rewritten exactly when the value changes, and licence.o rebuilds.
+src/licence_issuer.stamp: FORCE
+	@printf '%s\n' '$(LICENCE_ISSUER)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv -f $@.tmp $@
+	@rm -f $@.tmp
+
+src/licence.o: src/licence_issuer.stamp
+
 # ---- licence tool ----------------------------------------------------------
 # Not built by `all` and not installed: it is the only thing here that signs,
 # and it is for whoever issues licences, not for whoever runs a resolver.  It
@@ -126,7 +137,7 @@ LICENCE_SRC  := tools/licence.c src/licence.c src/util.c src/log.c $(CRYPTO_SRC)
 
 licence-tool: $(LICENCE_BIN)
 
-$(LICENCE_BIN): $(LICENCE_SRC) src/gitrev.h | $(BINDIR)
+$(LICENCE_BIN): $(LICENCE_SRC) src/gitrev.h src/licence_issuer.stamp | $(BINDIR)
 	$(CC) $(STD) $(POSIX) $(WARN) $(DEFS) -DELPIS_ED25519_SIGN=1 \
 	    $(CFLAGS) -Iinclude -Isrc -pthread -o $@ $(LICENCE_SRC) \
 	    $(ALL_LDFLAGS) $(LIBS)
@@ -221,7 +232,7 @@ uninstall:
 clean:
 	rm -f $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o \
 	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence
-	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h
+	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h src/licence_issuer.stamp
 	@rmdir $(BINDIR) 2>/dev/null || true
 
 # clean keeps bin/elpis.conf because it is yours by then; this drops it too.

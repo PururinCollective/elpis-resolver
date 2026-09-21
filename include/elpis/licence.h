@@ -56,8 +56,15 @@ typedef struct {
     uint8_t         expired;      /* reported, never enforced -- see below */
     elpis_edition_t edition;
     uint32_t        serial;
-    uint32_t        issued;       /* unix seconds */
-    uint32_t        expires;      /* unix seconds; 0 means perpetual       */
+    /*
+     * Unix seconds, 64-bit on the wire as well as here.  32 bits would have
+     * been enough until 2106 and no further, which sounds distant until you
+     * issue a hundred-year licence: 36500 days past today overflows it and
+     * comes back out as 1990.  A date field that can silently travel
+     * backwards is worse than a wide one.
+     */
+    int64_t         issued;
+    int64_t         expires;      /* 0 means perpetual */
     char            org[ELPIS_LICENCE_MAX_ORG + 1];
     char            why[96];      /* why it did not verify, for the log    */
 } elpis_licence_t;
@@ -74,14 +81,14 @@ int elpis_licence_enabled(void);
  * licence invalid -- a resolver that stops resolving because a date passed is
  * a worse outcome than anything this is protecting against.
  */
-int elpis_licence_parse(const char *token, uint32_t now, elpis_licence_t *out);
+int elpis_licence_parse(const char *token, int64_t now, elpis_licence_t *out);
 
 /* The signed bytes, shared by the verifier and the issuing tool so there is
  * one definition of what a licence is. */
 size_t elpis_licence_payload(const elpis_licence_t *l, uint8_t *out, size_t cap);
 
 /* "2027-01-01", or "never" when t is 0. */
-void elpis_licence_date(uint32_t t, char *out, size_t outsz);
+void elpis_licence_date(int64_t t, char *out, size_t outsz);
 
 size_t elpis_b64url_encode(const uint8_t *in, size_t n, char *out, size_t cap);
 int    elpis_b64url_decode(const char *in, size_t n, uint8_t *out, size_t cap,

@@ -11,10 +11,10 @@
  *   0   1  format version
  *   1   1  edition
  *   2   4  serial          big-endian
- *   6   4  issued          unix seconds
- *   10  4  expires         unix seconds, 0 = perpetual
- *   14  1  length of org
- *   15  N  org, UTF-8
+ *   6   8  issued          unix seconds, signed
+ *   14  8  expires         unix seconds, 0 = perpetual
+ *   22  1  length of org
+ *   23  N  org, UTF-8
  *
  * What is signed is ELPIS_LICENCE_CONTEXT followed by those bytes.  The
  * context string is what stops a signature made here being meaningful
@@ -27,8 +27,8 @@
 #include <string.h>
 #include <time.h>
 
-#define LICENCE_FORMAT 1
-#define PAYLOAD_FIXED  15
+#define LICENCE_FORMAT 2
+#define PAYLOAD_FIXED  23
 
 static const char b64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -150,7 +150,7 @@ int elpis_edition_from_name(const char *s, elpis_edition_t *out)
     return ELPIS_ERR;
 }
 
-void elpis_licence_date(uint32_t t, char *out, size_t outsz)
+void elpis_licence_date(int64_t t, char *out, size_t outsz)
 {
     time_t tt = (time_t)t;
     struct tm tm;
@@ -187,6 +187,23 @@ static uint32_t get_u32(const uint8_t *p)
            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
 }
 
+static void put_i64(uint8_t *p, int64_t v)
+{
+    uint64_t u = (uint64_t)v;
+    int i;
+    for (i = 0; i < 8; i++)
+        p[i] = (uint8_t)(u >> (56 - i * 8));
+}
+
+static int64_t get_i64(const uint8_t *p)
+{
+    uint64_t u = 0;
+    int i;
+    for (i = 0; i < 8; i++)
+        u = (u << 8) | (uint64_t)p[i];
+    return (int64_t)u;
+}
+
 size_t elpis_licence_payload(const elpis_licence_t *l, uint8_t *out, size_t cap)
 {
     size_t orglen = strlen(l->org);
@@ -196,10 +213,10 @@ size_t elpis_licence_payload(const elpis_licence_t *l, uint8_t *out, size_t cap)
     out[0] = LICENCE_FORMAT;
     out[1] = (uint8_t)l->edition;
     put_u32(out + 2,  l->serial);
-    put_u32(out + 6,  l->issued);
-    put_u32(out + 10, l->expires);
-    out[14] = (uint8_t)orglen;
-    memcpy(out + 15, l->org, orglen);
+    put_i64(out + 6,  l->issued);
+    put_i64(out + 14, l->expires);
+    out[22] = (uint8_t)orglen;
+    memcpy(out + 23, l->org, orglen);
     return PAYLOAD_FIXED + orglen;
 }
 
@@ -225,7 +242,7 @@ static int fail(elpis_licence_t *out, const char *why)
     return ELPIS_ERR;
 }
 
-int elpis_licence_parse(const char *token, uint32_t now, elpis_licence_t *out)
+int elpis_licence_parse(const char *token, int64_t now, elpis_licence_t *out)
 {
     const char *p1, *p2;
     uint8_t payload[ELPIS_LICENCE_MAX_TOKEN];
@@ -258,10 +275,15 @@ int elpis_licence_parse(const char *token, uint32_t now, elpis_licence_t *out)
 
     if (plen < PAYLOAD_FIXED)
         return fail(out, "payload is truncated");
-    if (payload[0] != LICENCE_FORMAT)
-        return fail(out, "unknown licence format, this build is older than the licence");
+    if (payload[0] != LICENCE_FORMAT) {
+        char msg[96];
+        snprintf(msg, sizeof msg,
+                 "licence is format %u, this build speaks format %u",
+                 (unsigned)payload[0], (unsigned)LICENCE_FORMAT);
+        return fail(out, msg);
+    }
 
-    orglen = payload[14];
+    orglen = payload[22];
     if (plen != PAYLOAD_FIXED + orglen)
         return fail(out, "payload length does not match its org field");
 
@@ -273,9 +295,9 @@ int elpis_licence_parse(const char *token, uint32_t now, elpis_licence_t *out)
      */
     out->edition = (elpis_edition_t)payload[1];
     out->serial  = get_u32(payload + 2);
-    out->issued  = get_u32(payload + 6);
-    out->expires = get_u32(payload + 10);
-    memcpy(out->org, payload + 15, orglen);
+    out->issued  = get_i64(payload + 6);
+    out->expires = get_i64(payload + 14);
+    memcpy(out->org, payload + 23, orglen);
     out->org[orglen] = '\0';
 
     if (issuer_key(pk) != ELPIS_OK)
