@@ -158,6 +158,17 @@ int elpis_rcache_del(elpis_cache_t *c, const elpis_name_t *name,
 void elpis_rrset_buf_init(elpis_rrset_buf_t *b, const elpis_name_t *name,
                           uint16_t type, uint16_t klass, uint32_t ttl);
 int  elpis_rrset_buf_add(elpis_rrset_buf_t *b, const uint8_t *rd, uint16_t len);
+
+/*
+ * Copy only the part of the buffer that holds anything.
+ *
+ * The struct carries a 20 KiB data area so that the largest RRset that can
+ * exist fits, and plain assignment copies all of it however little is in use.
+ * A DS is about a hundred bytes; copying twenty thousand to move it was the
+ * single largest consumer of CPU in the validator, which does this for every
+ * zone of every chain walk.
+ */
+void elpis_rrset_buf_copy(elpis_rrset_buf_t *dst, const elpis_rrset_buf_t *src);
 int  elpis_rrset_buf_add_sig(elpis_rrset_buf_t *b, const uint8_t *rd, uint16_t len);
 ELPIS_INLINE const uint8_t *elpis_rrset_rd(const elpis_rrset_buf_t *b, unsigned i)
 {

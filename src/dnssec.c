@@ -670,15 +670,60 @@ typedef struct {
     unsigned          steps;
 
     uint8_t           status[VAL_MAX_SETS];   /* per leading record index */
+    /*
+     * Last, and by far the largest: everything above is reset when a pooled
+     * state is reused, and this one is written before it is read.
+     */
     elpis_rrset_buf_t keys;
 } val_t;
+
+/*
+ * Validator state is recycled per thread.
+ *
+ * val_t is about 26 KiB, nearly all of it the DNSKEY buffer, and it was
+ * calloc'd and freed for every answer validated -- so every validation began
+ * by zeroing 26 KiB it was about to overwrite.  Reusing it costs a pointer
+ * swap and a memset of the four kilobytes that genuinely must start empty.
+ */
+#define VAL_POOL_MAX 32
+
+static ELPIS_TLS val_t   *g_val_pool;
+static ELPIS_TLS unsigned g_val_pooled;
+
+static val_t *val_alloc(void)
+{
+    val_t *v = g_val_pool;
+
+    if (v != NULL) {
+        g_val_pool = *(val_t **)v;      /* the free list threads through it */
+        g_val_pooled--;
+        memset(v, 0, offsetof(val_t, keys));
+        v->keys.count = v->keys.sigcount = 0;
+        v->keys.used  = 0;
+        return v;
+    }
+    return (val_t *)elpis_calloc(1, sizeof(val_t));
+}
+
+static void val_release(val_t *v)
+{
+    if (v == NULL)
+        return;
+    if (g_val_pooled >= VAL_POOL_MAX) {
+        elpis_free(v);
+        return;
+    }
+    *(val_t **)v = g_val_pool;
+    g_val_pool = v;
+    g_val_pooled++;
+}
 
 static void val_run(elpis_task_t *t);
 
 void elpis_val_free(elpis_task_t *t)
 {
     if (t->val != NULL) {
-        elpis_free(t->val);
+        val_release((val_t *)t->val);
         t->val = NULL;
     }
 }
@@ -1390,7 +1435,7 @@ static void val_run(elpis_task_t *t)
                 static ELPIS_TLS elpis_rrset_buf_t ds_hold;
                 int rc;
 
-                ds_hold = *scratch;
+                elpis_rrset_buf_copy(&ds_hold, scratch);
                 if (!val_need(t, &next, ELPIS_T_DNSKEY, scratch))
                     return;
                 if (scratch->count == 0) {
@@ -1419,7 +1464,7 @@ static void val_run(elpis_task_t *t)
                     val_done(t, ELPIS_SEC_BOGUS, ede);
                     return;
                 }
-                v->keys = *scratch;
+                elpis_rrset_buf_copy(&v->keys, scratch);
             }
             v->cur  = next;
             v->walk = next;
@@ -1513,7 +1558,7 @@ int elpis_val_start(elpis_task_t *t)
     }
 
     if (t->val == NULL) {
-        val_t *v = (val_t *)elpis_calloc(1, sizeof *v);
+        val_t *v = val_alloc();
         if (v == NULL) {
             t->sec = ELPIS_SEC_UNCHECKED;
             return 0;

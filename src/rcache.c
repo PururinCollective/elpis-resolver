@@ -78,6 +78,43 @@ elpis_cache_t *elpis_rcache_new(uint64_t bytes, unsigned shards)
 /* Buffer helpers                                                      */
 /* ------------------------------------------------------------------ */
 
+void elpis_rrset_buf_copy(elpis_rrset_buf_t *dst, const elpis_rrset_buf_t *src)
+{
+    unsigned n;
+    uint32_t used;
+
+    if (dst == src)
+        return;
+
+    dst->name.len    = src->name.len;
+    dst->name.labels = src->name.labels;
+    memcpy(dst->name.d, src->name.d, src->name.len);   /* len is a uint8_t */
+
+    dst->type     = src->type;
+    dst->klass    = src->klass;
+    dst->ttl      = src->ttl;
+    dst->orig_ttl = src->orig_ttl;
+    dst->sec      = src->sec;
+    dst->count    = src->count;
+    dst->sigcount = src->sigcount;
+    dst->flags    = src->flags;
+
+    n = (unsigned)src->count + (unsigned)src->sigcount;
+    if (n > ELPIS_RRSET_MAX_RR)
+        n = ELPIS_RRSET_MAX_RR;
+    if (n != 0) {
+        memcpy(dst->len, src->len, (size_t)n * sizeof src->len[0]);
+        memcpy(dst->off, src->off, (size_t)n * sizeof src->off[0]);
+    }
+
+    used = src->used;
+    if (used > ELPIS_RRSET_BUF)
+        used = ELPIS_RRSET_BUF;
+    dst->used = used;
+    if (used != 0)
+        memcpy(dst->data, src->data, used);
+}
+
 void elpis_rrset_buf_init(elpis_rrset_buf_t *b, const elpis_name_t *name,
                           uint16_t type, uint16_t klass, uint32_t ttl)
 {
