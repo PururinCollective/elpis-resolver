@@ -10,6 +10,7 @@
 #include "elpis/rdata.h"
 #include "elpis/log.h"
 #include "elpis/simd.h"
+#include "elpis/licence.h"
 
 /* Reverse zones that describe address space which cannot appear on the
  * public internet (RFC 6303 section 4, RFC 6761 section 6.1). */
@@ -173,6 +174,7 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
      */
     if (c->identity && c->identity_name[0] &&
         name_equals(&m->qname, c->identity_name)) {
+        const elpis_licence_t *lic = &w->ctx->licence;
         uint8_t rd[512];
         size_t  rdlen = 0;
         char    tmp[256];
@@ -214,6 +216,27 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
 
         snprintf(tmp, sizeof tmp, "dnssec=%s", c->dnssec ? "validating" : "off");
         txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        /*
+         * Only a licence whose signature checked out is mentioned, and the
+         * token itself never is: echoing it would let anyone who can query
+         * this resolver lift the licence and paste it into their own config.
+         * What goes out is the claim, not the credential.
+         */
+        if (lic->valid) {
+            char when[32];
+            txt_add(rd, sizeof rd, &rdlen,
+                    lic->expired ? "licence=expired" : "licence=verified");
+            snprintf(tmp, sizeof tmp, "licensed-to=%s", lic->org);
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+            snprintf(tmp, sizeof tmp, "serial=%lu", (unsigned long)lic->serial);
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+            elpis_licence_date(lic->expires, when, sizeof when);
+            snprintf(tmp, sizeof tmp, "expires=%s", when);
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+        } else if (lic->present) {
+            txt_add(rd, sizeof rd, &rdlen, "licence=rejected");
+        }
 
         if (c->identity_system) {
             char sys[160];

@@ -542,6 +542,8 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("identity-name")) { elpis_strlcpy(c->identity_name, val,
                                               sizeof c->identity_name); return ELPIS_OK; }
     if (KEY("edition"))     { elpis_strlcpy(c->edition, val, sizeof c->edition); return ELPIS_OK; }
+    if (KEY("licence") || KEY("license"))
+                            { elpis_strlcpy(c->licence, val, sizeof c->licence); return ELPIS_OK; }
     if (KEY("operator"))    { elpis_strlcpy(c->operator_name, val,
                                             sizeof c->operator_name); return ELPIS_OK; }
     if (KEY("statistics-interval")) return want_dur(&p, key, val, &c->stats_interval);

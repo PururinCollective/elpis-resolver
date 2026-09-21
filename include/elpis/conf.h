@@ -14,6 +14,7 @@
 #include "elpis/util.h"
 #include "elpis/log.h"
 #include "elpis/dns.h"
+#include "elpis/licence.h"
 
 #define ELPIS_MAX_LISTEN 16
 #define ELPIS_MAX_ACL    64
@@ -150,6 +151,7 @@ typedef struct {
     uint8_t      identity_system;          /* add OS, kernel and hostname*/
     char         identity_name[256];
     char         edition[32];              /* self-declared deployment   */
+    char         licence[ELPIS_LICENCE_MAX_TOKEN];  /* signed, if present */
     char         operator_name[96];        /* self-declared, optional    */
 
     /* --- process -------------------------------------------------- */

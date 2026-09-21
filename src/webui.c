@@ -17,6 +17,7 @@
 #include "elpis/loop.h"
 #include "elpis/infra.h"
 #include "elpis/deleg.h"
+#include "elpis/licence.h"
 #include "webui_assets.h"
 
 #include <errno.h>
@@ -544,6 +545,20 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, ",\"operator\":"); bputq(b, c->operator_name);
     bputs(b, ",\"identity\":");
     bputq(b, c->identity ? c->identity_name : "");
+    {
+        const elpis_licence_t *l = &ctx->licence;
+        char when[32];
+        elpis_licence_date(l->expires, when, sizeof when);
+        bputs(b, ",\"licence\":{\"state\":");
+        bputq(b, !l->present ? "none" :
+                 !l->valid   ? "rejected" :
+                 l->expired  ? "expired" : "verified");
+        bputs(b, ",\"org\":");     bputq(b, l->valid ? l->org : "");
+        bputs(b, ",\"serial\":");  bputu(b, l->valid ? l->serial : 0u);
+        bputs(b, ",\"expires\":"); bputq(b, l->valid ? when : "");
+        bputs(b, ",\"why\":");     bputq(b, l->present && !l->valid ? l->why : "");
+        bputs(b, "}");
+    }
     bputs(b, ",\"simd\":");   bputq(b, elpis_simd_backend());
     bputs(b, ",\"loop\":");   bputq(b, elpis_loop_backend());
     bputs(b, ",\"workers\":"); bputu(b, c->threads ? c->threads : elpis_cpu_count());

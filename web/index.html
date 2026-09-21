@@ -129,6 +129,8 @@ h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
 .pill{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;
   border:1px solid var(--line);color:var(--dim)}
 .pill.on{border-color:var(--ok);color:var(--ok)}
+.pill.warn{border-color:var(--warn);color:var(--warn)}
+.pill.bad{border-color:var(--bad);color:var(--bad)}
 .tmmain{flex:1;min-width:0;overflow:auto;padding:12px 14px}
 .tmhead{display:flex;align-items:baseline;margin-bottom:10px}
 .tmhead h2{margin:0;font-size:26px;font-weight:400}
@@ -546,6 +548,31 @@ function rows(list, label){
  * Team Cymru's origin lookup says about them -- resolved through our own
  * recursion, so an empty field simply means we have not got an answer yet.
  */
+/*
+ * An edition is only worth as much as what backs it: self-declared until a
+ * signed licence says otherwise, so the page never shows one without saying
+ * which it is.
+ */
+function licPill(d){
+  var l = (d.server.licence || {}).state || 'none';
+  if (l === 'verified') return "<span class='pill on'>signed</span>";
+  if (l === 'expired')  return "<span class='pill warn'>signed, expired</span>";
+  if (l === 'rejected') return "<span class='pill bad'>licence rejected</span>";
+  return "<span class='pill'>self-declared</span>";
+}
+
+function licRows(d){
+  var l = d.server.licence || {};
+  if (l.state === 'verified' || l.state === 'expired')
+    return "<b>licensed to</b><span>" + esc(l.org) + "</span>" +
+           "<b>licence serial</b><span>" + (l.serial|0) + "</span>" +
+           "<b>licence expires</b><span>" + esc(l.expires) +
+             (l.state === 'expired' ? " (expired)" : "") + "</span>";
+  if (l.state === 'rejected')
+    return "<b>licence</b><span style='color:var(--bad)'>" + esc(l.why) + "</span>";
+  return "";
+}
+
 function host(d){
   var h = d.self || {};
   function or(v){ return v ? esc(v) : "<span style='color:var(--dim)'>looking up...</span>"; }
@@ -860,9 +887,11 @@ var VIEWS = [
         "<p>Copyright 2026 Pururin Collective</p>" +
       "</div>" +
       "<div class='kv'>" +
-      "<b>edition</b><span>" + esc(d.server.edition || 'unspecified') + "</span>" +
+      "<b>edition</b><span>" + esc(d.server.edition || 'unspecified') +
+        " " + licPill(d) + "</span>" +
       (d.server.operator ?
         "<b>operator</b><span>" + esc(d.server.operator) + "</span>" : "") +
+      licRows(d) +
       "<b>identity probe</b><span>" + (d.server.identity ?
         "<code>" + esc(d.server.identity) + "</code>" :
         "<span style='color:var(--dim)'>off</span>") + "</span>" +

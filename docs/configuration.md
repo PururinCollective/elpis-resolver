@@ -130,8 +130,14 @@ looking at without a screen-share. It is not a licence check, and should not be
 relied on as one. If you need a claim that cannot be forged, the field has to
 carry a signature from whoever issues it, which this does not do.
 
-`community`, `commercial` and `homelab` are the values worth being consistent
-about; anything else is accepted.
+`community`, `commercial`, `homelab` and `evaluation` are the values worth
+being consistent about; anything else is accepted.
+
+For a claim somebody else should believe, add a signed licence — see
+[Signed licences](licensing.md). When one verifies it sets the edition and
+`edition:` is ignored, and the probe reports `licence=verified` alongside the
+organisation, serial and expiry. Without one, the absence of `licence=verified`
+is what tells you the edition is only self-declared.
 
 ### What it will not tell you
 

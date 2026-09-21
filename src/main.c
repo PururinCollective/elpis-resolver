@@ -833,6 +833,47 @@ static void usage(const char *argv0)
         ELPIS_VERSION, argv0, ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
 }
 
+/*
+ * Check the licence once, here, and never again while running.  A resolver
+ * that stopped answering because a signature or a date was wrong would be a
+ * far worse failure than anything a licence protects against, so none of this
+ * changes how a single query is handled: it decides what the resolver says
+ * about itself, and that is all.
+ */
+static void check_licence(elpis_ctx_t *ctx)
+{
+    elpis_conf_t *c = &ctx->conf;
+    char expires[32];
+
+    if (c->licence[0] == '\0')
+        return;
+
+    elpis_licence_parse(c->licence, (uint32_t)time(NULL), &ctx->licence);
+    elpis_licence_date(ctx->licence.expires, expires, sizeof expires);
+
+    if (!ctx->licence.valid) {
+        elpis_warn("licence not accepted: %s", ctx->licence.why);
+        elpis_warn("continuing with the self-declared edition '%s'", c->edition);
+        return;
+    }
+
+    /* A verified licence outranks whatever edition: says.  Otherwise the
+     * signature would be decoration -- anyone could hold a community licence
+     * and still write commercial on the line below it. */
+    elpis_strlcpy(c->edition, elpis_edition_name(ctx->licence.edition),
+                  sizeof c->edition);
+
+    if (ctx->licence.expired)
+        elpis_warn("licence %lu for \"%s\" expired on %s; still %s, "
+                   "nothing stops working",
+                   (unsigned long)ctx->licence.serial, ctx->licence.org,
+                   expires, elpis_edition_name(ctx->licence.edition));
+    else
+        elpis_info("licence %lu for \"%s\": %s, expires %s",
+                   (unsigned long)ctx->licence.serial, ctx->licence.org,
+                   elpis_edition_name(ctx->licence.edition), expires);
+}
+
 static int write_pidfile(const char *path)
 {
     FILE *fp;
@@ -947,6 +988,8 @@ int main(int argc, char **argv)
 
     write_pidfile(ctx.conf.pidfile);
     install_signals();
+
+    check_licence(&ctx);
 
     elpis_info("listening with %u worker%s", nthreads, nthreads == 1 ? "" : "s");
 

@@ -206,6 +206,7 @@ Then point AdGuard Home's upstream at `[2402:4e20::1111]:53`. The shipped
 | [Configuration](docs/configuration.md) | every setting, privileged ports, binding, signals, the identity probe |
 | [Troubleshooting](docs/troubleshooting.md) | queries arriving but answers not coming back, port conflicts, malformed input |
 | [Status page](docs/status-page.md) | the read-only web interface, and how to reach it safely |
+| [Licensing](docs/licensing.md) | signed deployment licences, what a signature can and cannot prove |
 | [Internals](docs/internals.md) | why the hot paths look the way they do, and what is deliberately missing |
 
 ## Status page

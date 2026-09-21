@@ -60,6 +60,7 @@ typedef struct {
     elpis_stats_t       stats;
     elpis_loopstat_t    loop;
     elpis_selfinfo_t    self;
+    elpis_licence_t     licence;    /* checked once, at startup */
     uint64_t            start_ms;
 
     volatile int        shutdown;

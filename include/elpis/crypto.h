@@ -2,8 +2,10 @@
  * elpis/crypto.h -- the verification primitives DNSSEC needs.
  *
  * Everything here is self-contained so the binary links statically without
- * OpenSSL.  Only verification is implemented: no key generation, no signing,
- * no private keys.  All inputs are public data, so these routines are written
+ * OpenSSL.  The resolver only ever verifies: no key generation, no signing, no
+ * private keys.  (Ed25519 signing exists for the licence issuing tool, behind
+ * ELPIS_ED25519_SIGN, and is not compiled into bin/elpis.)  All inputs are
+ * public data, so these routines are written
  * for clarity and bounds safety rather than constant time -- with one
  * exception, the final signature comparisons, which use a constant-time
  * compare out of habit rather than necessity.
@@ -114,6 +116,14 @@ int elpis_ecdsa_verify(int curve, const uint8_t *pub, size_t publen,
                        const uint8_t *hash, size_t hashlen);
 
 /* ---- Ed25519 (RFC 8080) ------------------------------------------- */
+#ifdef ELPIS_ED25519_SIGN
+/* Signing is compiled only into the licence tool and the tests -- never into
+ * the resolver, which has no business holding a signing routine. */
+int elpis_ed25519_pubkey(const uint8_t sk[32], uint8_t pk[32]);
+int elpis_ed25519_sign(const uint8_t sk[32], const uint8_t *m, size_t mlen,
+                       uint8_t sig[64]);
+#endif
+
 int elpis_ed25519_verify(const uint8_t pk[32], const uint8_t *m, size_t mlen,
                          const uint8_t sig[64]);
 

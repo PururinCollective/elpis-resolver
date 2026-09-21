@@ -305,6 +305,22 @@ static void ed_compress(const edp_t *p, uint8_t out[32])
     out[31] = (uint8_t)(out[31] | (((x.n ? x.d[0] : 0u) & 1u) << 7));
 }
 
+/* A SHA-512 digest is little-endian here and the bignum layer is big-endian,
+ * so the bytes turn over before the reduction mod L. */
+static int hash_to_scalar(const uint8_t digest[64], bn_t *out)
+{
+    uint8_t be[64];
+    bn_t t;
+    int i;
+
+    for (i = 0; i < 64; i++)
+        be[i] = digest[63 - i];
+    if (bn_from_bytes(&t, be, 64) != ELPIS_OK)
+        return ELPIS_ERR;
+    bn_mod(out, &t, &g_ed.fl.m);
+    return ELPIS_OK;
+}
+
 int elpis_ed25519_verify(const uint8_t pk[32], const uint8_t *m, size_t mlen,
                          const uint8_t sig[64])
 {
@@ -335,17 +351,8 @@ int elpis_ed25519_verify(const uint8_t pk[32], const uint8_t *m, size_t mlen,
     elpis_sha512_update(&sh, m, mlen);
     elpis_sha512_final(&sh, digest);
 
-    /* h = SHA512(R || A || M) mod L, interpreted little-endian. */
-    {
-        uint8_t be[64];
-        bn_t t;
-        int i;
-        for (i = 0; i < 64; i++)
-            be[i] = digest[63 - i];
-        if (bn_from_bytes(&t, be, 64) != ELPIS_OK)
-            return 0;
-        bn_mod(&h, &t, &g_ed.fl.m);
-    }
+    if (hash_to_scalar(digest, &h) != ELPIS_OK)
+        return 0;
 
     ed_mul(&sB, &g_ed.B, &S);
     ed_mul(&hA, &A, &h);
@@ -356,3 +363,85 @@ int elpis_ed25519_verify(const uint8_t pk[32], const uint8_t *m, size_t mlen,
 
     return elpis_ct_memcmp(lhs_enc, rhs_enc, 32) == 0;
 }
+
+#ifdef ELPIS_ED25519_SIGN
+/*
+ * Signing lives behind a build flag and is never compiled into the resolver.
+ * A DNS resolver has no reason to hold an Ed25519 signing routine: it checks
+ * signatures, it does not make them.  The licence issuing tool and the test
+ * binary define ELPIS_ED25519_SIGN; bin/elpis does not, so none of this is in
+ * the binary you deploy.
+ */
+static int ed_secret_scalar(const uint8_t sk[32], bn_t *a, uint8_t prefix[32])
+{
+    uint8_t h[64];
+
+    elpis_sha512(sk, 32, h);
+    h[0]  = (uint8_t)(h[0]  & 248);       /* clamp, RFC 8032 section 5.1.5 */
+    h[31] = (uint8_t)((h[31] & 63) | 64);
+    memcpy(prefix, h + 32, 32);
+    return bn_from_le32(a, h);
+}
+
+int elpis_ed25519_pubkey(const uint8_t sk[32], uint8_t pk[32])
+{
+    bn_t a;
+    edp_t A;
+    uint8_t prefix[32];
+
+    pthread_once(&g_ed_once, ed_init);
+    if (!g_ed.ready)
+        return ELPIS_ERR;
+    if (ed_secret_scalar(sk, &a, prefix) != ELPIS_OK)
+        return ELPIS_ERR;
+    ed_mul(&A, &g_ed.B, &a);
+    ed_compress(&A, pk);
+    return ELPIS_OK;
+}
+
+int elpis_ed25519_sign(const uint8_t sk[32], const uint8_t *m, size_t mlen,
+                       uint8_t sig[64])
+{
+    bn_t a, r, k, S, t;
+    edp_t R, A;
+    uint8_t prefix[32], pk[32], digest[64];
+    elpis_sha512_t sh;
+
+    pthread_once(&g_ed_once, ed_init);
+    if (!g_ed.ready)
+        return ELPIS_ERR;
+    if (ed_secret_scalar(sk, &a, prefix) != ELPIS_OK)
+        return ELPIS_ERR;
+
+    ed_mul(&A, &g_ed.B, &a);
+    ed_compress(&A, pk);
+
+    /* r = SHA512(prefix || M) mod L -- deterministic, so no RNG is needed
+     * and a bad one cannot leak the key the way it does with ECDSA. */
+    elpis_sha512_init(&sh);
+    elpis_sha512_update(&sh, prefix, 32);
+    elpis_sha512_update(&sh, m, mlen);
+    elpis_sha512_final(&sh, digest);
+    if (hash_to_scalar(digest, &r) != ELPIS_OK)
+        return ELPIS_ERR;
+
+    ed_mul(&R, &g_ed.B, &r);
+    ed_compress(&R, sig);
+
+    /* k = SHA512(R || A || M) mod L */
+    elpis_sha512_init(&sh);
+    elpis_sha512_update(&sh, sig, 32);
+    elpis_sha512_update(&sh, pk, 32);
+    elpis_sha512_update(&sh, m, mlen);
+    elpis_sha512_final(&sh, digest);
+    if (hash_to_scalar(digest, &k) != ELPIS_OK)
+        return ELPIS_ERR;
+
+    /* S = (r + k*a) mod L */
+    bn_mul(&t, &k, &a);
+    bn_mod(&t, &t, &g_ed.fl.m);
+    bn_addmod(&S, &t, &r, &g_ed.fl.m);
+    bn_to_le32(&S, sig + 32);
+    return ELPIS_OK;
+}
+#endif /* ELPIS_ED25519_SIGN */

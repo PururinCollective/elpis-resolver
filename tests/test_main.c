@@ -16,6 +16,7 @@
 #include "elpis/cache.h"
 #include "elpis/store.h"
 #include "elpis/crypto.h"
+#include "elpis/licence.h"
 #include "elpis/dnssec.h"
 #include "elpis/conf.h"
 #include "elpis/edns.h"
@@ -1242,6 +1243,164 @@ static void test_conf(void)
 }
 
 /* ================================================================== */
+static void hexbytes(const char *h, uint8_t *out, size_t want)
+{
+    size_t n = 0;
+    CHECK(elpis_hex_decode(h, out, want, &n) == ELPIS_OK && n == want,
+          "test vector decodes");
+}
+
+static void test_licence(void)
+{
+    /* RFC 8032 section 7.1.  Signing is checked against the published
+     * vectors rather than only against our own verifier, which would pass
+     * happily if both halves were wrong in the same way. */
+    static const struct {
+        const char *sk, *pk, *msg, *sig;
+    } rfc8032[] = {
+    { "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "",
+      "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e0652249015"
+      "55fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b" },
+    { "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "72",
+      "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69d"
+      "a085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00" },
+    { "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "af82",
+      "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3a"
+      "c18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a" }
+    };
+    unsigned i;
+
+    section("licence");
+
+    for (i = 0; i < ELPIS_ARRAY_LEN(rfc8032); i++) {
+        uint8_t sk[32], pk[32], want[64], got[64], msg[8], derived[32];
+        size_t  mlen = strlen(rfc8032[i].msg) / 2u;
+
+        hexbytes(rfc8032[i].sk, sk, 32);
+        hexbytes(rfc8032[i].pk, pk, 32);
+        hexbytes(rfc8032[i].sig, want, 64);
+        if (mlen) hexbytes(rfc8032[i].msg, msg, mlen);
+
+        CHECK(elpis_ed25519_pubkey(sk, derived) == ELPIS_OK &&
+              memcmp(derived, pk, 32) == 0,
+              "RFC 8032 public key derives from the secret");
+        CHECK(elpis_ed25519_sign(sk, msg, mlen, got) == ELPIS_OK &&
+              memcmp(got, want, 64) == 0,
+              "RFC 8032 signature matches the published vector");
+        CHECK(elpis_ed25519_verify(pk, msg, mlen, got) == 1,
+              "and our own verifier accepts it");
+    }
+
+    {   /* base64url survives every byte value and both remainder lengths. */
+        uint8_t in[256], back[256];
+        char enc[512];
+        size_t n = 0, k;
+        for (k = 0; k < sizeof in; k++) in[k] = (uint8_t)k;
+        for (k = 253; k <= 256; k++) {
+            CHECK(elpis_b64url_encode(in, k, enc, sizeof enc) > 0,
+                  "base64url encodes");
+            CHECK(strchr(enc, '+') == NULL && strchr(enc, '/') == NULL &&
+                  strchr(enc, '=') == NULL, "base64url is url safe and unpadded");
+            CHECK(elpis_b64url_decode(enc, strlen(enc), back, sizeof back, &n)
+                  == ELPIS_OK && n == k && memcmp(in, back, k) == 0,
+                  "base64url round trips");
+        }
+        CHECK(elpis_b64url_decode("ab*d", 4, back, sizeof back, &n) != ELPIS_OK,
+              "base64url rejects a character outside the alphabet");
+    }
+
+    {
+        /* A licence signed with the test issuer's private half, checked by
+         * the same code path the resolver uses. */
+        static const char *ISSUER_SK =
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        elpis_licence_t l, got;
+        uint8_t sk[32], payload[ELPIS_LICENCE_MAX_TOKEN];
+        uint8_t sig[64], buf[ELPIS_LICENCE_MAX_TOKEN + 32];
+        char token[512], b1[256], b2[128];
+        size_t plen, ctxlen = strlen(ELPIS_LICENCE_CONTEXT);
+        uint32_t now = 1800000000u;
+
+        CHECK(elpis_licence_enabled() == 1, "the test build carries an issuer key");
+
+        hexbytes(ISSUER_SK, sk, 32);
+        memset(&l, 0, sizeof l);
+        l.edition = ELPIS_ED_COMMERCIAL;
+        l.serial  = 1001;
+        l.issued  = now - 86400u;
+        l.expires = now + 86400u;
+        elpis_strlcpy(l.org, "Example ISP, AS64500", sizeof l.org);
+
+        plen = elpis_licence_payload(&l, payload, sizeof payload);
+        CHECK(plen > 0, "licence payload builds");
+        memcpy(buf, ELPIS_LICENCE_CONTEXT, ctxlen);
+        memcpy(buf + ctxlen, payload, plen);
+        CHECK(elpis_ed25519_sign(sk, buf, ctxlen + plen, sig) == ELPIS_OK,
+              "licence signs");
+        elpis_b64url_encode(payload, plen, b1, sizeof b1);
+        elpis_b64url_encode(sig, 64, b2, sizeof b2);
+        snprintf(token, sizeof token, "%s.%s.%s", ELPIS_LICENCE_MAGIC, b1, b2);
+
+        CHECK(strlen(token) < 255,
+              "a licence fits in one DNS character-string");
+
+        CHECK(elpis_licence_parse(token, now, &got) == ELPIS_OK && got.valid,
+              "a licence from the issuer verifies");
+        CHECK(got.edition == ELPIS_ED_COMMERCIAL, "edition survives the round trip");
+        CHECK(got.serial == 1001, "serial survives the round trip");
+        CHECK(strcmp(got.org, "Example ISP, AS64500") == 0,
+              "org survives the round trip");
+        CHECK(got.expired == 0, "an in-date licence is not expired");
+
+        /* Expiry is reported, never enforced. */
+        CHECK(elpis_licence_parse(token, now + 200000u, &got) == ELPIS_OK &&
+              got.valid && got.expired,
+              "an expired licence still verifies, and says it expired");
+
+        {   /* Flip one bit of the claims: the signature must stop matching. */
+            char bad[512];
+            elpis_strlcpy(bad, token, sizeof bad);
+            bad[10] = (char)(bad[10] == 'A' ? 'B' : 'A');
+            CHECK(elpis_licence_parse(bad, now, &got) != ELPIS_OK && !got.valid,
+                  "editing the claims breaks the signature");
+        }
+        {   /* And so must a signature from anyone else. */
+            uint8_t other[32];
+            char bad[512];
+            hexbytes("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624"
+                     "da8cf6ed4fb8a6fb", other, 32);
+            elpis_ed25519_sign(other, buf, ctxlen + plen, sig);
+            elpis_b64url_encode(sig, 64, b2, sizeof b2);
+            snprintf(bad, sizeof bad, "%s.%s.%s", ELPIS_LICENCE_MAGIC, b1, b2);
+            CHECK(elpis_licence_parse(bad, now, &got) != ELPIS_OK && !got.valid,
+                  "a licence signed by anyone else is refused");
+        }
+
+        CHECK(elpis_licence_parse("not-a-token", now, &got) != ELPIS_OK &&
+              got.why[0], "garbage is refused with a reason");
+        CHECK(elpis_licence_parse("elpis1.AAAA", now, &got) != ELPIS_OK,
+              "a token with no signature is refused");
+
+        {   /* The context string is what keeps a signature in its lane. */
+            char bad[512];
+            memcpy(buf, "elpis-licence-v2", ctxlen);
+            memcpy(buf + ctxlen, payload, plen);
+            elpis_ed25519_sign(sk, buf, ctxlen + plen, sig);
+            elpis_b64url_encode(sig, 64, b2, sizeof b2);
+            snprintf(bad, sizeof bad, "%s.%s.%s", ELPIS_LICENCE_MAGIC, b1, b2);
+            CHECK(elpis_licence_parse(bad, now, &got) != ELPIS_OK,
+                  "a signature over another context does not transfer");
+        }
+    }
+}
+
+/* ================================================================== */
 static void test_cookies(void)
 {
     elpis_addr_t client, other;
@@ -1293,6 +1452,7 @@ int main(void)
     test_dns64();
     test_conflict();
     test_conf();
+    test_licence();
     test_cookies();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

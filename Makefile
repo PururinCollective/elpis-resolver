@@ -30,6 +30,12 @@ WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-align \
 
 OPT       ?= -O3 -fno-strict-aliasing -fomit-frame-pointer
 DEFS      := -DELPIS_VERSION=\"$(VERSION)\" -DELPIS_SYSCONFDIR=\"$(SYSCONFDIR)\"
+# The Ed25519 public key deployment licences are signed with.  Normally set
+# once in include/elpis/licence.h; this is here so a one-off build can carry a
+# different issuer without editing the tree.
+ifneq ($(LICENCE_ISSUER),)
+DEFS      += -DELPIS_LICENCE_ISSUER=\"$(LICENCE_ISSUER)\"
+endif
 
 CFLAGS    ?= $(OPT)
 # -MMD -MP emits a .d file per object listing the headers it used, so a header
@@ -48,7 +54,7 @@ CORE_SRC := \
   src/edns.c src/rrlist.c src/cache.c src/mcache.c src/rcache.c src/infra.c src/loop.c \
   src/sock.c src/server.c src/outbound.c src/resolver.c src/delegation.c \
   src/roots.c src/tld.c src/axfr.c src/probe.c src/dns64.c src/localzone.c src/ratelimit.c \
-  src/stats.c src/telemetry.c src/selfinfo.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
+  src/stats.c src/telemetry.c src/selfinfo.c src/licence.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
   src/cookie.c src/rrl.c src/conflict.c src/webui.c src/main.c
 
 CRYPTO_SRC := \
@@ -93,7 +99,8 @@ endif
 OBJ += $(SIMD_OBJ)
 
 # ---- targets ---------------------------------------------------------------
-.PHONY: all static debug asan clean distclean install uninstall test check fmt FORCE
+.PHONY: all static debug asan clean distclean install uninstall test check fmt \
+        licence-tool FORCE
 
 
 all: $(BIN) $(BINCONF)
@@ -108,6 +115,21 @@ src/gitrev.h: FORCE
 	@rm -f $@.tmp
 
 src/util.o: src/gitrev.h
+
+# ---- licence tool ----------------------------------------------------------
+# Not built by `all` and not installed: it is the only thing here that signs,
+# and it is for whoever issues licences, not for whoever runs a resolver.  It
+# compiles its own copy of the crypto with ELPIS_ED25519_SIGN defined, so the
+# signing code never reaches bin/elpis.
+LICENCE_BIN  := $(BINDIR)/$(PROG)-licence
+LICENCE_SRC  := tools/licence.c src/licence.c src/util.c src/log.c $(CRYPTO_SRC)
+
+licence-tool: $(LICENCE_BIN)
+
+$(LICENCE_BIN): $(LICENCE_SRC) src/gitrev.h | $(BINDIR)
+	$(CC) $(STD) $(POSIX) $(WARN) $(DEFS) -DELPIS_ED25519_SIGN=1 \
+	    $(CFLAGS) -Iinclude -Isrc -pthread -o $@ $(LICENCE_SRC) \
+	    $(ALL_LDFLAGS) $(LIBS)
 
 $(BINDIR):
 	@mkdir -p $(BINDIR)
@@ -155,8 +177,25 @@ src/simd_neon.o: src/simd_neon.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
 # ---- tests -----------------------------------------------------------------
-TEST_SRC := tests/test_main.c
-TEST_OBJ := $(filter-out src/main.o,$(OBJ))
+# Two objects are rebuilt differently for the test binary: ed25519 with signing
+# compiled in, so the RFC 8032 vectors can be checked in both directions, and
+# licence with a known issuer key, so a licence can be signed and verified
+# without a real one.  The key is RFC 8032's own test vector 1 -- published,
+# therefore obviously not a secret, which is exactly what a test key should be.
+TEST_SRC    := tests/test_main.c
+TEST_ISSUER := d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+TEST_OBJ    := $(filter-out src/main.o src/crypto/ed25519.o src/licence.o,$(OBJ)) \
+               tests/ed25519_sign.o tests/licence_test.o
+
+tests/ed25519_sign.o: src/crypto/ed25519.c
+	$(CC) $(ALL_CFLAGS) -DELPIS_ED25519_SIGN=1 -c -o $@ $<
+
+tests/licence_test.o: src/licence.c
+	$(CC) $(ALL_CFLAGS) -UELPIS_LICENCE_ISSUER \
+	    -DELPIS_LICENCE_ISSUER=\"$(TEST_ISSUER)\" -c -o $@ $<
+
+tests/test_main.o: tests/test_main.c
+	$(CC) $(ALL_CFLAGS) -DELPIS_ED25519_SIGN=1 -c -o $@ $<
 
 $(TESTBIN): $(TEST_OBJ) tests/test_main.o | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $^ $(ALL_LDFLAGS) $(LIBS)
@@ -180,7 +219,8 @@ uninstall:
 	-rmdir $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX) 2>/dev/null || true
 
 clean:
-	rm -f $(OBJ) tests/test_main.o $(BIN) $(TESTBIN)
+	rm -f $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o \
+	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence
 	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h
 	@rmdir $(BINDIR) 2>/dev/null || true
 
