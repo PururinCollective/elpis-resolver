@@ -595,9 +595,25 @@ int elpis_conf_load(elpis_conf_t *c, const char *explicit_path)
     /* 1. next to the executable */
     dir = elpis_exe_dir();
     if (dir != NULL && *dir != '\0') {
+        size_t n;
+
         snprintf(cand, sizeof cand, "%s/elpis.conf", dir);
         if (file_exists(cand))
             return load_file(c, cand);
+
+        /*
+         * 1b. one level up, when the executable lives in a bin/ directory.
+         * The build puts the binary in bin/, and an installed tree has the
+         * same shape, so "beside the binary" would otherwise mean beside
+         * nothing -- and the config sitting one level up where anyone would
+         * put it would be passed over in silence for the built-in defaults.
+         */
+        n = strlen(dir);
+        if (n >= 4 && strcmp(dir + n - 4, "/bin") == 0) {
+            snprintf(cand, sizeof cand, "%.*s/elpis.conf", (int)(n - 4), dir);
+            if (file_exists(cand))
+                return load_file(c, cand);
+        }
     }
     /* 2. /etc/elpis/elpis.conf */
     snprintf(cand, sizeof cand, "%s/elpis/elpis.conf", ELPIS_SYSCONFDIR);
@@ -608,8 +624,8 @@ int elpis_conf_load(elpis_conf_t *c, const char *explicit_path)
     if (file_exists(cand))
         return load_file(c, cand);
 
-    elpis_info("no elpis.conf found (looked next to the binary, in "
-               "%s/elpis/ and in %s/); using built-in defaults",
+    elpis_info("no elpis.conf found (looked next to the binary, above a bin/ "
+               "directory, in %s/elpis/ and in %s/); using built-in defaults",
                ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
     return ELPIS_OK;
 }

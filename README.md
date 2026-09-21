@@ -10,7 +10,7 @@ all in this tree, so it builds into one static binary you copy to a machine
 and run.
 
 ```
-$ ./elpis -d
+$ make && ./bin/elpis -d
 elpis 1.0.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
               4096 MiB RAM detected, cache budget 819 MiB
 msg-cache: 32 shards, budget 409 MiB
@@ -88,12 +88,17 @@ Use `-march=native` only when you build on the same machine you run on — the
 binary will not start on an older CPU.
 
 ```bash
-make            # ordinary build
+make            # ordinary build      -> bin/elpis
 make static     # one relocatable binary, no shared libraries
 make test       # 242 self tests, no network needed
 make debug      # -O0 -g3
 make asan       # address and UB sanitizers
+make clean      # removes bin/ and every object file
 ```
+
+Everything the build produces goes in `bin/`, which is in `.gitignore`, so
+`git pull && make clean && make` never leaves anything behind for git to
+notice.
 
 Strict C99 plus POSIX.1-2008. epoll on Linux, kqueue on the BSDs and macOS,
 poll everywhere else.
@@ -136,9 +141,10 @@ a 4 GB container spends its time answering from cache rather than evicting.
 
 ## Configure
 
-`elpis.conf` is looked for next to the binary, then `/etc/elpis/`, then
-`/etc/`. Without one the defaults are a working recursive resolver on
-`127.0.0.1:5335`. A minimal config for the setup above:
+`elpis.conf` is looked for next to the binary, then one directory up if the
+binary is in `bin/` (so the copy in the source tree is found by `./bin/elpis`),
+then `/etc/elpis/`, then `/etc/`. Without one the defaults are a working
+recursive resolver on `127.0.0.1:5335`. A minimal config for the setup above:
 
 ```
 listen: [2402:4e20::1111]@53

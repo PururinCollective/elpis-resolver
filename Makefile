@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: see LICENSE
 
 PROG      := elpis
+# Build outputs land in bin/, which is ignored by git, so a working tree stays
+# clean across `git pull` and the usual `make clean && make`.
+BINDIR    := bin
+BIN       := $(BINDIR)/$(PROG)
+TESTBIN   := $(BINDIR)/$(PROG)-test
 VERSION   := 1.0.0
 PREFIX    ?= /usr/local
 SYSCONFDIR?= /etc
@@ -74,9 +79,12 @@ OBJ += $(SIMD_OBJ)
 # ---- targets ---------------------------------------------------------------
 .PHONY: all static debug asan clean install uninstall test check fmt
 
-all: $(PROG)
+all: $(BIN)
 
-$(PROG): $(OBJ)
+$(BINDIR):
+	@mkdir -p $(BINDIR)
+
+$(BIN): $(OBJ) | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $(OBJ) $(ALL_LDFLAGS) $(LIBS)
 
 # Fully static, relocatable binary.  Note: we never call getaddrinfo()/NSS, so
@@ -86,17 +94,17 @@ $(PROG): $(OBJ)
 STATIC_OPT ?= $(OPT)
 static:
 	$(MAKE) clean
-	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(PROG)
-	-strip $(PROG)
+	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(BIN)
+	-strip $(BIN)
 
 debug:
 	$(MAKE) clean
-	$(MAKE) OPT="-O0 -g3 -DELPIS_DEBUG=1 -fno-omit-frame-pointer" $(PROG)
+	$(MAKE) OPT="-O0 -g3 -DELPIS_DEBUG=1 -fno-omit-frame-pointer" $(BIN)
 
 asan:
 	$(MAKE) clean
 	$(MAKE) OPT="-O1 -g3 -DELPIS_DEBUG=1 -fsanitize=address,undefined -fno-omit-frame-pointer" \
-	        LDFLAGS="-fsanitize=address,undefined" $(PROG)
+	        LDFLAGS="-fsanitize=address,undefined" $(BIN)
 
 src/simd_avx2.o: src/simd_avx2.c
 	$(CC) $(ALL_CFLAGS) -mavx2 -mbmi -mbmi2 -c -o $@ $<
@@ -114,15 +122,15 @@ src/simd_neon.o: src/simd_neon.c
 TEST_SRC := tests/test_main.c
 TEST_OBJ := $(filter-out src/main.o,$(OBJ))
 
-tests/elpis-test: $(TEST_OBJ) tests/test_main.o
+$(TESTBIN): $(TEST_OBJ) tests/test_main.o | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $^ $(ALL_LDFLAGS) $(LIBS)
 
-test check: tests/elpis-test
-	./tests/elpis-test
+test check: $(TESTBIN)
+	./$(TESTBIN)
 
-install: $(PROG)
+install: $(BIN)
 	install -d $(DESTDIR)$(PREFIX)/sbin
-	install -m 0755 $(PROG) $(DESTDIR)$(PREFIX)/sbin/$(PROG)
+	install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/sbin/$(PROG)
 	install -d $(DESTDIR)$(SYSCONFDIR)/elpis
 	test -f $(DESTDIR)$(SYSCONFDIR)/elpis/elpis.conf || \
 	  install -m 0644 elpis.conf $(DESTDIR)$(SYSCONFDIR)/elpis/elpis.conf
@@ -131,8 +139,9 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/sbin/$(PROG)
 
 clean:
-	rm -f $(OBJ) tests/test_main.o $(PROG) tests/elpis-test
+	rm -f $(OBJ) tests/test_main.o $(BIN) $(TESTBIN)
 	rm -f src/*.d src/crypto/*.d tests/*.d
+	@rmdir $(BINDIR) 2>/dev/null || true
 
 # The test object is built outside $(OBJ), so its own .d has to be named here
 # as well -- otherwise a change to a header leaves tests/test_main.o stale and

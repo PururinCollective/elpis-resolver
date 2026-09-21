@@ -4,8 +4,10 @@ Where the config file lives, what the settings do, and how to run it.
 
 ## The config file
 
-`elpis.conf` is looked for next to the binary, then in `/etc/elpis/`, then in
-`/etc/`. The first that exists wins; without one the defaults are a working
+`elpis.conf` is looked for next to the binary; then one directory up if the
+binary sits in a `bin/` directory, which is where the build puts it and how an
+installed tree is laid out; then in `/etc/elpis/`, then in `/etc/`. The first
+that exists wins; without one the defaults are a working
 recursive resolver on `127.0.0.1:5335`. (Not 5353 — that is mDNS, and
 avahi-daemon holds it on most Linux hosts; because both sides set
 `SO_REUSEADDR` the clash is silent rather than an error.) The shipped file documents every

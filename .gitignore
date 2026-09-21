@@ -1,8 +1,7 @@
-# Build output
+# Build output -- everything the build produces goes in bin/
 *.o
 *.d
-/elpis
-/tests/elpis-test
+/bin/
 
 # Local overrides
 /elpis.local.conf
