@@ -7,14 +7,14 @@
 #   systemctl daemon-reload && systemctl enable --now elpis
 
 [Unit]
-Description=Elpis recursive DNS resolver
-Documentation=https://github.com/Anime4000/elpis-resolver
+Description=ΕΛΠΙΣ recursive DNS resolver
+Documentation=https://github.com/PururinCollective/elpis-resolver
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/elpis -d
+ExecStart=/opt/elpis/elpis -d
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
@@ -33,7 +33,7 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-ReadOnlyPaths=/etc/elpis
+ReadOnlyPaths=/opt/elpis
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
