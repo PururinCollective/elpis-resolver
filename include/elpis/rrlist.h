@@ -1,0 +1,59 @@
+/*
+ * elpis/rrlist.h -- a compact accumulator for records under construction.
+ *
+ * A resolution may gather records from several servers (a CNAME chain can
+ * cross zones), so the answer is assembled here and only encoded once at the
+ * end.  Names and rdata live in one growable byte pool; the index entries are
+ * 24 bytes each, which keeps a task's footprint small enough to have tens of
+ * thousands of them in flight.
+ */
+#ifndef ELPIS_RRLIST_H
+#define ELPIS_RRLIST_H
+
+#include "elpis/name.h"
+#include "elpis/msg.h"
+
+typedef struct {
+    uint32_t nameoff;
+    uint32_t rdoff;
+    uint32_t ttl;
+    uint16_t type;
+    uint16_t klass;
+    uint16_t rdlen;
+    uint8_t  namelen;
+    uint8_t  section;     /* elpis_section_t */
+} elpis_trr_t;
+
+typedef struct {
+    elpis_trr_t *rr;
+    unsigned     n, cap;
+    uint8_t     *pool;
+    uint32_t     plen, pcap;
+} elpis_rrlist_t;
+
+void elpis_rrlist_init(elpis_rrlist_t *l);
+void elpis_rrlist_clear(elpis_rrlist_t *l);
+void elpis_rrlist_free(elpis_rrlist_t *l);
+
+int  elpis_rrlist_add(elpis_rrlist_t *l, elpis_section_t sec,
+                      const elpis_name_t *name, uint16_t type, uint16_t klass,
+                      uint32_t ttl, const uint8_t *rd, uint16_t rdlen);
+
+/* 1 when an identical (name,type,class,rdata) record is already present. */
+int  elpis_rrlist_has(const elpis_rrlist_t *l, const elpis_name_t *name,
+                      uint16_t type, const uint8_t *rd, uint16_t rdlen);
+
+/* Smallest TTL across all records, or `dflt` when the list is empty. */
+uint32_t elpis_rrlist_min_ttl(const elpis_rrlist_t *l, uint32_t dflt);
+
+ELPIS_INLINE const uint8_t *elpis_trr_name(const elpis_rrlist_t *l, unsigned i)
+{
+    return l->pool + l->rr[i].nameoff;
+}
+ELPIS_INLINE const uint8_t *elpis_trr_rd(const elpis_rrlist_t *l, unsigned i)
+{
+    return l->pool + l->rr[i].rdoff;
+}
+int elpis_trr_get_name(const elpis_rrlist_t *l, unsigned i, elpis_name_t *out);
+
+#endif /* ELPIS_RRLIST_H */

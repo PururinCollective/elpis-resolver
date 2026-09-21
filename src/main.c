@@ -1,0 +1,662 @@
+/*
+ * main.c -- process setup, worker threads, signals.
+ *
+ * Model: N worker threads, each with its own event loop and its own listening
+ * sockets opened with SO_REUSEPORT so the kernel spreads incoming datagrams
+ * across them.  The caches are shared and internally sharded; nothing else is.
+ */
+#include "elpis/ctx.h"
+#include "elpis/resolver.h"
+#include "elpis/sock.h"
+#include "elpis/crypto.h"
+#include "elpis/dnssec.h"
+#include "elpis/simd.h"
+#include "elpis/util.h"
+#include "elpis/log.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <grp.h>
+
+elpis_ctx_t *elpis_g;
+
+/* ================================================================== */
+/* Context                                                             */
+/* ================================================================== */
+
+int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
+{
+    elpis_conf_t *c = &ctx->conf;
+
+    memset(ctx, 0, sizeof *ctx);
+    ctx->start_ms = elpis_now_ms();
+
+    if (elpis_conf_load(c, conf_path) != ELPIS_OK)
+        return ELPIS_ERR;
+
+    elpis_log_init(c->log_dst, c->log_file, c->log_level);
+
+    elpis_cache_plan(&ctx->plan, c->cache_size, elpis_cpu_count());
+    {
+        const elpis_cpu_t *cpu = elpis_cpu();
+        char feat[96];
+        feat[0] = '\0';
+        if (cpu->sse2)     elpis_strlcat(feat, " sse2", sizeof feat);
+        if (cpu->ssse3)    elpis_strlcat(feat, " ssse3", sizeof feat);
+        if (cpu->sse41)    elpis_strlcat(feat, " sse4.1", sizeof feat);
+        if (cpu->avx2)     elpis_strlcat(feat, " avx2", sizeof feat);
+        if (cpu->bmi2)     elpis_strlcat(feat, " bmi2", sizeof feat);
+        if (cpu->avx512f)  elpis_strlcat(feat, " avx512f", sizeof feat);
+        if (cpu->neon)     elpis_strlcat(feat, " neon", sizeof feat);
+        if (cpu->crc32)    elpis_strlcat(feat, " crc32", sizeof feat);
+        elpis_info("elpis %s starting: %s kernels (cpu:%s), %s, "
+                   "%llu MiB RAM detected, cache budget %llu MiB",
+                   ELPIS_VERSION, elpis_simd_backend(),
+                   feat[0] ? feat : " none", elpis_loop_backend(),
+                   (unsigned long long)(ctx->plan.ram_total / (1024 * 1024)),
+                   (unsigned long long)(ctx->plan.budget_total / (1024 * 1024)));
+    }
+
+    ctx->mcache = elpis_mcache_new(ctx->plan.msg_bytes, ctx->plan.shards);
+    ctx->rcache = elpis_rcache_new(ctx->plan.rrset_bytes, ctx->plan.shards);
+    ctx->dcache = elpis_dcache_new(ctx->plan.deleg_bytes, ctx->plan.shards / 4u);
+    ctx->infra  = elpis_infra_new(ctx->plan.infra_bytes, ctx->plan.shards / 4u);
+    if (ctx->mcache == NULL || ctx->rcache == NULL ||
+        ctx->dcache == NULL || ctx->infra == NULL) {
+        elpis_error("cannot allocate caches");
+        return ELPIS_ENOMEM;
+    }
+
+    /* Root hints: built-ins, optionally replaced by a hints file. */
+    elpis_root_delegation(&ctx->root_hints);
+    if (c->root_hints[0] != '\0') {
+        elpis_deleg_t d;
+        if (elpis_root_hints_load(c->root_hints, &d) == ELPIS_OK)
+            ctx->root_hints = d;
+    }
+    elpis_dcache_put(ctx->dcache, &ctx->root_hints, ctx->root_hints.ttl, 1);
+
+    if (c->dnssec) {
+        ctx->ta = elpis_ta_new();
+        if (ctx->ta == NULL)
+            return ELPIS_ENOMEM;
+        elpis_ta_add_builtin(ctx->ta);
+        if (c->trust_anchor_file[0] != '\0')
+            elpis_ta_load_file(ctx->ta, c->trust_anchor_file);
+        if (ctx->ta->n == 0) {
+            elpis_warn("no usable trust anchors; disabling DNSSEC validation");
+            c->dnssec = 0;
+        }
+    }
+
+    elpis_cookie_init();
+    elpis_conf_dump(c);
+    return ELPIS_OK;
+}
+
+void elpis_ctx_fini(elpis_ctx_t *ctx)
+{
+    elpis_cache_free(ctx->mcache);
+    elpis_cache_free(ctx->rcache);
+    elpis_cache_free(ctx->dcache);
+    elpis_cache_free(ctx->infra);
+    elpis_ta_free(ctx->ta);
+    memset(ctx, 0, sizeof *ctx);
+}
+
+/* ================================================================== */
+/* Workers                                                             */
+/* ================================================================== */
+
+/* Sockets opened by worker 0, shared when SO_REUSEPORT is unavailable. */
+static int  g_primary_udp[ELPIS_MAX_LSOCK];
+static int  g_primary_tcp[ELPIS_MAX_LSOCK];
+static unsigned g_n_primary_udp, g_n_primary_tcp;
+
+static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm);
+
+int elpis_worker_init(elpis_worker_t *w, elpis_ctx_t *ctx, unsigned index)
+{
+    const elpis_conf_t *c = &ctx->conf;
+    unsigned i;
+
+    memset(w, 0, sizeof *w);
+    w->ctx   = ctx;
+    w->index = index;
+
+    w->loop = elpis_loop_new(256);
+    if (w->loop == NULL)
+        return ELPIS_ERR;
+
+    w->rxbuf   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd1     = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd2     = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->ctab    = (elpis_cslot_t *)elpis_calloc(ELPIS_BLD_CTAB, sizeof(elpis_cslot_t));
+    w->rrbuf   = (elpis_rrset_buf_t *)elpis_malloc(sizeof(elpis_rrset_buf_t));
+    w->ttl_off = (uint32_t *)elpis_malloc(4096 * sizeof(uint32_t));
+    w->ttl_val = (uint32_t *)elpis_malloc(4096 * sizeof(uint32_t));
+    if (w->rxbuf == NULL || w->txbuf == NULL || w->rd1 == NULL ||
+        w->rd2 == NULL || w->ctab == NULL || w->rrbuf == NULL ||
+        w->ttl_off == NULL || w->ttl_val == NULL)
+        return ELPIS_ENOMEM;
+
+    for (i = 0; i < c->nlisten; i++) {
+        int fd;
+
+        if (c->listen_udp) {
+            if (elpis_sock_udp_listen(&c->listen[i], 1, &fd) == ELPIS_OK) {
+                w->udp_fd[w->n_udp] = fd;
+                if (elpis_loop_add(w->loop, &w->udp_ev[w->n_udp], fd,
+                                   ELPIS_EV_READ, elpis_server_udp_event, w) != ELPIS_OK)
+                    return ELPIS_ERR;
+                if (index == 0 && g_n_primary_udp < ELPIS_MAX_LSOCK)
+                    g_primary_udp[g_n_primary_udp++] = fd;
+                w->n_udp++;
+            } else if (index > 0 && i < g_n_primary_udp) {
+                /*
+                 * No SO_REUSEPORT on this platform: share worker 0's socket.
+                 * Wake-ups are less evenly spread but everything still works.
+                 */
+                fd = dup(g_primary_udp[i]);
+                if (fd < 0)
+                    return ELPIS_ERR;
+                w->udp_fd[w->n_udp] = fd;
+                if (elpis_loop_add(w->loop, &w->udp_ev[w->n_udp], fd,
+                                   ELPIS_EV_READ, elpis_server_udp_event, w) != ELPIS_OK)
+                    return ELPIS_ERR;
+                w->n_udp++;
+            } else {
+                return ELPIS_ERR;
+            }
+        }
+
+        if (c->listen_tcp) {
+            if (elpis_sock_tcp_listen(&c->listen[i], 1, 512, &fd) == ELPIS_OK) {
+                w->tcp_fd[w->n_tcp] = fd;
+                if (elpis_loop_add(w->loop, &w->tcp_ev[w->n_tcp], fd,
+                                   ELPIS_EV_READ, elpis_server_tcp_event, w) != ELPIS_OK)
+                    return ELPIS_ERR;
+                if (index == 0 && g_n_primary_tcp < ELPIS_MAX_LSOCK)
+                    g_primary_tcp[g_n_primary_tcp++] = fd;
+                w->n_tcp++;
+            } else if (index > 0 && i < g_n_primary_tcp) {
+                fd = dup(g_primary_tcp[i]);
+                if (fd < 0)
+                    return ELPIS_ERR;
+                w->tcp_fd[w->n_tcp] = fd;
+                if (elpis_loop_add(w->loop, &w->tcp_ev[w->n_tcp], fd,
+                                   ELPIS_EV_READ, elpis_server_tcp_event, w) != ELPIS_OK)
+                    return ELPIS_ERR;
+                w->n_tcp++;
+            } else {
+                return ELPIS_ERR;
+            }
+        }
+    }
+
+    if (elpis_out_init(w) != ELPIS_OK)
+        return ELPIS_ERR;
+
+    elpis_timer_add(w->loop, &w->maint, 1000, maint_tick, w);
+    return ELPIS_OK;
+}
+
+void elpis_worker_fini(elpis_worker_t *w)
+{
+    unsigned i;
+
+    elpis_out_fini(w);
+    for (i = 0; i < w->n_udp; i++) {
+        elpis_loop_del(w->loop, &w->udp_ev[i]);
+        close(w->udp_fd[i]);
+    }
+    for (i = 0; i < w->n_tcp; i++) {
+        elpis_loop_del(w->loop, &w->tcp_ev[i]);
+        close(w->tcp_fd[i]);
+    }
+    elpis_loop_free(w->loop);
+    elpis_free(w->rxbuf);
+    elpis_free(w->txbuf);
+    elpis_free(w->rd1);
+    elpis_free(w->rd2);
+    elpis_free(w->ctab);
+    elpis_free(w->rrbuf);
+    elpis_free(w->ttl_off);
+    elpis_free(w->ttl_val);
+}
+
+/* Fold this worker's counters into the shared totals. */
+static void publish_stats(elpis_worker_t *w)
+{
+    elpis_stats_t *g = &w->ctx->stats;
+    const uint64_t *src = (const uint64_t *)&w->stats;
+    uint64_t *dst = (uint64_t *)g;
+    static ELPIS_TLS elpis_stats_t last;
+    const uint64_t *prev = (const uint64_t *)&last;
+    unsigned i, n = sizeof(elpis_stats_t) / sizeof(uint64_t);
+
+    for (i = 0; i < n; i++)
+        if (src[i] > prev[i])
+            elpis_stat_inc(&dst[i], src[i] - prev[i]);
+    last = w->stats;
+}
+
+static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
+{
+    elpis_worker_t *w = (elpis_worker_t *)tm->data;
+    elpis_ctx_t *ctx = w->ctx;
+    uint32_t now = elpis_cached_now_s();
+
+    publish_stats(w);
+
+    /* Bounded incremental expiry so no single tick stalls the loop. */
+    elpis_cache_expire(ctx->mcache, now, 512);
+    elpis_cache_expire(ctx->rcache, now, 512);
+    elpis_cache_expire(ctx->infra, now, 128);
+
+    if (ctx->shutdown) {
+        elpis_loop_stop(lp);
+        return;
+    }
+    elpis_timer_add(lp, &w->maint, 1000, maint_tick, w);
+}
+
+void elpis_worker_run(elpis_worker_t *w)
+{
+    elpis_clock_tick();
+    if (w->index == 0) {
+        elpis_prime_start(w);
+        elpis_tld_warm_start(w);
+    }
+    while (!w->ctx->shutdown && !elpis_loop_stopped(w->loop))
+        elpis_loop_once(w->loop, 500);
+    publish_stats(w);
+}
+
+/* ================================================================== */
+/* Threads                                                             */
+/* ================================================================== */
+
+typedef struct {
+    elpis_worker_t w;
+    pthread_t      th;
+    int            started;
+} wslot_t;
+
+static wslot_t *g_workers;
+static unsigned g_nworkers;
+
+static void *worker_main(void *arg)
+{
+    wslot_t *s = (wslot_t *)arg;
+    elpis_worker_run(&s->w);
+    return NULL;
+}
+
+static void *axfr_main(void *arg)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)arg;
+    elpis_axfr_root(ctx);
+    return NULL;
+}
+
+/* ================================================================== */
+/* Signals                                                             */
+/* ================================================================== */
+
+static volatile sig_atomic_t g_sig_quit;
+static volatile sig_atomic_t g_sig_hup;
+static volatile sig_atomic_t g_sig_stats;
+static volatile sig_atomic_t g_sig_flush;
+
+static void on_signal(int sig)
+{
+    switch (sig) {
+    case SIGINT:
+    case SIGTERM: g_sig_quit  = 1; break;
+    case SIGHUP:  g_sig_hup   = 1; break;
+    case SIGUSR1: g_sig_stats = 1; break;
+    case SIGUSR2: g_sig_flush = 1; break;
+    default: break;
+    }
+}
+
+static void install_signals(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, NULL);
+}
+
+/* ================================================================== */
+/* Privilege drop                                                      */
+/* ================================================================== */
+
+/*
+ * /etc/passwd is parsed directly rather than via getpwnam().  On glibc the
+ * NSS machinery is loaded with dlopen(), which a statically linked binary
+ * cannot do reliably -- and a resolver that silently fails to drop privilege
+ * is worse than one that refuses to start.
+ */
+static int lookup_id(const char *file, const char *name, unsigned *id,
+                     unsigned *gid)
+{
+    FILE *fp;
+    char line[1024];
+    int found = 0;
+
+    {
+        uint32_t v;
+        if (elpis_parse_u32(name, &v) == 0) {
+            *id = v;
+            if (gid) *gid = v;
+            return ELPIS_OK;
+        }
+    }
+
+    fp = fopen(file, "r");
+    if (fp == NULL)
+        return ELPIS_ERR;
+    while (fgets(line, sizeof line, fp) != NULL) {
+        char *f[7];
+        unsigned n = 0;
+        char *p = line;
+        while (n < 7) {
+            f[n++] = p;
+            p = strchr(p, ':');
+            if (p == NULL)
+                break;
+            *p++ = '\0';
+        }
+        if (n < 4)
+            continue;
+        if (strcmp(f[0], name) != 0)
+            continue;
+        {
+            uint32_t u = 0, g = 0;
+            if (elpis_parse_u32(f[2], &u) != 0)
+                continue;
+            *id = u;
+            if (gid != NULL && elpis_parse_u32(f[3], &g) == 0)
+                *gid = g;
+        }
+        found = 1;
+        break;
+    }
+    fclose(fp);
+    return found ? ELPIS_OK : ELPIS_ERR;
+}
+
+static int drop_privilege(const elpis_conf_t *c)
+{
+    unsigned uid = 0, gid = 0;
+
+    if (geteuid() != 0)
+        return ELPIS_OK;
+
+    if (c->chroot_dir[0] != '\0') {
+        if (chroot(c->chroot_dir) != 0 || chdir("/") != 0) {
+            elpis_error("chroot to '%s' failed: %s", c->chroot_dir, strerror(errno));
+            return ELPIS_ERR;
+        }
+        elpis_info("chrooted to %s", c->chroot_dir);
+    }
+
+    if (c->group[0] != '\0') {
+        if (lookup_id("/etc/group", c->group, &gid, NULL) != ELPIS_OK) {
+            elpis_error("unknown group '%s'", c->group);
+            return ELPIS_ERR;
+        }
+    }
+    if (c->user[0] != '\0') {
+        unsigned ugid = 0;
+        if (lookup_id("/etc/passwd", c->user, &uid, &ugid) != ELPIS_OK) {
+            elpis_error("unknown user '%s'", c->user);
+            return ELPIS_ERR;
+        }
+        if (c->group[0] == '\0')
+            gid = ugid;
+    }
+
+    if (gid != 0) {
+        if (setgroups(0, NULL) != 0 && errno != EPERM)
+            elpis_warn("setgroups failed: %s", strerror(errno));
+        if (setgid((gid_t)gid) != 0) {
+            elpis_error("setgid(%u) failed: %s", gid, strerror(errno));
+            return ELPIS_ERR;
+        }
+    }
+    if (uid != 0) {
+        if (setuid((uid_t)uid) != 0) {
+            elpis_error("setuid(%u) failed: %s", uid, strerror(errno));
+            return ELPIS_ERR;
+        }
+        if (setuid(0) == 0) {
+            elpis_error("privilege drop did not stick; refusing to run");
+            return ELPIS_ERR;
+        }
+        elpis_info("running as uid %u gid %u", uid, gid);
+    }
+    return ELPIS_OK;
+}
+
+/* ================================================================== */
+/* Entry point                                                         */
+/* ================================================================== */
+
+static void usage(const char *argv0)
+{
+    fprintf(stderr,
+        "elpis %s -- recursive DNS resolver\n"
+        "\n"
+        "usage: %s [options]\n"
+        "  -c FILE   configuration file (default: elpis.conf beside the\n"
+        "            binary, then %s/elpis/elpis.conf, then %s/elpis.conf)\n"
+        "  -d        stay in the foreground and log to stderr\n"
+        "  -t        check the configuration and exit\n"
+        "  -v        increase log verbosity (repeatable)\n"
+        "  -V        print the version and exit\n"
+        "  -h        this message\n",
+        ELPIS_VERSION, argv0, ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
+}
+
+static int write_pidfile(const char *path)
+{
+    FILE *fp;
+    if (path == NULL || *path == '\0')
+        return ELPIS_OK;
+    fp = fopen(path, "w");
+    if (fp == NULL) {
+        elpis_warn("cannot write pidfile '%s': %s", path, strerror(errno));
+        return ELPIS_ERR;
+    }
+    fprintf(fp, "%ld\n", (long)getpid());
+    fclose(fp);
+    return ELPIS_OK;
+}
+
+int main(int argc, char **argv)
+{
+    static elpis_ctx_t ctx;
+    const char *conf_path = NULL;
+    int foreground = 0, testonly = 0, verbose = 0;
+    unsigned nthreads, i;
+    pthread_t axfr_th;
+    int axfr_started = 0;
+
+    for (i = 1; i < (unsigned)argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-c") && i + 1 < (unsigned)argc)      conf_path = argv[++i];
+        else if (!strcmp(a, "-d"))                           foreground = 1;
+        else if (!strcmp(a, "-t"))                           testonly = 1;
+        else if (!strcmp(a, "-v"))                           verbose++;
+        else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
+        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
+        else { fprintf(stderr, "unknown option '%s'\n", a); usage(argv[0]); return 2; }
+    }
+
+    elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_INFO);
+    elpis_simd_init();
+    elpis_clock_tick();
+    elpis_random_init();
+
+    if (elpis_ctx_init(&ctx, conf_path) != ELPIS_OK) {
+        elpis_fatal("startup failed");
+        return 1;
+    }
+    elpis_g = &ctx;
+
+    if (verbose) {
+        elpis_loglevel_t l = ctx.conf.log_level;
+        while (verbose-- > 0 && l < ELPIS_LOG_TRACE)
+            l = (elpis_loglevel_t)(l + 1);
+        elpis_log_set_level(l);
+        ctx.conf.log_level = l;
+    }
+    if (foreground) {
+        ctx.conf.daemonize = 0;
+        elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ctx.conf.log_level);
+    }
+
+    if (testonly) {
+        elpis_info("configuration OK");
+        elpis_ctx_fini(&ctx);
+        return 0;
+    }
+
+    nthreads = ctx.conf.threads ? ctx.conf.threads : elpis_cpu_count();
+    if (nthreads < 1)   nthreads = 1;
+    if (nthreads > 256) nthreads = 256;
+
+    g_workers = (wslot_t *)elpis_calloc(nthreads, sizeof(wslot_t));
+    if (g_workers == NULL) {
+        elpis_fatal("out of memory");
+        return 1;
+    }
+    g_nworkers = nthreads;
+
+    /* Sockets are bound before privileges are dropped. */
+    for (i = 0; i < nthreads; i++) {
+        if (elpis_worker_init(&g_workers[i].w, &ctx, i) != ELPIS_OK) {
+            elpis_fatal("worker %u failed to start", i);
+            return 1;
+        }
+    }
+
+    if (drop_privilege(&ctx.conf) != ELPIS_OK)
+        return 1;
+
+    if (ctx.conf.daemonize && !foreground) {
+        if (daemon(0, 0) != 0) {
+            elpis_error("daemon() failed: %s", strerror(errno));
+            return 1;
+        }
+    }
+    write_pidfile(ctx.conf.pidfile);
+    install_signals();
+
+    elpis_info("listening with %u worker%s", nthreads, nthreads == 1 ? "" : "s");
+
+    if (ctx.conf.root_zone_transfer) {
+        if (pthread_create(&axfr_th, NULL, axfr_main, &ctx) == 0)
+            axfr_started = 1;
+        else
+            elpis_warn("could not start the root zone transfer thread");
+    }
+
+    for (i = 1; i < nthreads; i++) {
+        if (pthread_create(&g_workers[i].th, NULL, worker_main,
+                           &g_workers[i]) != 0) {
+            elpis_error("cannot create worker %u: %s", i, strerror(errno));
+            break;
+        }
+        g_workers[i].started = 1;
+    }
+
+    /* Worker 0 runs on the main thread so signals land somewhere useful. */
+    {
+        elpis_worker_t *w0 = &g_workers[0].w;
+        uint64_t last_stats = elpis_now_ms();
+
+        elpis_clock_tick();
+        elpis_prime_start(w0);
+        elpis_tld_warm_start(w0);
+
+        while (!ctx.shutdown) {
+            elpis_loop_once(w0->loop, 200);
+
+            if (g_sig_quit) {
+                elpis_info("shutting down");
+                ctx.shutdown = 1;
+                break;
+            }
+            if (g_sig_hup) {
+                g_sig_hup = 0;
+                elpis_log_reopen();
+                elpis_cookie_rotate();
+                elpis_random_reseed();
+                elpis_info("reopened log, rotated the cookie secret and "
+                           "reseeded the random pool");
+            }
+            if (g_sig_stats) {
+                g_sig_stats = 0;
+                elpis_stats_report(&ctx);
+            }
+            if (g_sig_flush) {
+                g_sig_flush = 0;
+                elpis_cache_flush(ctx.mcache);
+                elpis_cache_flush(ctx.rcache);
+                /*
+                 * The delegation cache keeps the root hints: without them the
+                 * resolver has nowhere to start after a flush.
+                 */
+                elpis_cache_flush(ctx.dcache);
+                elpis_dcache_put(ctx.dcache, &ctx.root_hints,
+                                 ctx.root_hints.ttl, 1);
+                elpis_info("caches flushed on SIGUSR2");
+            }
+            if (ctx.conf.stats_interval &&
+                elpis_now_ms() - last_stats >= ctx.conf.stats_interval * 1000ull) {
+                last_stats = elpis_now_ms();
+                elpis_stats_report(&ctx);
+            }
+        }
+    }
+
+    ctx.shutdown = 1;
+    for (i = 1; i < nthreads; i++)
+        if (g_workers[i].started)
+            pthread_join(g_workers[i].th, NULL);
+    if (axfr_started)
+        pthread_join(axfr_th, NULL);
+
+    elpis_stats_report(&ctx);
+
+    for (i = 0; i < nthreads; i++)
+        elpis_worker_fini(&g_workers[i].w);
+    elpis_free(g_workers);
+
+    if (ctx.conf.pidfile[0] != '\0')
+        unlink(ctx.conf.pidfile);
+
+    elpis_ctx_fini(&ctx);
+    elpis_log_fini();
+    return 0;
+}

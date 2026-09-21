@@ -1,0 +1,10 @@
+# Build output
+*.o
+*.d
+/elpis
+/tests/elpis-test
+
+# Local overrides
+/elpis.local.conf
+core
+core.*

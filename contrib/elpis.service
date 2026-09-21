@@ -1,0 +1,51 @@
+# systemd unit for Elpis.
+#
+# Sockets are bound before privileges are dropped, so binding port 53 works
+# with CAP_NET_BIND_SERVICE alone -- no need to run as root.
+#
+#   install -m0644 contrib/elpis.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now elpis
+
+[Unit]
+Description=Elpis recursive DNS resolver
+Documentation=https://github.com/Anime4000/elpis-resolver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/elpis -d
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+
+User=elpis
+Group=elpis
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# The resolver reads its config at startup and writes nothing afterwards.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadOnlyPaths=/etc/elpis
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The cache sizes itself from what the host has.  Capping the cgroup here is
+# also how you cap the cache: Elpis reads memory.max, not just MemTotal.
+# MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
