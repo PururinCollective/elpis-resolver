@@ -7,7 +7,7 @@
 #   systemctl daemon-reload && systemctl enable --now elpis
 
 [Unit]
-Description=ΕΛΠΙΣ recursive DNS resolver
+Description=ELPIS recursive DNS resolver
 Documentation=https://github.com/PururinCollective/elpis-resolver
 After=network-online.target
 Wants=network-online.target
