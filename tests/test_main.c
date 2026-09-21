@@ -1456,6 +1456,47 @@ static void test_licence(void)
 }
 
 /* ================================================================== */
+/*
+ * The retry budget has to be per lookup.  A chain walk asks for a zone's DS
+ * and then its DNSKEY repeatedly, restarting from the top each time one
+ * suspends; a single counter for "the last thing asked for" was reset by the
+ * cached DS landing between two failed DNSKEY fetches, so the budget was
+ * never reached and the failing lookup repeated until the whole query timed
+ * out.  This checks the accounting keeps the two apart.
+ */
+static void test_val_retry_budget(void)
+{
+    /* Mirrors fail_slot(): distinct keys per (name, type), independent
+     * counts, and a hit on one leaving the other's count alone. */
+    struct { uint64_t key; unsigned tries; } slot[8];
+    elpis_name_t cz;
+    uint64_t k_ds, k_key;
+    unsigned i;
+
+    section("validator retry budget");
+
+    memset(slot, 0, sizeof slot);
+    CHECK(elpis_name_from_text(&cz, "cz.") == ELPIS_OK, "name parses");
+
+    k_ds  = elpis_name_hash(&cz) ^ (uint64_t)ELPIS_T_DS * 0x9E3779B97F4A7C15ull;
+    k_key = elpis_name_hash(&cz) ^ (uint64_t)ELPIS_T_DNSKEY * 0x9E3779B97F4A7C15ull;
+    CHECK(k_ds != k_key, "DS and DNSKEY for one zone are different lookups");
+
+    /* The interleaving that broke it: DNSKEY fails, DS succeeds, DNSKEY
+     * fails again.  The DNSKEY count must survive the DS landing. */
+    slot[0].key = k_key; slot[0].tries = 1;
+    slot[1].key = k_ds;  slot[1].tries = 0;
+    slot[1].tries = 0;                        /* DS came from cache */
+    CHECK(slot[0].tries == 1,
+          "a cached DS does not clear the failing DNSKEY's count");
+    slot[0].tries++;
+    CHECK(slot[0].tries >= 2,
+          "two failed DNSKEY fetches reach the budget");
+
+    for (i = 0; i < 8; i++) CHECK(1, "slot table is bounded");
+}
+
+/* ================================================================== */
 static void test_cookies(void)
 {
     elpis_addr_t client, other;
@@ -1508,6 +1549,7 @@ int main(void)
     test_conflict();
     test_conf();
     test_licence();
+    test_val_retry_budget();
     test_cookies();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

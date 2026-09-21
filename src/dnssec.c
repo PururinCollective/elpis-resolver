@@ -659,6 +659,16 @@ enum {
 #define VAL_MAX_STEPS 384
 #define VAL_MAX_SETS    256
 
+/* Distinct lookups whose failures are counted within one validation.  A chain
+ * walk touches a DS and a DNSKEY per zone; eight covers a deep one. */
+#define VAL_FAILED      8
+#define VAL_FAIL_TRIES  2
+
+typedef struct {
+    uint64_t key;                 /* hash of (name, type); 0 when unused */
+    unsigned tries;
+} val_fail_t;
+
 #define SS_UNKNOWN  0
 #define SS_SECURE   1
 #define SS_INSECURE 2
@@ -685,6 +695,16 @@ typedef struct {
     unsigned          waiting : 1;
     unsigned          pending_tries;
     unsigned          steps;
+    /*
+     * How many times each distinct lookup has come back empty.  This has to
+     * be per (name, type) and not a single counter for "the last thing we
+     * asked for": the descent asks for a zone's DS and then its DNSKEY, over
+     * and over, restarting from the top every time one of them suspends.  A
+     * single counter was reset by the cached DS landing between two failed
+     * DNSKEY fetches, so it never reached the limit and the lookup repeated
+     * until the whole query timed out twenty seconds later.
+     */
+    val_fail_t        failed[VAL_FAILED];
 
     uint8_t           status[VAL_MAX_SETS];   /* per leading record index */
     /*
@@ -745,6 +765,32 @@ void elpis_val_free(elpis_task_t *t)
         val_release((val_t *)t->val);
         t->val = NULL;
     }
+}
+
+static uint64_t inflight_hash(const elpis_name_t *n, uint16_t type);
+
+static val_fail_t *fail_slot(val_t *v, const elpis_name_t *n, uint16_t type)
+{
+    uint64_t key = inflight_hash(n, type);
+    unsigned i, weakest = 0;
+
+    for (i = 0; i < VAL_FAILED; i++)
+        if (v->failed[i].key == key)
+            return &v->failed[i];
+    for (i = 0; i < VAL_FAILED; i++)
+        if (v->failed[i].key == 0) {
+            v->failed[i].key = key;
+            v->failed[i].tries = 0;
+            return &v->failed[i];
+        }
+    /* Full: take the slot with the fewest failures, which is the one whose
+     * count matters least. */
+    for (i = 1; i < VAL_FAILED; i++)
+        if (v->failed[i].tries < v->failed[weakest].tries)
+            weakest = i;
+    v->failed[weakest].key = key;
+    v->failed[weakest].tries = 0;
+    return &v->failed[weakest];
 }
 
 static int val_cached(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
@@ -908,17 +954,21 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
 {
     val_t *v = (val_t *)t->val;
 
-    if (val_cached(t, n, type, out)) {
-        v->pending_tries = 0;
-        return 1;
-    }
-    /*
-     * The child ran and left nothing behind.  One retry, because the usual
-     * cause is a timeout on a cold cache rather than a missing record -- but
-     * only one, or a zone that genuinely has no DNSKEY becomes a loop.
-     */
-    if (v->pending_type == type && elpis_name_eq(&v->pending, n)) {
-        if (v->pending_tries >= 2) {
+    {
+        val_fail_t *slot = fail_slot(v, n, type);
+
+        if (val_cached(t, n, type, out)) {
+            slot->tries = 0;            /* this one landed; forget its misses */
+            v->pending_tries = 0;
+            return 1;
+        }
+        /*
+         * The child ran and left nothing behind.  One retry, because the
+         * usual cause is a timeout on a cold cache rather than a missing
+         * record -- but only one, or a zone that genuinely has no DNSKEY
+         * becomes a loop that runs until the query times out.
+         */
+        if (slot->tries >= VAL_FAIL_TRIES) {
             /*
              * Say which record could not be had.  "Could not fetch validation
              * material for www.example.com A" names the question the client
@@ -931,13 +981,11 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
                           __LINE__,
                           "dnssec: no %s for %s after %u attempts",
                           elpis_type_name(type),
-                          elpis_name_str(n, nb, sizeof nb),
-                          v->pending_tries);
+                          elpis_name_str(n, nb, sizeof nb), slot->tries);
             elpis_rrset_buf_init(out, n, type, ELPIS_CLASS_IN, 0);
             return 1;
         }
-    } else {
-        v->pending_tries = 0;
+        slot->tries++;
     }
 
     v->pending = *n;
