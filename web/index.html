@@ -188,6 +188,13 @@ function wmean(vals, weights){
 }
 function ms(us){ return us >= 1000 ? (us/1000).toFixed(1) + ' ms'
                                    : (us/1000).toFixed(2) + ' ms'; }
+/* cpu_milli counts 1000 per fully busy core, so four busy cores read 4000.
+   Divide by the cores actually present to get the figure every other tool
+   shows: a share of the whole machine, 0 to 100. */
+function cpuPct(d, v){
+  var cores = (d.server && d.server.cores) || 1;
+  return (v || 0) / (10 * cores);
+}
 
 /* ---------- graphs (Task Manager style) ---------- */
 function graph(el, series, opts){
@@ -406,9 +413,11 @@ var VIEWS = [
 { id:'cpu', title:'CPU', w:470, h:260,
   icon:"<svg viewBox='0 0 24 24'><rect x='6' y='6' width='12' height='12' rx='1'/><path d='M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4'/></svg>",
   render: function(b, d){
-    var pct = (last(d.history.cpu)/10).toFixed(1);
+    var cores = d.server.cores || 1;
+    var pct = cpuPct(d, last(d.history.cpu)).toFixed(1);
     var L = d.loop || {turns:0,idle:0,nosleep:0,timers:0,slowest:0};
-    b.innerHTML = gpanel('% of one core', pct + '%') +
+    var scaled = d.history.cpu.map(function(v){ return v / cores; });
+    b.innerHTML = gpanel('% of all ' + cores + ' cores', pct + '%') +
       "<div class='kv' style='margin-top:6px'>" +
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
@@ -423,7 +432,7 @@ var VIEWS = [
       "hundred times a second and almost never idly. Hundreds of thousands of " +
       "idle turns means it is spinning.</div>";
     graph(b.querySelector('canvas'),
-      [{ data: d.history.cpu, color: '#2f9ee0' }], { h: 104 });
+      [{ data: scaled, color: '#2f9ee0' }], { h: 104, max: 1000 });
   }},
 
 { id:'mem', title:'Memory', w:470, h:300,
@@ -532,7 +541,7 @@ var VIEWS = [
 function paint(){
   var k;
   for (k in wins) if (wins[k]) wins[k].def.render(wins[k].body, D);
-  $('s-cpu').textContent = (last(D.history.cpu)/10).toFixed(0) + '%';
+  $('s-cpu').textContent = cpuPct(D, last(D.history.cpu)).toFixed(0) + '%';
   $('s-ram').textContent = bytes(last(D.history.rss));
   $('s-qps').textContent = num(last(D.history.qps));
   $('s-hit').textContent = D.stats.hitpct + '%';

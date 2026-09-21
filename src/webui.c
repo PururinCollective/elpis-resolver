@@ -429,6 +429,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, ",\"simd\":");   bputq(b, elpis_simd_backend());
     bputs(b, ",\"loop\":");   bputq(b, elpis_loop_backend());
     bputs(b, ",\"workers\":"); bputu(b, c->threads ? c->threads : elpis_cpu_count());
+    bputs(b, ",\"cores\":");   bputu(b, elpis_cpu_count());
     bputs(b, ",\"dnssec\":"); bputs(b, c->dnssec ? "true" : "false");
     bputs(b, ",\"listen\":[");
     for (i = 0; i < c->nlisten; i++) {
