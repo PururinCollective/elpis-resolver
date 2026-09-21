@@ -34,8 +34,34 @@ VM that path measures **600,000–780,000 queries/s** at a 100% hit rate, and
 around 200,000 on a single thread.
 
 Entries are refreshed in the background before they expire, so a popular name
-never goes cold and stale data is only ever served while a refresh is actually
-in flight.
+never goes cold. The refresh starts when `prefetch-threshold` percent of the
+original TTL is left — 10 by default, so a 300-second record is refreshed with
+30 seconds to spare.
+
+**A failed refresh never costs you the answer.** The two ways a refresh can go
+wrong deserve opposite treatment, and they get it:
+
+| refresh comes back | what it means | what happens |
+|---|---|---|
+| timeout, SERVFAIL, REFUSED | nothing about the name | keep serving it, retry with backoff |
+| authoritative NXDOMAIN | the name is gone | believed, but only after it repeats |
+
+An unusable reply says nothing about the name, so the cached answer stays and
+is served under RFC 8767 while the retries back off — 1 second, then 2, 4, 8,
+up to a minute. The backoff is the point: the usual reason a refresh fails is
+that the far side is rate limiting, and asking once a second is how a brief
+limit becomes a permanent one. Measured against an upstream that went dark for
+40 seconds, it is the difference between 28 refresh attempts and 5.
+
+An NXDOMAIN is not a failure, though — it is an answer, and one that a
+rate-limited server can give by mistake. Believing it immediately would let a
+single bad reply take a live name down; ignoring it forever would serve a
+deleted name for the whole `serve-stale` window, which is a day by default.
+So it has to repeat `refresh-nxdomain-confirmations` times in a row, and
+because the attempts are backed off that is really a length of time: 3 is about
+seven seconds, 6 about a minute. Below that the glitch is absorbed and no
+client ever sees it; above it the records are dropped and the next query
+resolves for real.
 
 **Measures the roots before it needs them.** At startup it asks all twenty-six
 root addresses — thirteen names on IPv4 and IPv6 — the same small question a
@@ -191,6 +217,8 @@ access-control: 127.0.0.0/8 allow
 cache-size: auto           # or 2G
 serve-stale: 86400         # RFC 8767
 prefetch: yes
+prefetch-threshold: 10     # refresh with 10% of the TTL left
+refresh-nxdomain-confirmations: 3
 
 dnssec: yes
 root-zone-transfer: no     # yes = pull every TLD delegation at startup

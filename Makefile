@@ -131,4 +131,7 @@ clean:
 	rm -f $(OBJ) tests/test_main.o $(PROG) tests/elpis-test
 	rm -f src/*.d src/crypto/*.d tests/*.d
 
--include $(OBJ:.o=.d)
+# The test object is built outside $(OBJ), so its own .d has to be named here
+# as well -- otherwise a change to a header leaves tests/test_main.o stale and
+# it is linked against a struct layout it was not compiled for.
+-include $(OBJ:.o=.d) tests/test_main.d

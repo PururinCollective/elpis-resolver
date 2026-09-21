@@ -58,6 +58,13 @@ typedef struct {
     uint32_t     serve_stale_reply_ttl;
     uint8_t      prefetch;
     unsigned     prefetch_pct;             /* refresh under this % of TTL */
+    /*
+     * How many refreshes in a row must come back NXDOMAIN before the cached
+     * answer is given up.  Attempts are spaced by an exponential backoff, so
+     * this is really a length of time: 3 is about seven seconds, 4 about
+     * fifteen, 6 about a minute.
+     */
+    unsigned     refresh_nx_confirm;
 
     /* --- roots and TLDs ------------------------------------------- */
     char         root_hints[512];

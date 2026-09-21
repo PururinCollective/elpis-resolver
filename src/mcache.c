@@ -12,7 +12,13 @@ typedef struct {
     uint8_t  qnamelen;
     uint8_t  kflags;
     uint8_t  sec;
-    uint8_t  pad0;
+    /*
+     * Background-refresh bookkeeping.  Low nibble: consecutive refreshes that
+     * came back unusable, which sets how long to wait before trying again.
+     * High nibble: consecutive refreshes that came back an authoritative
+     * NXDOMAIN, which decides when to believe the name really is gone.
+     */
+    uint8_t  refresh;
     uint16_t rcode;
     uint16_t flags;        /* response flags worth replaying (AA, AD)     */
     uint16_t ancount, nscount, arcount;
@@ -127,9 +133,27 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
      * storm for every popular name.
      */
     if (prefetch_pct > 0 && e->ttl > 0) {
-        uint32_t threshold = e->ttl / 100u * prefetch_pct;
+        /*
+         * Percentage of the original TTL, multiplied before it is divided.
+         * Dividing first truncated every TTL below 100 seconds to a threshold
+         * of zero, so the shortest-lived entries -- the ones a refresh is
+         * most worth doing for -- were never refreshed until they had already
+         * gone stale.
+         */
+        uint32_t threshold =
+            (uint32_t)(((uint64_t)e->ttl * prefetch_pct) / 100u);
         if (rem == 0 || rem <= threshold) {
-            if (now - e->prefetch_at >= 1u) {
+            /*
+             * One refresh per second per key is fine while they are working,
+             * but a refresh that keeps failing must not keep asking at that
+             * rate: the usual reason a refresh fails is that the far side is
+             * rate limiting us, and hammering it once a second is how a brief
+             * limit turns into a permanent one.  Back off to a minute.
+             */
+            unsigned fails = (unsigned)(e->refresh & 0x0Fu);
+            uint32_t wait  = 1u << (fails > 6u ? 6u : fails);
+
+            if (now - e->prefetch_at >= wait) {
                 e->prefetch_at = now;
                 info->want_prefetch = 1;
             }
@@ -337,4 +361,60 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
     memcpy(ment_blob(e), wire + qend, bloblen);
 
     return elpis_cache_insert(c, e, k);
+}
+
+/*
+ * Record how a background refresh turned out.
+ *
+ * Two different things can go wrong and they deserve opposite treatment.  An
+ * unusable reply -- a timeout, SERVFAIL, REFUSED -- says nothing about the
+ * name, so the entry stays and keeps being served while we wait longer and
+ * longer before trying again.  An authoritative NXDOMAIN is real data, and
+ * ignoring it forever would serve a deleted name for the whole serve-stale
+ * window; but believing a single one would let one glitch from a rate-limited
+ * server take out a name that is perfectly fine.  So it has to say so twice in
+ * a row, after which the entry is dropped and the next query resolves for
+ * real.
+ */
+int elpis_mcache_refresh_outcome(elpis_cache_t *c, const elpis_mkey_t *k,
+                                 int outcome, unsigned nx_confirm)
+{
+    unsigned shard;
+    ment_t *e;
+    int drop = 0;
+
+    e = (ment_t *)elpis_cache_read_begin(c, k->hash, k, &shard);
+    if (e == NULL)
+        return 0;
+
+    {
+        /*
+         * Every unsuccessful refresh widens the gap before the next one,
+         * whatever went wrong.  That matters for the NXDOMAIN count as much as
+         * for the rest: the confirmations have to be spread over time to mean
+         * anything, and at one a second three of them would say no more than
+         * one does.  Backed off, the third lands some seconds after the first,
+         * so a server having a brief bad moment gets to recover before its
+         * answer is believed.
+         */
+        unsigned fails = (unsigned)(e->refresh & 0x0Fu);
+        unsigned nx    = (unsigned)(e->refresh >> 4);
+
+        if (fails < 15u)
+            fails++;
+        if (outcome == ELPIS_REFRESH_NXDOMAIN) {
+            if (++nx >= nx_confirm)
+                drop = 1;
+        } else {
+            nx = 0;             /* not a denial: start that count over */
+        }
+        if (nx > 15u)
+            nx = 15u;
+        e->refresh = (uint8_t)((nx << 4) | fails);
+    }
+    elpis_cache_read_end(c, shard);
+
+    if (drop)
+        elpis_cache_remove(c, k->hash, k);
+    return drop;
 }

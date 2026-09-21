@@ -24,6 +24,7 @@
 
 static void task_finish(elpis_task_t *t);
 static void cache_store_answer(elpis_task_t *t);
+static void note_refresh_outcome(elpis_task_t *t);
 
 /* ================================================================== */
 /* Small helpers                                                       */
@@ -1533,6 +1534,8 @@ static void task_finish(elpis_task_t *t)
      */
     if (t->rcode == ELPIS_RC_NOERROR && t->sec != ELPIS_SEC_BOGUS)
         cache_store_answer(t);
+    else if (t->prefetch)
+        note_refresh_outcome(t);
 
     /*
      * Completion callbacks run for parent-less tasks too: priming and cache
@@ -1587,6 +1590,47 @@ static void task_finish(elpis_task_t *t)
 
     elpis_task_respond(t);
     elpis_task_free(t);
+}
+
+/*
+ * A background refresh finished without producing anything cacheable.  Tell
+ * the message cache, so it can wait longer before the next attempt and, if an
+ * authoritative NXDOMAIN keeps repeating, stop serving the old answer.
+ */
+static void note_refresh_outcome(elpis_task_t *t)
+{
+    elpis_mkey_t k;
+    uint8_t folded[ELPIS_MAX_NAME];
+
+    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
+    elpis_simd_lower(folded, folded, t->orig_qname.len);
+
+    k.qname    = folded;
+    k.qnamelen = t->orig_qname.len;
+    k.qtype    = t->orig_qtype;
+    k.qclass   = t->qclass;
+    k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
+                           (t->client_cd ? ELPIS_MK_CD : 0u));
+    elpis_mkey_hash(&k);
+
+    if (elpis_mcache_refresh_outcome(t->w->ctx->mcache, &k,
+                                     t->rcode == ELPIS_RC_NXDOMAIN
+                                         ? ELPIS_REFRESH_NXDOMAIN
+                                         : ELPIS_REFRESH_FAILED,
+                                     t->w->ctx->conf.refresh_nx_confirm) != 1)
+        return;
+
+    /*
+     * The name is gone, and the prebuilt reply has been dropped -- but the
+     * records it was built from are still in the RRset cache, and serving
+     * those stale is exactly what the next query would do.  RFC 8767 is for
+     * when an answer cannot be obtained; this one was obtained, and it says
+     * the name does not exist.  Let the records go so the NXDOMAIN stands.
+     */
+    elpis_rcache_del(t->w->ctx->rcache, &t->orig_qname, t->orig_qtype,
+                     t->qclass);
+    elpis_rcache_del(t->w->ctx->rcache, &t->orig_qname, ELPIS_T_CNAME,
+                     t->qclass);
 }
 
 /*

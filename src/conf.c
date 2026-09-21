@@ -50,6 +50,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->serve_stale_reply_ttl = 30;
     c->prefetch           = 1;
     c->prefetch_pct       = 10;
+    c->refresh_nx_confirm = 3;
 
     c->prime_root         = 1;
     c->probe_roots        = 1;
@@ -285,6 +286,12 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("serve-stale"))          return want_dur(&p, key, val, &c->serve_stale);
     if (KEY("serve-stale-reply-ttl")) return want_dur(&p, key, val, &c->serve_stale_reply_ttl);
     if (KEY("prefetch"))             return want_bool(&p, key, val, &c->prefetch);
+    if (KEY("refresh-nxdomain-confirmations")) {
+        uint32_t v;
+        if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
+        c->refresh_nx_confirm = (unsigned)ELPIS_CLAMP(v, 1u, 15u);
+        return ELPIS_OK;
+    }
     if (KEY("prefetch-threshold")) {
         uint32_t v;
         if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;

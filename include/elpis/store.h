@@ -77,6 +77,17 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
  * `ttl_off`/`ttl_val` are the message-relative TTL field offsets recorded by
  * the builder.
  */
+/*
+ * How a background refresh ended, for elpis_mcache_refresh_outcome().  An
+ * NXDOMAIN has to repeat `nx_confirm` times in a row before the cached answer
+ * is given up, so one bad reply cannot take a live name down.
+ */
+#define ELPIS_REFRESH_FAILED    0
+#define ELPIS_REFRESH_NXDOMAIN  1
+/* Returns 1 when the cached answer was given up and should be re-resolved. */
+int elpis_mcache_refresh_outcome(elpis_cache_t *c, const elpis_mkey_t *k,
+                                 int outcome, unsigned nx_confirm);
+
 int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint8_t *wire, size_t len, size_t qend,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
