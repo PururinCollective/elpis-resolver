@@ -203,7 +203,7 @@ Then point AdGuard Home's upstream at `[2402:4e20::1111]:53`. The shipped
 |---|---|
 | [Caching](docs/caching.md) | the three caches, background refresh, what happens when a refresh fails, delegation reuse |
 | [DNSSEC](docs/dnssec.md) | validation, RSA / ECDSA / Ed25519 / ML-DSA-44, cookies, standards |
-| [Configuration](docs/configuration.md) | every setting, privileged ports, binding, signals |
+| [Configuration](docs/configuration.md) | every setting, privileged ports, binding, signals, the identity probe |
 | [Troubleshooting](docs/troubleshooting.md) | queries arriving but answers not coming back, port conflicts, malformed input |
 | [Status page](docs/status-page.md) | the read-only web interface, and how to reach it safely |
 | [Internals](docs/internals.md) | why the hot paths look the way they do, and what is deliberately missing |

@@ -860,6 +860,14 @@ var VIEWS = [
         "<p>Copyright 2026 Pururin Collective</p>" +
       "</div>" +
       "<div class='kv'>" +
+      "<b>edition</b><span>" + esc(d.server.edition || 'unspecified') + "</span>" +
+      (d.server.operator ?
+        "<b>operator</b><span>" + esc(d.server.operator) + "</span>" : "") +
+      "<b>identity probe</b><span>" + (d.server.identity ?
+        "<code>" + esc(d.server.identity) + "</code>" :
+        "<span style='color:var(--dim)'>off</span>") + "</span>" +
+      "</div><div style='height:10px'></div>" +
+      "<div class='kv'>" +
       "<b>version</b><span>" + esc(d.server.version) + "</span>" +
       "<b>build</b><span>" + (d.server.build ?
           "<code>" + esc(d.server.build) + "</code>" :

@@ -104,6 +104,17 @@ void elpis_cpu_model(char *out, size_t outsz);
  * ago on a box that has been up for a month is a different story from one
  * where both numbers agree. */
 uint64_t elpis_host_uptime(void);
+
+/* Kernel and architecture, e.g. "Linux 7.0.0-31-generic x86_64", and the
+ * host's own name.  Either may come back empty.  Both identify the machine
+ * rather than the software, so callers must treat them as sensitive: a kernel
+ * version is a CVE lookup key and a hostname often describes a network. */
+void elpis_os_string(char *out, size_t outsz);
+
+/* The commit this binary was built from, "" outside a git checkout.  Captured
+ * by make into a generated header that only util.c includes. */
+const char *elpis_build_rev(void);
+void elpis_host_name(char *out, size_t outsz);
 uint32_t elpis_random_u32(void);
 /* Uniform in [0, n) without modulo bias. */
 uint32_t elpis_random_below(uint32_t n);

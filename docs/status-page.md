@@ -34,7 +34,7 @@ puts the defaults back.
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
 | **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
-| **About** | version, the commit the binary was built from, uptime, and which ML-DSA parameter sets are live |
+| **About** | edition and operator, version, the commit the binary was built from, uptime, and which ML-DSA parameter sets are live |
 
 The counts are exact, not sampled. Sampling was tried first and it is useless
 here: a resolver answering a few hundred queries a second gives too few samples
@@ -61,6 +61,14 @@ built, so the commit alone does not describe the binary. Built outside a git
 checkout — from a release tarball — the field reads *not a git checkout*.
 Quote this line in a bug report and there is no ambiguity about what was
 running.
+
+The same facts are available without logging in, over DNS, from a client the
+access-control list admits — see
+[asking a resolver what it is](configuration.md#asking-a-resolver-what-it-is):
+
+```bash
+nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
+```
 
 ## ML-DSA, active and available
 

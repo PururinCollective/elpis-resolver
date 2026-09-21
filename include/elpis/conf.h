@@ -20,6 +20,16 @@
 #define ELPIS_MAX_FORWARD 8
 #define ELPIS_MAX_STUB   16
 
+/*
+ * The default name of the identity probe.  It sits in an undelegated TLD on
+ * purpose: nothing on the public internet can ever own it, so the probe only
+ * answers someone querying this resolver directly -- it cannot be reached
+ * through a forwarder chain by accident, and no scan of the DNS will turn it
+ * up.  Change it with identity-name: if you would rather it were a name only
+ * you know.
+ */
+#define ELPIS_IDENTITY_NAME_DEFAULT "elpis.sakurako.oomuro"
+
 typedef struct {
     elpis_prefix_t prefix;
     uint8_t      allow;
@@ -130,6 +140,17 @@ typedef struct {
     uint8_t      block_private_reverse;   /* RFC 6761 / AS112        */
     uint8_t      refuse_any;              /* RFC 8482                */
     uint8_t      answer_version_bind;
+
+    /*
+     * The identity probe: one TXT name this resolver answers about itself,
+     * for "what am I actually talking to?".  What it says is deliberately
+     * about the software, not the machine -- see localzone.c.
+     */
+    uint8_t      identity;                 /* answer it at all           */
+    uint8_t      identity_system;          /* add OS, kernel and hostname*/
+    char         identity_name[256];
+    char         edition[32];              /* self-declared deployment   */
+    char         operator_name[96];        /* self-declared, optional    */
 
     /* --- process -------------------------------------------------- */
     char         user[64];

@@ -9,6 +9,7 @@
 #include "elpis/resolver.h"
 #include "elpis/rdata.h"
 #include "elpis/log.h"
+#include "elpis/simd.h"
 
 /* Reverse zones that describe address space which cannot appear on the
  * public internet (RFC 6303 section 4, RFC 6761 section 6.1). */
@@ -44,6 +45,27 @@ static int name_matches(const elpis_name_t *q, const char *text)
     if (elpis_name_from_text(&n, text) != ELPIS_OK)
         return 0;
     return elpis_name_is_subdomain(q, &n);
+}
+
+/* Exactly this name, not anything beneath it. */
+static int name_equals(const elpis_name_t *q, const char *text)
+{
+    elpis_name_t n;
+    if (elpis_name_from_text(&n, text) != ELPIS_OK)
+        return 0;
+    return elpis_name_eq(q, &n);
+}
+
+/* Append one character-string to TXT rdata, silently dropping what will not
+ * fit: a truncated identity is better than a malformed answer. */
+static void txt_add(uint8_t *rd, size_t cap, size_t *len, const char *s)
+{
+    size_t l = strlen(s);
+    if (l > 255) l = 255;
+    if (*len + 1u + l > cap) return;
+    rd[*len] = (uint8_t)l;
+    memcpy(rd + *len + 1u, s, l);
+    *len += 1u + l;
 }
 
 /*
@@ -125,6 +147,90 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
             }
         }
         n = build_simple(w, m, ELPIS_RC_REFUSED, out, cap, NULL, 0, 0, NULL, 0);
+        if (n == 0) return 0;
+        *outlen = n;
+        return 1;
+    }
+
+    /*
+     * The identity probe.  One TXT name, answered only to a client the ACL
+     * already let in, saying what this resolver IS rather than what it is
+     * running on:
+     *
+     *   nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
+     *
+     * What is deliberately never in here is any address.  The resolver knows
+     * its own public v4, v6 and AS -- the status page shows them -- and this
+     * is exactly the wrong place to hand them out: a probe answered over UDP
+     * with no authentication would let anyone who can reach the port map the
+     * operator's upstream, and behind a forwarder it would disclose an
+     * address the querier could not otherwise see.  Ask the status page,
+     * which is authenticated, or the machine itself.
+     *
+     * The OS, kernel and hostname are behind identity-system: for the same
+     * reason version banners are -- a kernel release is a CVE lookup key and
+     * a hostname usually describes somebody's network.
+     */
+    if (c->identity && c->identity_name[0] &&
+        name_equals(&m->qname, c->identity_name)) {
+        uint8_t rd[512];
+        size_t  rdlen = 0;
+        char    tmp[256];
+
+        if (m->qtype != ELPIS_T_TXT && m->qtype != ELPIS_T_ANY) {
+            /* The name exists; it just has nothing of that type. */
+            n = build_simple(w, m, ELPIS_RC_NOERROR, out, cap, NULL, 0, 0, NULL, 0);
+            if (n == 0) return 0;
+            *outlen = n;
+            return 1;
+        }
+
+        snprintf(tmp, sizeof tmp, "elpis=%s", ELPIS_VERSION);
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        snprintf(tmp, sizeof tmp, "edition=%s",
+                 c->edition[0] ? c->edition : "unspecified");
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        if (elpis_build_rev()[0]) {
+            snprintf(tmp, sizeof tmp, "build=%s", elpis_build_rev());
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+        }
+        if (c->operator_name[0]) {
+            snprintf(tmp, sizeof tmp, "operator=%s", c->operator_name);
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+        }
+
+        snprintf(tmp, sizeof tmp, "uptime=%lu",
+                 (unsigned long)((elpis_now_ms() - w->ctx->start_ms) / 1000u));
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        snprintf(tmp, sizeof tmp, "workers=%u",
+                 c->threads ? c->threads : elpis_cpu_count());
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        snprintf(tmp, sizeof tmp, "simd=%s", elpis_simd_backend());
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        snprintf(tmp, sizeof tmp, "dnssec=%s", c->dnssec ? "validating" : "off");
+        txt_add(rd, sizeof rd, &rdlen, tmp);
+
+        if (c->identity_system) {
+            char sys[160];
+            elpis_os_string(sys, sizeof sys);
+            if (sys[0]) {
+                snprintf(tmp, sizeof tmp, "system=%s", sys);
+                txt_add(rd, sizeof rd, &rdlen, tmp);
+            }
+            elpis_host_name(sys, sizeof sys);
+            if (sys[0]) {
+                snprintf(tmp, sizeof tmp, "host=%s", sys);
+                txt_add(rd, sizeof rd, &rdlen, tmp);
+            }
+        }
+
+        n = build_simple(w, m, ELPIS_RC_NOERROR, out, cap, &m->qname,
+                         ELPIS_T_TXT, 0, rd, (uint16_t)rdlen);
         if (n == 0) return 0;
         *outlen = n;
         return 1;

@@ -7,6 +7,7 @@
  */
 #include "elpis/util.h"
 #include "elpis/log.h"
+#include "gitrev.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -14,6 +15,8 @@
 #include <stdarg.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <sys/utsname.h>
 
 #if defined(__linux__)
 #  include <sys/sysinfo.h>
@@ -388,6 +391,35 @@ uint64_t elpis_host_uptime(void)
 #else
     return 0;
 #endif
+}
+
+const char *elpis_build_rev(void)
+{
+    return ELPIS_GITREV;
+}
+
+void elpis_os_string(char *out, size_t outsz)
+{
+    struct utsname u;
+
+    out[0] = '\0';
+    if (uname(&u) != 0)
+        return;
+    /* sysname, release and machine only.  The version field is a build
+     * banner tens of characters long that says nothing extra here. */
+    snprintf(out, outsz, "%s %s %s", u.sysname, u.release, u.machine);
+}
+
+void elpis_host_name(char *out, size_t outsz)
+{
+    struct utsname u;
+
+    out[0] = '\0';
+    if (uname(&u) == 0)
+        elpis_strlcpy(out, u.nodename, outsz);
+    else if (gethostname(out, outsz) != 0)
+        out[0] = '\0';
+    out[outsz - 1] = '\0';
 }
 
 unsigned elpis_cpu_count(void)

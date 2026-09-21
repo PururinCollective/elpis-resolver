@@ -1198,6 +1198,47 @@ static void test_conf(void)
     elpis_strlcpy(line, "listen: [2001:db8::1]:53", sizeof line);
     CHECK(elpis_conf_parse_line(&c, line, "-", 7) == ELPIS_OK,
           "bracketed IPv6 listener");
+
+    /* The identity probe: what it says about a deployment, and what it is
+     * careful not to say about the machine. */
+    CHECK(c.identity == 1, "identity probe answers by default");
+    CHECK(c.identity_system == 0,
+          "the OS, kernel and hostname are not disclosed by default");
+    CHECK(strcmp(c.identity_name, ELPIS_IDENTITY_NAME_DEFAULT) == 0,
+          "identity probe has its default name");
+    CHECK(strcmp(c.edition, "community") == 0, "edition defaults to community");
+    CHECK(c.operator_name[0] == '\0', "no operator is claimed by default");
+
+    elpis_strlcpy(line, "edition: commercial", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 8) == ELPIS_OK &&
+          strcmp(c.edition, "commercial") == 0, "edition is settable");
+    elpis_strlcpy(line, "operator: Example ISP, AS64500", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 9) == ELPIS_OK &&
+          strcmp(c.operator_name, "Example ISP, AS64500") == 0,
+          "operator keeps its spaces and commas");
+    elpis_strlcpy(line, "identity-name: whoami.internal.example", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 10) == ELPIS_OK &&
+          strcmp(c.identity_name, "whoami.internal.example") == 0,
+          "identity probe can be moved to a private name");
+    elpis_strlcpy(line, "identity: no", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 11) == ELPIS_OK && c.identity == 0,
+          "identity probe can be turned off");
+    elpis_strlcpy(line, "identity-system: yes", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 12) == ELPIS_OK &&
+          c.identity_system == 1, "system disclosure is opt-in");
+
+    {   /* The default name must be unresolvable on the public internet, or
+         * the probe could be reached through a forwarder chain. */
+        elpis_name_t n;
+        char tld[64];
+        const char *dot;
+        CHECK(elpis_name_from_text(&n, ELPIS_IDENTITY_NAME_DEFAULT) == ELPIS_OK,
+              "default identity name is a valid domain name");
+        dot = strrchr(ELPIS_IDENTITY_NAME_DEFAULT, '.');
+        elpis_strlcpy(tld, dot ? dot + 1 : "", sizeof tld);
+        CHECK(strcmp(tld, "oomuro") == 0,
+              "default identity name sits in an undelegated TLD");
+    }
 }
 
 /* ================================================================== */

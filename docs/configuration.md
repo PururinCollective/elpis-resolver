@@ -92,6 +92,78 @@ INFO    bound tcp [::]:53
 INFO  listening with 8 workers
 ```
 
+## Asking a resolver what it is
+
+Every Elpis answers one TXT name about itself, so identifying a running
+resolver does not require logging into it:
+
+```bash
+nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
+```
+
+```
+elpis.sakurako.oomuro   text = "elpis=1.0.0" "edition=community"
+                               "build=c662164779b7" "uptime=3601"
+                               "workers=8" "simd=avx2" "dnssec=validating"
+```
+
+`dig +short TXT elpis.sakurako.oomuro @127.0.0.1` does the same thing.
+
+Only clients the access-control list already admits get an answer. The default
+name sits in an undelegated TLD on purpose: nothing on the public internet can
+ever own it, so the probe answers only someone querying this resolver
+**directly**, and no scan of the DNS will turn it up.
+
+### Telling deployments apart
+
+`edition:` is how a community install is distinguished from a commercial one:
+
+```
+edition: commercial
+operator: Example ISP, AS64500
+```
+
+Both are free text and **self-declared — nothing verifies them**. Anyone can
+write `edition: commercial` in their own config file. That is fine for what
+this is for: labelling your own fleet, and letting support see what it is
+looking at without a screen-share. It is not a licence check, and should not be
+relied on as one. If you need a claim that cannot be forged, the field has to
+carry a signature from whoever issues it, which this does not do.
+
+`community`, `commercial` and `homelab` are the values worth being consistent
+about; anything else is accepted.
+
+### What it will not tell you
+
+No IP address is ever in the answer, whatever the configuration says. Elpis
+knows its own public IPv4, IPv6 and AS — the status page shows them — and an
+unauthenticated UDP probe is the wrong way to hand them out. Behind a
+forwarder it would disclose an address the querier could not otherwise see,
+and on a public resolver it would let anyone who can reach the port map the
+operator's upstream. Ask the status page, which is behind a login.
+
+The OS, kernel release and hostname are off by default for the same reason
+version banners usually are — a kernel release is a CVE lookup key, and a
+hostname tends to describe somebody's network:
+
+```
+identity-system: yes
+```
+
+turns them on, adding `"system=Linux 7.0.0-31-generic x86_64"` and
+`"host=resolver1"`. Reasonable on a resolver only your own machines can reach;
+think before setting it on anything facing outward.
+
+### Turning it off, or hiding it
+
+```
+identity-name: whoami.internal.example    # a name only you know
+identity: no                              # no probe at all
+```
+
+With `identity: no` the name answers NXDOMAIN exactly like any name that does
+not exist, so nothing reveals that the feature was ever there.
+
 ## Running it
 
 ```

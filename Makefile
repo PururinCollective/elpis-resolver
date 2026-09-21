@@ -107,7 +107,7 @@ src/gitrev.h: FORCE
 	    echo "  build provenance: $(if $(GITREV),$(GITREV),no git checkout)"; }
 	@rm -f $@.tmp
 
-src/webui.o: src/gitrev.h
+src/util.o: src/gitrev.h
 
 $(BINDIR):
 	@mkdir -p $(BINDIR)

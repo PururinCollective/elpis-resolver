@@ -18,7 +18,6 @@
 #include "elpis/infra.h"
 #include "elpis/deleg.h"
 #include "webui_assets.h"
-#include "gitrev.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -540,7 +539,11 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputu(b, (elpis_now_ms() - ctx->start_ms) / 1000u);
     bputs(b, ",\"hostup\":");
     bputu(b, (unsigned long)elpis_host_uptime());
-    bputs(b, ",\"build\":");  bputq(b, ELPIS_GITREV);
+    bputs(b, ",\"build\":");  bputq(b, elpis_build_rev());
+    bputs(b, ",\"edition\":");  bputq(b, c->edition);
+    bputs(b, ",\"operator\":"); bputq(b, c->operator_name);
+    bputs(b, ",\"identity\":");
+    bputq(b, c->identity ? c->identity_name : "");
     bputs(b, ",\"simd\":");   bputq(b, elpis_simd_backend());
     bputs(b, ",\"loop\":");   bputq(b, elpis_loop_backend());
     bputs(b, ",\"workers\":"); bputu(b, c->threads ? c->threads : elpis_cpu_count());

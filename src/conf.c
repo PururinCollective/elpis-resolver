@@ -112,6 +112,11 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->block_private_reverse = 1;
     c->refuse_any            = 1;
     c->answer_version_bind   = 1;
+    c->identity              = 1;
+    c->identity_system       = 0;
+    elpis_strlcpy(c->identity_name, ELPIS_IDENTITY_NAME_DEFAULT,
+                  sizeof c->identity_name);
+    elpis_strlcpy(c->edition, "community", sizeof c->edition);
 
     c->stop_systemd_resolved = 1;
 
@@ -497,6 +502,8 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("block-private-reverse")) return want_bool(&p, key, val, &c->block_private_reverse);
     if (KEY("refuse-any"))            return want_bool(&p, key, val, &c->refuse_any);
     if (KEY("answer-version-bind"))   return want_bool(&p, key, val, &c->answer_version_bind);
+    if (KEY("identity"))             return want_bool(&p, key, val, &c->identity);
+    if (KEY("identity-system"))      return want_bool(&p, key, val, &c->identity_system);
 
     /* ---- process ---- */
     if (KEY("user"))     { elpis_strlcpy(c->user, val, sizeof c->user); return ELPIS_OK; }
@@ -532,6 +539,11 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("log-replies")) return want_bool(&p, key, val, &c->log_replies);
     if (KEY("log-drops"))   return want_bool(&p, key, val, &c->log_drops);
     if (KEY("nsid"))        { elpis_strlcpy(c->nsid, val, sizeof c->nsid); return ELPIS_OK; }
+    if (KEY("identity-name")) { elpis_strlcpy(c->identity_name, val,
+                                              sizeof c->identity_name); return ELPIS_OK; }
+    if (KEY("edition"))     { elpis_strlcpy(c->edition, val, sizeof c->edition); return ELPIS_OK; }
+    if (KEY("operator"))    { elpis_strlcpy(c->operator_name, val,
+                                            sizeof c->operator_name); return ELPIS_OK; }
     if (KEY("statistics-interval")) return want_dur(&p, key, val, &c->stats_interval);
 
     elpis_warn("%s:%u: unknown setting '%s' (ignored)", src, lineno, key);
