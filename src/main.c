@@ -63,6 +63,23 @@ int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
                    (unsigned long long)(ctx->plan.budget_total / (1024 * 1024)));
     }
 
+    /*
+     * A cache larger than half the memory we can actually use is a promise the
+     * host may not be able to keep.  Automatic sizing never gets here -- it
+     * takes a quarter at most -- so this only fires on an explicit cache-size,
+     * where the number came from someone who may have been reading the host's
+     * memory rather than the container's.  Filling it then means swapping, or
+     * on a container with no swap, the OOM killer.
+     */
+    if (c->cache_size != 0 && ctx->plan.ram_total != 0 &&
+        ctx->plan.budget_total > ctx->plan.ram_total / 2u) {
+        elpis_warn("cache-size %llu MiB is more than half the %llu MiB "
+                   "available to this process -- filling it will need swap, "
+                   "and without swap the kernel will kill this process first",
+                   (unsigned long long)(ctx->plan.budget_total / (1024 * 1024)),
+                   (unsigned long long)(ctx->plan.ram_total / (1024 * 1024)));
+    }
+
     ctx->mcache = elpis_mcache_new(ctx->plan.msg_bytes, ctx->plan.shards);
     ctx->rcache = elpis_rcache_new(ctx->plan.rrset_bytes, ctx->plan.shards);
     ctx->dcache = elpis_dcache_new(ctx->plan.deleg_bytes, ctx->plan.shards / 4u);

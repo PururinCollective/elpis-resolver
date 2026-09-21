@@ -5,9 +5,15 @@ refresh goes wrong.
 
 ## The three caches
 
-Three caches, sized automatically from host memory (and from
-the cgroup limit when containerised, which is usually the number that
-matters):
+Three caches, sized automatically from the memory this process can actually
+use. That is the smallest of: what `sysconf` reports, `MemTotal` in
+`/proc/meminfo` (which lxcfs replaces inside an LXC container), and every
+`memory.max` or `memory.limit_in_bytes` along this process's own cgroup path —
+walked upwards, because a limit set on an ancestor binds just as tightly as one
+set on the cgroup itself. Reading only the cgroup root finds the limit solely
+when the container also has a cgroup namespace putting it there, which LXC does
+not; everywhere else the host's whole memory is what gets reported, and the
+cache is then sized for RAM that does not exist.
 
 | cache | share | holds |
 |-------|-------|-------|

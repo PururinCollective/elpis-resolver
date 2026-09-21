@@ -146,10 +146,13 @@ Startup says which it picked, and what the CPU offered:
 elpis 1.0.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll, ...
 ```
 
-**Memory.** The cache sizes itself from host RAM — a fifth of it on a typical
-box, read from the cgroup limit when containerised. On **4 GB**, with a stock
-Ubuntu Server using about 800 MB, Elpis takes roughly **820 MB of cache and
-holds about 1.6 million names**, leaving well over 2 GB free.
+**Memory.** The cache sizes itself from the memory this process can actually
+use — a fifth of it on a typical box. In a container that means the cgroup
+limit or the figure lxcfs reports, whichever is smaller, so an LXC guest with
+4 GB is sized for 4 GB and not for whatever the host happens to have. On
+**4 GB**, with a stock Ubuntu Server using about 800 MB, Elpis takes roughly
+**820 MB of cache and holds about 1.6 million names**, leaving well over 2 GB
+free.
 
 | RAM | cache budget | names held |
 |---|---|---|
@@ -167,6 +170,13 @@ if you would rather say it yourself.
 
 At 1.6 million names, a home or small-office name set fits many times over, so
 a 4 GB container spends its time answering from cache rather than evicting.
+
+The cache is never spilled to swap on purpose. It is a hash table, so a lookup
+touches a random page: served from swap that is a page fault which stalls the
+worker thread, where an ordinary cache miss would have gone out to the network
+without blocking anything. Missing is cheaper than swapping. Setting
+`cache-size` above what the machine can hold is allowed — and warned about at
+startup — but it buys latency, not capacity.
 
 ## Configure
 

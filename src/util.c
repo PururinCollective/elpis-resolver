@@ -159,16 +159,110 @@ static uint64_t read_u64_file(const char *path)
  * Inside a container the host's RAM is the wrong number to scale by.  Honour
  * cgroup v2 memory.max and v1 memory.limit_in_bytes when they are smaller.
  */
+/* MemTotal from /proc/meminfo, in bytes.  Inside an LXC container this is the
+ * file lxcfs replaces with the container's own figure, while the sysinfo()
+ * syscall behind sysconf(_SC_PHYS_PAGES) still reports the whole host. */
+static uint64_t proc_meminfo_total(void)
+{
+    char buf[2048];
+    ssize_t n;
+    int fd = open("/proc/meminfo", O_RDONLY);
+    const char *p;
+    uint64_t kb = 0;
+
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    p = strstr(buf, "MemTotal:");
+    if (p == NULL)
+        return 0;
+    p += 9;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    for (; *p >= '0' && *p <= '9'; p++)
+        kb = kb * 10u + (uint64_t)(*p - '0');
+    return kb * 1024u;
+}
+
+/* One limit file, keeping the smaller of what we have and what it says. */
+static void take_limit(uint64_t *best, const char *path)
+{
+    uint64_t v = read_u64_file(path);
+
+    /* v1 reports a sentinel close to UINT64_MAX when unlimited. */
+    if (v == 0 || v >= ((uint64_t)1 << 62))
+        return;
+    if (*best == 0 || v < *best)
+        *best = v;
+}
+
+/*
+ * The smallest memory limit that applies to this process.
+ *
+ * The limit is rarely on the cgroup we are in: a container's is usually set on
+ * an ancestor, and reading only /sys/fs/cgroup/memory.max finds it solely when
+ * the container also has a cgroup namespace putting it at the root.  Everywhere
+ * else -- LXC, Docker under a slice, Kubernetes -- that file does not exist and
+ * the whole host's memory is what gets reported.  So take the path from
+ * /proc/self/cgroup and walk it upwards, since a limit on any ancestor binds us
+ * just as much as one on ourselves.
+ */
 static uint64_t cgroup_memory_limit(void)
 {
-    uint64_t v;
-    v = read_u64_file("/sys/fs/cgroup/memory.max");
-    if (v == 0)
-        v = read_u64_file("/sys/fs/cgroup/memory/memory.limit_in_bytes");
-    /* v1 reports a sentinel close to UINT64_MAX when unlimited. */
-    if (v >= ((uint64_t)1 << 62))
-        v = 0;
-    return v;
+    static const char *const v2_root = "/sys/fs/cgroup";
+    static const char *const v1_root = "/sys/fs/cgroup/memory";
+    char line[4096], path[4096];
+    uint64_t best = 0;
+    FILE *f;
+
+    /* The namespaced case, where our own cgroup is mounted as the root. */
+    take_limit(&best, "/sys/fs/cgroup/memory.max");
+    take_limit(&best, "/sys/fs/cgroup/memory/memory.limit_in_bytes");
+
+    f = fopen("/proc/self/cgroup", "r");
+    if (f == NULL)
+        return best;
+
+    while (fgets(line, (int)sizeof line, f) != NULL) {
+        const char *root, *leaf;
+        char *rel, *cut;
+        size_t len;
+
+        /* "0::<path>" is cgroup v2; "<n>:memory:<path>" is v1. */
+        if (strncmp(line, "0::", 3) == 0) {
+            rel  = line + 3;
+            root = v2_root;
+            leaf = "memory.max";
+        } else if ((rel = strstr(line, ":memory:")) != NULL) {
+            rel += 8;
+            root = v1_root;
+            leaf = "memory.limit_in_bytes";
+        } else {
+            continue;
+        }
+
+        len = strlen(rel);
+        while (len > 0 && (rel[len - 1] == '\n' || rel[len - 1] == '\r'))
+            rel[--len] = '\0';
+        if (len >= sizeof path / 2u)
+            continue;
+
+        for (;;) {
+            if (snprintf(path, sizeof path, "%s%s/%s", root, rel, leaf) > 0)
+                take_limit(&best, path);
+            cut = strrchr(rel, '/');
+            if (cut == NULL || cut == rel)
+                break;
+            *cut = '\0';
+        }
+    }
+    fclose(f);
+    return best;
 }
 #endif
 
@@ -192,7 +286,15 @@ uint64_t elpis_physical_ram(void)
             bytes = (uint64_t)si.totalram * (uint64_t)si.mem_unit;
     }
     {
+        /*
+         * Every signal is an upper bound, so the smallest one wins.  Trusting
+         * sysconf() alone hands a container the whole host's memory, and the
+         * cache would then be sized for RAM that is not there to be used.
+         */
+        uint64_t mi = proc_meminfo_total();
         uint64_t lim = cgroup_memory_limit();
+        if (mi != 0 && (bytes == 0 || mi < bytes))
+            bytes = mi;
         if (lim != 0 && (bytes == 0 || lim < bytes))
             bytes = lim;
     }
