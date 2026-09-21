@@ -12,15 +12,20 @@ Then open `http://127.0.0.1:8082/`.
 
 ## What it shows
 
-Windows open from the desktop icons and can be dragged, resized and tiled.
+Windows open from the desktop icons. They can be dragged by the title bar,
+resized from the grip in the bottom right corner, and tiled from the toolbar.
+A window whose content does not fit grows to show it, as far as the desktop
+allows; once you size a window yourself it keeps the size you gave it.
 
 | | |
 |---|---|
-| **Overview** | cache hit rate, response time answered from cache and resolved upstream, queries and SERVFAIL per second, and every counter the resolver keeps |
-| **CPU** | processor time as a share of one core, with the worker count and which SIMD kernels were selected |
+| **Task Manager** | CPU, memory, network and queries in one window — a rail of live sparklines on the left, the one you pick drawn large on the right |
+| **Overview** | cache hit rate, response time answered from cache and resolved upstream, queries and SERVFAIL per second, every counter the resolver keeps, and how this host looks from outside: public IPv4 and IPv6, AS number and AS name |
+| **CPU** | processor time as a share of one core, the processor's model name, the worker count and which SIMD kernels were selected |
 | **Memory** | resident size over time, and each cache's entries, bytes used, budget and hit rate |
 | **Network** | bytes in and out per second, and the addresses actually bound |
 | **Queries** | queries per second, SERVFAIL and bogus per second, cache hits against upstream queries |
+| **Root servers** | the roots ranked by the round trip this resolver has actually measured, with how often each was asked and how often it failed to answer |
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
 | **Log** | the recent warnings and errors, newest first |
@@ -34,6 +39,19 @@ the first time it is seen, and every query after that finds the slot by hash and
 adds one.
 
 That still costs something, so nothing is counted at all while `webgui: no`.
+
+## Where the host addresses come from
+
+The public IPv4 and IPv6 on the Overview are the addresses the kernel picks to
+leave the box by, and the AS number and name come from Team Cymru's origin
+lookup — resolved through this resolver's own recursion, like any other query,
+and refreshed once an hour. Until the answer arrives the fields read
+*looking up...*; on a host with no route out they stay that way.
+
+The root server ranking is the resolver's live opinion, taken from the same
+infrastructure cache it uses to decide who to ask next — not a startup probe.
+A root it has not had occasion to ask yet is listed as *not asked yet* rather
+than shown with the optimistic starting estimate, which is not a measurement.
 
 ## Reaching it safely
 

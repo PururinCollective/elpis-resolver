@@ -9,11 +9,13 @@
   --desk:#252a31; --win:#2f343c; --title:#3a4049; --titlefg:#e8ebee;
   --fg:#d5d9de; --dim:#8d949d; --line:#454b55; --accent:#2f9ee0;
   --grid:#3a4049; --ok:#4caf50; --warn:#e0a32f; --bad:#e05252; --bar:#1b1e24;
+  --titleon:#193B55;
 }
 :root[data-theme='light']{
   --desk:#c9ccd1; --win:#f6f7f9; --title:#e4e6ea; --titlefg:#20242a;
   --fg:#20242a; --dim:#5f666f; --line:#b6bac0; --accent:#1f7fbf;
   --grid:#d8dbe0; --ok:#2e7d32; --warn:#a96b00; --bad:#c22; --bar:#e4e6ea;
+  --titleon:#C4E0F5;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -65,6 +67,7 @@ button{font:inherit;cursor:pointer}
   border-radius:5px;box-shadow:0 10px 30px rgba(0,0,0,.34);display:flex;
   flex-direction:column;min-width:270px;min-height:130px;overflow:hidden}
 .win.active{border-color:var(--accent)}
+.win.active .wt{background:var(--titleon)}
 .wt{height:26px;background:var(--title);color:var(--titlefg);display:flex;
   align-items:center;gap:7px;padding:0 4px 0 8px;cursor:move;user-select:none;
   flex:0 0 auto;font-size:11px;font-weight:600}
@@ -73,7 +76,9 @@ button{font:inherit;cursor:pointer}
   color:var(--titlefg);border-radius:3px;line-height:1;font-size:14px}
 .wt .x:hover{background:var(--bad);color:#fff}
 .wb{padding:10px;overflow:auto;flex:1}
-.rz{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
+.rz{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize}
+.rz::after{content:'';position:absolute;right:3px;bottom:3px;width:7px;height:7px;
+  border-right:2px solid var(--dim);border-bottom:2px solid var(--dim);opacity:.7}
 
 /* ---------- content ---------- */
 table{border-collapse:collapse;width:100%;font-size:11px}
@@ -101,6 +106,29 @@ canvas{width:100%;display:block;border:1px solid var(--line);background:transpar
 h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
   text-transform:uppercase;letter-spacing:.06em}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px}
+.tm{display:flex;height:100%;gap:0;margin:-10px}
+.tmside{width:158px;flex:0 0 auto;overflow-y:auto;border-right:1px solid var(--line);
+  padding:6px 4px}
+.tmitem{display:flex;gap:8px;align-items:center;padding:5px 6px;border-radius:4px;
+  cursor:pointer;border:1px solid transparent}
+.tmitem:hover{background:rgba(127,127,127,.12)}
+.tmitem.on{background:rgba(47,158,224,.16);border-color:var(--accent)}
+.tmitem canvas{width:44px;height:30px;flex:0 0 auto}
+.tmitem .tmt{min-width:0;line-height:1.25}
+.tmitem .tmt b{display:block;font-weight:500;font-size:12px}
+.tmitem .tmt span{display:block;font-size:11px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.tmitem .tmt span+span{color:var(--dim);font-size:10px}
+.tmpane{margin-top:2px}
+.tmname{color:var(--dim);font-size:11px;text-align:right;margin:-2px 0 4px}
+.tmmain{flex:1;min-width:0;overflow:auto;padding:12px 14px}
+.tmhead{display:flex;align-items:baseline;margin-bottom:10px}
+.tmhead h2{margin:0;font-size:26px;font-weight:400}
+.tmhead span{margin-left:auto;color:var(--dim);font-size:12px;text-align:right}
+.tmstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:10px 20px;margin-top:12px}
+.tmstats div b{display:block;color:var(--dim);font-weight:400;font-size:11px}
+.tmstats div span{font-size:19px;font-weight:300;font-variant-numeric:tabular-nums}
 #status{height:24px;background:var(--bar);border-top:1px solid var(--line);
   display:flex;align-items:center;gap:16px;padding:0 10px;font-size:11px;
   color:var(--dim);flex:0 0 auto}
@@ -213,11 +241,11 @@ function graph(el, series, opts){
   var i, j, x, y;
 
   g.strokeStyle = grid; g.lineWidth = 1;
-  for (i = 1; i < 6; i++){
+  for (i = 1; i < 6 && !opts.bare; i++){
     y = Math.round(h*i/6) + 0.5;
     g.beginPath(); g.moveTo(0,y); g.lineTo(w,y); g.stroke();
   }
-  for (i = 1; i < 10; i++){
+  for (i = 1; i < 10 && !opts.bare; i++){
     x = Math.round(w*i/10) + 0.5;
     g.beginPath(); g.moveTo(x,0); g.lineTo(x,h); g.stroke();
   }
@@ -296,10 +324,15 @@ function resize(w, grip){
     focusWin(w);
     var sx = e.clientX, sy = e.clientY;
     var ow = w.el.offsetWidth, oh = w.el.offsetHeight;
+    var surf = $('surface');
+    w.userSized = 1;
     function mv(ev){
-      w.el.style.width  = Math.max(270, ow + ev.clientX - sx) + 'px';
-      w.el.style.height = Math.max(130, oh + ev.clientY - sy) + 'px';
-      if (w.def.render && D) w.def.render(w.body, D);
+      var nw = Math.max(270, ow + ev.clientX - sx);
+      var nh = Math.max(130, oh + ev.clientY - sy);
+      nw = Math.min(nw, surf.clientWidth  - w.el.offsetLeft);
+      nh = Math.min(nh, surf.clientHeight - w.el.offsetTop);
+      w.el.style.width = nw + 'px'; w.el.style.height = nh + 'px';
+      if (D) w.def.render(w.body, D, w);
     }
     function up(){ document.removeEventListener('mousemove', mv);
                    document.removeEventListener('mouseup', up); }
@@ -309,16 +342,48 @@ function resize(w, grip){
   });
 }
 
+/*
+ * Item 4: a window that cannot show its content grows to fit, but only as far
+ * as the desktop allows and only until the user sizes it by hand -- after that
+ * the size is theirs and we leave it alone.
+ */
+function fit(w){
+  if (w.userSized) return;
+  var b = w.body, surf = $('surface');
+  var over = b.scrollHeight - b.clientHeight;
+  if (over > 2){
+    var room = surf.clientHeight - w.el.offsetTop - 8;
+    var want = Math.min(w.el.offsetHeight + over + 2, room);
+    if (want > w.el.offsetHeight) w.el.style.height = want + 'px';
+  }
+  over = b.scrollWidth - b.clientWidth;
+  if (over > 2){
+    var roomw = surf.clientWidth - w.el.offsetLeft - 8;
+    var wantw = Math.min(w.el.offsetWidth + over + 2, roomw);
+    if (wantw > w.el.offsetWidth) w.el.style.width = wantw + 'px';
+  }
+}
+
+function paintWin(w){
+  if (!D) return;
+  w.def.render(w.body, D, w);
+  fit(w);
+}
+
 var placed = 0;
 function openWin(def){
   if (wins[def.id]){ focusWin(wins[def.id]); return; }
   var el = document.createElement('div');
   el.className = 'win';
-  var off = (placed++ % 7) * 26;
-  el.style.left = (26 + off) + 'px';
-  el.style.top  = (16 + off) + 'px';
-  el.style.width  = (def.w || 460) + 'px';
-  el.style.height = (def.h || 320) + 'px';
+  /* cascade, but never open a window that starts off the desktop */
+  var surf = $('surface');
+  var off  = (placed++ % 7) * 26;
+  var x = Math.min(26 + off, Math.max(0, surf.clientWidth  - 180));
+  var y = Math.min(16 + off, Math.max(0, surf.clientHeight - 120));
+  el.style.left = x + 'px';
+  el.style.top  = y + 'px';
+  el.style.width  = Math.max(260, Math.min(def.w || 460, surf.clientWidth  - x - 8)) + 'px';
+  el.style.height = Math.max(140, Math.min(def.h || 320, surf.clientHeight - y - 8)) + 'px';
   el.innerHTML = "<div class='wt'>" + def.icon + "<span>" + def.title +
                  "</span><button class='x' title='Close'>&#10005;</button></div>" +
                  "<div class='wb'></div><div class='rz'></div>";
@@ -333,7 +398,7 @@ function openWin(def){
   drag(w, el.querySelector('.wt'));
   resize(w, el.querySelector('.rz'));
   focusWin(w);
-  if (D) def.render(w.body, D);
+  paintWin(w);
 }
 
 function tile(){
@@ -350,7 +415,8 @@ function tile(){
     w.el.style.top  = (Math.floor(i / cols) * ch) + 'px';
     w.el.style.width  = (cw - 6) + 'px';
     w.el.style.height = (ch - 6) + 'px';
-    if (D) w.def.render(w.body, D);
+    w.userSized = 1;
+    if (D) w.def.render(w.body, D, w);
   });
 }
 
@@ -364,6 +430,61 @@ function rows(list, label){
          num(r.n) + "</td></tr>";
   });
   return h + "</table>";
+}
+
+/*
+ * Item 8: how the rest of the internet sees this resolver.  The addresses are
+ * whichever ones the kernel picks to leave the box by, and the AS is what
+ * Team Cymru's origin lookup says about them -- resolved through our own
+ * recursion, so an empty field simply means we have not got an answer yet.
+ */
+function host(d){
+  var h = d.self || {};
+  function or(v){ return v ? esc(v) : "<span style='color:var(--dim)'>looking up...</span>"; }
+  return "<div><h4>This host, from outside</h4><div class='kv'>" +
+    "<b>public IPv4</b><span>" + or(h.v4) + "</span>" +
+    "<b>public IPv6</b><span style='word-break:break-all'>" + or(h.v6) + "</span>" +
+    "<b>AS number</b><span>" + or(h.asn) + "</span>" +
+    "<b>AS name</b><span>" + or(h.asname) + "</span></div></div>";
+}
+
+/*
+ * Item 5: the four live resources in one window, laid out the way Task Manager
+ * lays them out -- a rail of sparklines on the left, the selected one drawn
+ * large on the right.  Each detail pane is the standalone window's own
+ * renderer, so there is exactly one description of what a resource looks like.
+ */
+var TMRES = [
+{ k:'cpu', label:'CPU', color:'#2f9ee0',
+  val: function(d){ return cpuPct(d, last(d.history.cpu)).toFixed(0) + '%'; },
+  sub: function(d){ return d.server.workers + ' workers'; },
+  right: function(d){ return d.server.cpu || ''; },
+  ser: function(d){ var c = d.server.cores || 1;
+                    return [{ data: d.history.cpu.map(function(v){ return v/c; }),
+                              color:'#2f9ee0' }]; },
+  max: 1000 },
+{ k:'mem', label:'Memory', color:'#9b59d0',
+  val: function(d){ return bytes(last(d.history.rss)); },
+  sub: function(d){ return 'of ' + bytes(d.proc.ram); },
+  right: function(d){ return bytes(d.proc.ram) + ' usable'; },
+  ser: function(d){ return [{ data: d.history.rss, color:'#9b59d0' }]; } },
+{ k:'net', label:'Network', color:'#4caf50',
+  val: function(d){ return bytes(last(d.history.rx)) + '/s'; },
+  sub: function(d){ return bytes(last(d.history.tx)) + '/s sent'; },
+  right: function(d){ return d.server.listen.length ?
+           d.server.listen[0] : 'default addresses'; },
+  ser: function(d){ return [{ data: d.history.rx, color:'#4caf50' },
+                            { data: d.history.tx, color:'#2f9ee0', fill:false }]; } },
+{ k:'qps', label:'Queries', color:'#e0a32f',
+  val: function(d){ return num(last(d.history.qps)) + '/s'; },
+  sub: function(d){ return num(last(d.history.servfail)) + '/s SERVFAIL'; },
+  right: function(d){ return d.stats.hitpct + '% from cache'; },
+  ser: function(d){ return [{ data: d.history.qps, color:'#e0a32f' }]; } }
+];
+
+function viewOf(id){
+  for (var i = 0; i < VIEWS.length; i++) if (VIEWS[i].id === id) return VIEWS[i];
+  return null;
 }
 
 var VIEWS = [
@@ -407,7 +528,7 @@ var VIEWS = [
         "<b>TCP</b><span>" + num(st.tcp) + "</span>" +
         "<b>truncated</b><span>" + num(st.truncated) + "</span>" +
         "<b>cookie ok</b><span>" + num(st.cookieok) + "</span>" +
-      "</div></div></div>";
+      "</div></div>" + host(d) + "</div>";
   }},
 
 { id:'cpu', title:'CPU', w:470, h:260,
@@ -417,7 +538,10 @@ var VIEWS = [
     var pct = cpuPct(d, last(d.history.cpu)).toFixed(1);
     var L = d.loop || {turns:0,idle:0,nosleep:0,timers:0,slowest:0};
     var scaled = d.history.cpu.map(function(v){ return v / cores; });
-    b.innerHTML = gpanel('% of all ' + cores + ' cores', pct + '%') +
+    b.innerHTML =
+      (b.parentNode && b.parentNode.className === 'tmmain' ? "" :
+        "<div class='tmname'>" + esc(d.server.cpu || '') + "</div>") +
+      gpanel('% of all ' + cores + ' cores', pct + '%') +
       "<div class='kv' style='margin-top:6px'>" +
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
@@ -487,6 +611,88 @@ var VIEWS = [
                   { data: d.history.upstream, color: '#9b59d0', fill: false }], { h: 70 });
   }},
 
+{ id:'taskman', title:'Task Manager', w:800, h:500,
+  icon:"<svg viewBox='0 0 24 24'><rect x='2' y='4' width='20' height='16' rx='2'/>" +
+       "<path d='M8 4v16M11 15l2-3 2 2 3-5'/></svg>",
+  render: function(b, d, w){
+    var self = this, sel = this.sel || 'cpu', i;
+    var side = "<div class='tmside'>";
+    TMRES.forEach(function(r){
+      side += "<div class='tmitem" + (r.k === sel ? " on" : "") +
+              "' data-k='" + r.k + "'><canvas></canvas><div class='tmt'><b>" +
+              r.label + "</b><span>" + r.val(d) + "</span><span>" +
+              esc(r.sub(d)) + "</span></div></div>";
+    });
+    b.innerHTML = "<div class='tm'>" + side + "</div><div class='tmmain'></div></div>";
+
+    var cvs = b.querySelectorAll('.tmitem canvas');
+    TMRES.forEach(function(r, j){
+      graph(cvs[j], r.ser(d), { h:30, max:r.max || 0, bare:true, points:120 });
+    });
+
+    var main = b.querySelector('.tmmain'), res = null;
+    for (i = 0; i < TMRES.length; i++) if (TMRES[i].k === sel) res = TMRES[i];
+    var v = viewOf(sel);
+    main.innerHTML = "<div class='tmhead'><h2>" + res.label + "</h2><span>" +
+                     esc(res.right ? res.right(d) : res.sub(d)) +
+                     "</span></div><div class='tmpane'></div>";
+    v.render(main.querySelector('.tmpane'), d, w);
+
+    b.querySelector('.tmside').addEventListener('click', function(e){
+      var t = e.target.closest('.tmitem');
+      if (!t) return;
+      self.sel = t.dataset.k;
+      paintWin(w);
+    });
+  }},
+
+/*
+ * Item 7: who among the roots is actually answering fastest.  The order is the
+ * resolver's own live opinion from the infrastructure cache -- the same
+ * numbers it uses to decide who to ask next -- not a startup probe.
+ */
+{ id:'roots', title:'Root servers', w:600, h:420,
+  icon:"<svg viewBox='0 0 24 24'><path d='M12 3v7M12 14v7'/><circle cx='12' cy='12' r='2'/>" +
+       "<path d='M5 21h14M5 3h14'/></svg>",
+  render: function(b, d){
+    /*
+     * A root that has never been asked still carries the optimistic starting
+     * estimate, which is not a measurement -- rank those last and say so,
+     * rather than showing a time the resolver has not actually observed.
+     */
+    var all = d.roots || [], r = [], cold = [], best = 0, i;
+    for (i = 0; i < all.length; i++)
+      (all[i].queries ? r : cold).push(all[i]);
+    for (i = 0; i < r.length; i++) if (r[i].rtt > best) best = r[i].rtt;
+    if (!best) best = 1;
+    r = r.concat(cold);
+    var h = "<table><tr><th>#</th><th>server</th><th>address</th>" +
+            "<th class='n'>round trip</th><th class='n'>asked</th>" +
+            "<th class='n'>timeouts</th></tr>";
+    if (!r.length)
+      h += "<tr><td colspan='6' style='color:var(--dim)'>no root hints loaded</td></tr>";
+    r.forEach(function(x, j){
+      var bar = '', lbl;
+      if (x.queries){
+        var wd  = Math.max(2, Math.round(x.rtt * 100 / best));
+        var col = x.timeouts ? 'var(--warn)' : 'var(--accent)';
+        bar = "<span style='display:inline-block;height:7px;width:" + wd +
+              "px;background:" + col + ";vertical-align:middle;margin-right:6px'></span>";
+        lbl = x.rtt + ' ms';
+      } else {
+        lbl = "<span style='color:var(--dim)'>not asked yet</span>";
+      }
+      h += "<tr><td class='n'>" + (x.queries ? j+1 : '') + "</td><td>" + esc(x.name) +
+           "</td><td>" + esc(x.addr) + "</td><td class='n'>" + bar + lbl +
+           "</td><td class='n'>" + num(x.queries) + "</td><td class='n'>" +
+           num(x.timeouts) + "</td></tr>";
+    });
+    b.innerHTML = h + "</table><div style='color:var(--dim);margin-top:8px'>" +
+      "Ranked by smoothed round trip, as measured by this resolver. The " +
+      "resolver prefers whoever has been quickest lately, so this order is " +
+      "roughly what it will use next.</div>";
+  }},
+
 { id:'names', title:'Top names', w:620, h:380,
   icon:"<svg viewBox='0 0 24 24'><path d='M4 6h16M4 12h16M4 18h10'/></svg>",
   render: function(b, d){
@@ -540,7 +746,7 @@ var VIEWS = [
 /* ---------- data ---------- */
 function paint(){
   var k;
-  for (k in wins) if (wins[k]) wins[k].def.render(wins[k].body, D);
+  for (k in wins) if (wins[k]) paintWin(wins[k]);
   $('s-cpu').textContent = cpuPct(D, last(D.history.cpu)).toFixed(0) + '%';
   $('s-ram').textContent = bytes(last(D.history.rss));
   $('s-qps').textContent = num(last(D.history.qps));
@@ -566,7 +772,7 @@ function showDesk(){
   $('login').style.display = 'none';
   $('desk').style.display = 'flex';
   if (!Object.keys(wins).length){
-    openWin(VIEWS[0]); openWin(VIEWS[4]);
+    openWin(viewOf('overview')); openWin(viewOf('taskman'));
   }
   poll();
   if (timer) clearInterval(timer);
