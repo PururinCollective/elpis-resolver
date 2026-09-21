@@ -986,6 +986,7 @@ int main(int argc, char **argv)
         elpis_clock_tick();
         elpis_prime_start(w0);
         elpis_tld_warm_start(w0);
+        elpis_selfinfo_start(w0);
 
         while (!ctx.shutdown) {
             elpis_loop_once(w0->loop, 200);

@@ -319,6 +319,50 @@ uint64_t elpis_physical_ram(void)
     return bytes;
 }
 
+void elpis_cpu_model(char *out, size_t outsz)
+{
+    out[0] = '\0';
+#if defined(__linux__)
+    {
+        char buf[4096];
+        int fd = open("/proc/cpuinfo", O_RDONLY);
+        ssize_t n;
+        const char *p, *e;
+        size_t i = 0;
+
+        if (fd < 0)
+            return;
+        n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0)
+            return;
+        buf[n] = '\0';
+
+        p = strstr(buf, "model name");
+        if (p == NULL)
+            p = strstr(buf, "Model");           /* ARM kernels say this */
+        if (p == NULL)
+            return;
+        p = strchr(p, ':');
+        if (p == NULL)
+            return;
+        p++;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        e = strchr(p, '\n');
+        if (e == NULL)
+            e = p + strlen(p);
+        while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'))
+            e--;
+        while (p < e && i + 1u < outsz)
+            out[i++] = *p++;
+        out[i] = '\0';
+    }
+#else
+    (void)outsz;
+#endif
+}
+
 unsigned elpis_cpu_count(void)
 {
     long n = -1;

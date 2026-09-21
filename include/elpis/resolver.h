@@ -310,6 +310,8 @@ int  elpis_prime_start(elpis_worker_t *w);
 int  elpis_tld_warm_start(elpis_worker_t *w);
 int  elpis_axfr_root(elpis_ctx_t *ctx);
 int  elpis_probe_roots(elpis_ctx_t *ctx);
+/* Find our public addresses and network, through our own recursion. */
+int  elpis_selfinfo_start(elpis_worker_t *w);
 
 /* ---- helpers shared between the modules ---- */
 uint32_t elpis_clamp_ttl(const elpis_conf_t *c, uint32_t ttl);

@@ -15,6 +15,8 @@
 #include "elpis/util.h"
 #include "elpis/simd.h"
 #include "elpis/loop.h"
+#include "elpis/infra.h"
+#include "elpis/deleg.h"
 #include "webui_assets.h"
 
 #include <errno.h>
@@ -409,6 +411,72 @@ static void json_top(buf_t *b, const char *name, elpis_top_t which)
     bputs(b, "]");
 }
 
+/*
+ * The root servers, ranked by how quickly they have been answering.
+ *
+ * This is the resolver's live opinion, not the startup probe: the round-trip
+ * estimates come from the infrastructure cache and move as the network does,
+ * which is what actually decides who gets asked next.
+ */
+static void json_roots(elpis_ctx_t *ctx, buf_t *b)
+{
+    typedef struct { char addr[80]; char name[72]; uint32_t rtt, to, q; } row_t;
+    static row_t rows[ELPIS_DELEG_MAX_NS * (ELPIS_NS_MAX_A4 + ELPIS_NS_MAX_A6)];
+    const elpis_deleg_t *d = &ctx->root_hints;
+    unsigned n = 0, i, j, k;
+
+    for (i = 0; i < d->nns && n < ELPIS_ARRAY_LEN(rows); i++) {
+        const elpis_nsrec_t *ns = &d->ns[i];
+        char nb[ELPIS_MAX_NAME * 4];
+
+        elpis_name_str(&ns->name, nb, sizeof nb);
+
+        for (j = 0; j < ns->n4 && n < ELPIS_ARRAY_LEN(rows); j++) {
+            elpis_addr_t a;
+            elpis_infra_info_t inf;
+            elpis_addr_from4(&a, ns->a4[j], 53);
+            elpis_infra_get(ctx->infra, &a, &inf);
+            elpis_addr_str(&a, rows[n].addr, sizeof rows[n].addr);
+            elpis_strlcpy(rows[n].name, nb, sizeof rows[n].name);
+            rows[n].rtt = inf.srtt; rows[n].to = inf.timeouts;
+            rows[n].q = inf.queries;
+            n++;
+        }
+        for (j = 0; j < ns->n6 && n < ELPIS_ARRAY_LEN(rows); j++) {
+            elpis_addr_t a;
+            elpis_infra_info_t inf;
+            elpis_addr_from6(&a, ns->a6[j], 53);
+            elpis_infra_get(ctx->infra, &a, &inf);
+            elpis_addr_str(&a, rows[n].addr, sizeof rows[n].addr);
+            elpis_strlcpy(rows[n].name, nb, sizeof rows[n].name);
+            rows[n].rtt = inf.srtt; rows[n].to = inf.timeouts;
+            rows[n].q = inf.queries;
+            n++;
+        }
+    }
+
+    for (i = 1; i < n; i++) {           /* insertion sort: fewer than thirty */
+        row_t tmp = rows[i];
+        for (k = i; k > 0 && rows[k - 1].rtt > tmp.rtt; k--)
+            rows[k] = rows[k - 1];
+        rows[k] = tmp;
+    }
+
+    bputs(b, "\"roots\":[");
+    for (i = 0; i < n; i++) {
+        if (i) bputs(b, ",");
+        bputs(b, "{\"name\":");
+        bputq(b, rows[i].name);
+        bputs(b, ",\"addr\":");
+        bputq(b, rows[i].addr);
+        bputs(b, ",\"rtt\":");      bputu(b, rows[i].rtt);
+        bputs(b, ",\"timeouts\":"); bputu(b, rows[i].to);
+        bputs(b, ",\"queries\":");  bputu(b, rows[i].q);
+        bputs(b, "}");
+    }
+    bputs(b, "],");
+}
+
 static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 {
     const elpis_stats_t *s = &ctx->stats;
@@ -430,6 +498,12 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, ",\"loop\":");   bputq(b, elpis_loop_backend());
     bputs(b, ",\"workers\":"); bputu(b, c->threads ? c->threads : elpis_cpu_count());
     bputs(b, ",\"cores\":");   bputu(b, elpis_cpu_count());
+    {
+        char cpu[160];
+        elpis_cpu_model(cpu, sizeof cpu);
+        bputs(b, ",\"cpu\":");
+        bputq(b, cpu[0] ? cpu : "unknown processor");
+    }
     bputs(b, ",\"dnssec\":"); bputs(b, c->dnssec ? "true" : "false");
     bputs(b, ",\"listen\":[");
     for (i = 0; i < c->nlisten; i++) {
@@ -438,6 +512,15 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
         bputq(b, elpis_addr_str(&c->listen[i], ab, sizeof ab));
     }
     bputs(b, "]},");
+
+    bputs(b, "\"self\":{\"v4\":");
+    bputq(b, ctx->self.v4);
+    bputs(b, ",\"v6\":");     bputq(b, ctx->self.v6);
+    bputs(b, ",\"asn\":");    bputq(b, ctx->self.asn);
+    bputs(b, ",\"asname\":"); bputq(b, ctx->self.asname);
+    bputs(b, "},");
+
+    json_roots(ctx, b);
 
     bputs(b, "\"loop\":{\"turns\":");
     bputu(b, ctx->loop.turns);

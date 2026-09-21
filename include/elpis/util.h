@@ -94,6 +94,10 @@ const char *elpis_exe_dir(void);
 const char *elpis_exe_path(void);
 /* Highest-quality randomness the platform offers. */
 void elpis_random_bytes(void *buf, size_t n);
+
+/* Processor model name, e.g. "AMD Ryzen 9 3950X 16-Core Processor".
+ * Empty when the platform will not say. */
+void elpis_cpu_model(char *out, size_t outsz);
 uint32_t elpis_random_u32(void);
 /* Uniform in [0, n) without modulo bias. */
 uint32_t elpis_random_below(uint32_t n);

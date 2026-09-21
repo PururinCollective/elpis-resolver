@@ -30,6 +30,15 @@ typedef struct {
  * a counter like the rest -- it is replaced each second, not accumulated --
  * so it lives outside elpis_stats_t, which publish_stats() folds by delta.
  */
+/* What the internet sees this resolver as; filled in by selfinfo.c. */
+typedef struct {
+    char     v4[64];
+    char     v6[80];
+    char     asn[24];
+    char     asname[160];
+    uint64_t at_ms;
+} elpis_selfinfo_t;
+
 typedef struct {
     uint64_t turns, idle, nosleep;
     uint32_t slowest_ms;
@@ -50,6 +59,7 @@ typedef struct {
 
     elpis_stats_t       stats;
     elpis_loopstat_t    loop;
+    elpis_selfinfo_t    self;
     uint64_t            start_ms;
 
     volatile int        shutdown;
