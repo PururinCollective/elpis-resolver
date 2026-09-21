@@ -1,4 +1,4 @@
-# Elpis
+# ΕΛΠΙΣ Resolver
 
 A recursive DNS resolver in portable C99. No external dependencies: the
 crypto, the event loop and the wire format are all in this tree, so it links
