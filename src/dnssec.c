@@ -874,6 +874,7 @@ static val_inflight_t *inflight_new(const elpis_name_t *n, uint16_t type)
         g_inflight[i].name  = *n;
         g_inflight[i].type  = type;
         g_inflight[i].nwait = 0;
+        g_inflight[i].owner = NULL;
         return &g_inflight[i];
     }
     return NULL;                        /* table full: fall back to our own */
@@ -903,6 +904,17 @@ static void inflight_forget(elpis_task_t *t)
                 continue;
             g_inflight[i].waiter[j] = g_inflight[i].waiter[--g_inflight[i].nwait];
             break;
+        }
+        /*
+         * Retire the slot once the lookup behind it can no longer finish:
+         * either the task that owns the child has gone, or nobody is left
+         * waiting.  A slot kept past that point advertises a child that will
+         * never call back, and everything joining it waits for nothing.
+         */
+        if (g_inflight[i].owner == t || g_inflight[i].nwait == 0) {
+            g_inflight[i].hash  = 0;
+            g_inflight[i].nwait = 0;
+            g_inflight[i].owner = NULL;
         }
     }
 }
@@ -964,6 +976,7 @@ static void val_child_done(elpis_task_t *child, void *ctxp)
         w[i] = f->waiter[i];
     f->nwait = 0;
     f->hash  = 0;
+    f->owner = NULL;
 
     for (i = 0; i < n; i++)
         val_resume(w[i]);
@@ -1025,10 +1038,12 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
 
         f = inflight_new(n, type);
         if (f != NULL && inflight_join(f, t)) {
+            f->owner = t;               /* whose child this slot waits on */
             if (elpis_task_child(t, n, type, val_child_done, f) != NULL)
                 return 0;
             f->hash  = 0;
             f->nwait = 0;
+            f->owner = NULL;
         }
     }
 

@@ -10,9 +10,27 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.5 — 2026-09-22
+
+### Fixed
+
+**1.1.4 shipped half of its own fix — do not run it.** The field that records
+which task owns a deduplicated lookup was added, and so was the check that
+reads it, but the three lines that ever *set* it were lost between testing and
+committing. The field stayed null, the check was therefore always true, and
+every validation waiting on a shared lookup was abandoned instead of resumed.
+That is worse than the bug 1.1.4 set out to fix, and it is immediate rather
+than after a quarter of an hour.
+
+1.1.5 is 1.1.4 as it was meant to be: slots record their owner, are retired
+when that owner goes or no waiter is left, and a child reporting into a
+recycled slot no longer wakes the wrong lookup.
+
 ## 1.1.4 — 2026-09-22
 
 ### Fixed
+
+**Superseded by 1.1.5 — this release is incomplete and should not be run.**
 
 **Validation stopped working after some minutes of uptime.** DS lookups began
 failing in bulk — `no DS for google.com. after 2 attempts`, hundreds a
