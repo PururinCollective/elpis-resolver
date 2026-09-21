@@ -919,6 +919,20 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
      */
     if (v->pending_type == type && elpis_name_eq(&v->pending, n)) {
         if (v->pending_tries >= 2) {
+            /*
+             * Say which record could not be had.  "Could not fetch validation
+             * material for www.example.com A" names the question the client
+             * asked, which is never the thing that actually failed -- the
+             * thing that failed is a DNSKEY or DS somewhere up the chain, and
+             * without naming it there is nothing to go and look at.
+             */
+            char nb[ELPIS_MAX_NAME * 4];
+            elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX - 1, __FILE__,
+                          __LINE__,
+                          "dnssec: no %s for %s after %u attempts",
+                          elpis_type_name(type),
+                          elpis_name_str(n, nb, sizeof nb),
+                          v->pending_tries);
             elpis_rrset_buf_init(out, n, type, ELPIS_CLASS_IN, 0);
             return 1;
         }
@@ -1474,6 +1488,15 @@ static void val_run(elpis_task_t *t)
         return;
 
     if (v->steps > VAL_MAX_STEPS) {
+        char nb[ELPIS_MAX_NAME * 4], pb[ELPIS_MAX_NAME * 4];
+        elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX - 1, __FILE__, __LINE__,
+                      "dnssec: gave up after %u lookups validating %s "
+                      "(%u signers, last wanted %s %s)",
+                      v->steps, elpis_name_str(&t->orig_qname, nb, sizeof nb),
+                      v->nsigners, elpis_type_name(v->pending_type),
+                      v->pending.len
+                          ? elpis_name_str(&v->pending, pb, sizeof pb)
+                          : "nothing");
         t->val_unavailable = 1;
         val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
         return;
