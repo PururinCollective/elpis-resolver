@@ -1125,7 +1125,10 @@ static void verify_for_current(elpis_task_t *t, val_t *v)
 /* Everything still signed by this signer is insecure: the chain fell short. */
 static void mark_insecure_for_current(elpis_task_t *t, val_t *v)
 {
+    elpis_worker_t *w = t->w;
+    elpis_rrset_buf_t *set = w->rrbuf;
     unsigned i;
+
     for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
         elpis_name_t sn;
         if (v->status[i] != SS_UNKNOWN)
@@ -1135,6 +1138,19 @@ static void mark_insecure_for_current(elpis_task_t *t, val_t *v)
         if (!set_signer(t, i, &sn) || !elpis_name_eq(&sn, &v->signers[v->si]))
             continue;
         v->status[i] = SS_INSECURE;
+
+        /*
+         * Record the verdict, exactly as the secure path does.  Leaving it
+         * unchecked meant the answer was re-validated from the trust anchor
+         * downwards every time it was served from the RRset cache -- a full
+         * chain walk, on data already known to be insecure, for the majority
+         * of the internet that is not signed at all.  It cost CPU in
+         * proportion to traffic and said nothing in the log.
+         */
+        if (build_set(t, i, set)) {
+            set->sec = (uint8_t)ELPIS_SEC_INSECURE;
+            elpis_rcache_put_buf(w->ctx->rcache, set, w->ctx->conf.serve_stale, 0);
+        }
     }
 }
 
