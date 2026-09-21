@@ -70,12 +70,58 @@ static const uint8_t *digest_info(int alg, size_t *len)
     }
 }
 
+/*
+ * Montgomery contexts, kept per key.
+ *
+ * mont_init() spends O(k * 64) shift-compare-subtract steps building R^2 mod
+ * n, which for a 2048-bit modulus is an order of magnitude more work than the
+ * exponentiation it prepares for -- the public exponent is 65537, so the
+ * modexp itself is only about nineteen Montgomery multiplies.  Rebuilding it
+ * for every signature made verification almost entirely setup: profiling a
+ * resolver under real traffic put 57% of all CPU inside mont_init against 20%
+ * in bn_modexp.
+ *
+ * A zone signs everything with the same key, so the context is worth keeping.
+ * The curve code always did this -- ec.c builds its two contexts once at
+ * startup -- and RSA simply never did.
+ *
+ * Thread-local, because verification runs on the worker that owns the query
+ * and nothing here is shared; that also keeps the hot path lock-free.
+ */
+#define MONT_CACHE 16
+
+static ELPIS_TLS struct {
+    bn_t     n;
+    mont_t   ctx;
+    unsigned valid;
+} g_mont[MONT_CACHE];
+static ELPIS_TLS unsigned g_mont_next;
+
+static const mont_t *mont_for(const bn_t *n)
+{
+    unsigned i, slot;
+
+    for (i = 0; i < MONT_CACHE; i++)
+        if (g_mont[i].valid && bn_cmp(&g_mont[i].n, n) == 0)
+            return &g_mont[i].ctx;
+
+    slot = g_mont_next;
+    g_mont_next = (g_mont_next + 1u) % MONT_CACHE;
+
+    g_mont[slot].valid = 0;             /* unusable until fully built */
+    if (mont_init(&g_mont[slot].ctx, n) != ELPIS_OK)
+        return NULL;
+    g_mont[slot].n = *n;
+    g_mont[slot].valid = 1;
+    return &g_mont[slot].ctx;
+}
+
 int elpis_rsa_verify(const uint8_t *key, size_t keylen,
                      const uint8_t *sig, size_t siglen,
                      const uint8_t *hash, size_t hashlen, int hash_alg)
 {
     bn_t n, e, s, m;
-    mont_t ctx;
+    const mont_t *mc;
     uint8_t em[BN_MAX_LIMBS * 4];
     const uint8_t *di;
     size_t dilen, k, i, pslen;
@@ -99,9 +145,10 @@ int elpis_rsa_verify(const uint8_t *key, size_t keylen,
     if (bn_cmp(&s, &n) >= 0)
         return 0;                       /* signature out of range */
 
-    if (mont_init(&ctx, &n) != ELPIS_OK)
+    mc = mont_for(&n);
+    if (mc == NULL)
         return 0;
-    bn_modexp(&m, &s, &e, &ctx);
+    bn_modexp(&m, &s, &e, mc);
 
     if (bn_to_bytes(&m, em, k) != ELPIS_OK)
         return 0;

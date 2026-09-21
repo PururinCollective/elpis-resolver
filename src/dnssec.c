@@ -1019,6 +1019,31 @@ static int set_is_unsigned(elpis_task_t *t, unsigned i)
            !set_signer(t, i, &sn);
 }
 
+/* Record that `zone` has no DS, so it never has to be proven again. */
+static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone)
+{
+    elpis_deleg_t d;
+
+    if (elpis_dcache_get(t->w->ctx->dcache, zone, elpis_cached_now_s(),
+                         &d) != ELPIS_OK)
+        return;
+    if (d.ds_state == ELPIS_DS_ABSENT)
+        return;
+    d.ds_state = ELPIS_DS_ABSENT;
+    elpis_dcache_put(t->w->ctx->dcache, &d, d.ttl, d.pinned);
+}
+
+/* Is this zone already known to be unsigned? */
+static int zone_known_unsigned(elpis_task_t *t, const elpis_name_t *zone)
+{
+    elpis_deleg_t d;
+
+    if (elpis_dcache_get(t->w->ctx->dcache, zone, elpis_cached_now_s(),
+                         &d) != ELPIS_OK)
+        return 0;
+    return d.ds_state == ELPIS_DS_ABSENT;
+}
+
 /*
  * Add the zones behind unsigned RRsets to the list of chains to walk.
  *
@@ -1038,6 +1063,17 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
             continue;
         if (!serving_zone(t, i, &zone))
             continue;
+
+        /*
+         * If the zone is already known to have no DS there is nothing to
+         * prove: it is insecure, and so is this RRset.  Settling it here saves
+         * an entire chain walk from the trust anchor, which is what made
+         * unsigned answers the most expensive kind to validate.
+         */
+        if (zone_known_unsigned(t, &zone)) {
+            v->status[i] = SS_INSECURE;
+            continue;
+        }
 
         for (j = 0; j < v->nsigners; j++)
             if (elpis_name_eq(&v->signers[j], &zone)) {
@@ -1062,6 +1098,8 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
  */
 static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached)
 {
+    elpis_worker_t *w = t->w;
+    elpis_rrset_buf_t *set = w->rrbuf;
     unsigned i;
 
     for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
@@ -1073,12 +1111,25 @@ static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached
             !elpis_name_eq(&zone, &v->signers[v->si]))
             continue;
 
-        if (reached && t->w->ctx->conf.harden_dnssec_stripped) {
+        if (reached && w->ctx->conf.harden_dnssec_stripped) {
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
                 t->ede = ELPIS_EDE_RRSIGS_MISSING;
-        } else {
-            v->status[i] = SS_INSECURE;
+            continue;                   /* never cache a forged verdict */
+        }
+
+        v->status[i] = SS_INSECURE;
+        /*
+         * Record it, for the same reason the signed path records SECURE.
+         * These are the RRsets of zones that are not signed at all -- most of
+         * the internet -- and leaving them unchecked meant every later hit on
+         * them walked the chain from the root again, re-verifying the DS and
+         * DNSKEY signature of every zone on the way down.  That is real
+         * public-key work, per query, on data whose status was already known.
+         */
+        if (build_set(t, i, set)) {
+            set->sec = (uint8_t)ELPIS_SEC_INSECURE;
+            elpis_rcache_put_buf(w->ctx->rcache, set, w->ctx->conf.serve_stale, 0);
         }
     }
 }
@@ -1299,14 +1350,40 @@ static void val_run(elpis_task_t *t)
                  * No DS here: either this name is not a zone cut, or it is an
                  * unsigned delegation.  Either way the deepest validated keys
                  * stay what they are; keep walking.
+                 *
+                 * Remember it on the delegation, though.  Whether a zone is
+                 * signed is a fact about the zone, and re-deriving it by
+                 * walking from the root -- which is what probing an unsigned
+                 * zone does -- is the expensive part of validating the
+                 * unsigned majority of the internet.
                  */
+                if (scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))
+                    note_unsigned_zone(t, &next);
                 v->walk = next;
                 continue;
             }
 
-            if (elpis_rrset_validate(c, scratch, &v->keys, now, NULL, &ede) != ELPIS_OK) {
-                val_done(t, ELPIS_SEC_BOGUS, ede);
-                return;
+            /*
+             * Verify the DS against the parent's keys -- once.
+             *
+             * This descent is walked far more often than it looks: once per
+             * signer, once per unsigned zone being probed, and again from the
+             * top every time a DS or DNSKEY lookup suspends and resumes.  With
+             * nothing recorded, every one of those repeated the public-key
+             * work for every zone on the way down, which on a busy resolver
+             * became the single largest consumer of CPU in the process --
+             * 80% of it, all inside RSA verification of data that had already
+             * been proven.  Recording the verdict is what makes the second
+             * walk cheap, exactly as it does for the answer itself.
+             */
+            if (scratch->sec != (uint8_t)ELPIS_SEC_SECURE) {
+                if (elpis_rrset_validate(c, scratch, &v->keys, now, NULL,
+                                         &ede) != ELPIS_OK) {
+                    val_done(t, ELPIS_SEC_BOGUS, ede);
+                    return;
+                }
+                scratch->sec = (uint8_t)ELPIS_SEC_SECURE;
+                elpis_rcache_put_buf(w->ctx->rcache, scratch, c->serve_stale, 0);
             }
 
             {
@@ -1323,7 +1400,16 @@ static void val_run(elpis_task_t *t)
                     val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_DNSKEY_MISSING);
                     return;
                 }
-                rc = elpis_dnskey_validate_ds(c, scratch, &ds_hold, now, &ede);
+                if (scratch->sec == (uint8_t)ELPIS_SEC_SECURE) {
+                    rc = ELPIS_OK;      /* already proven against this DS */
+                } else {
+                    rc = elpis_dnskey_validate_ds(c, scratch, &ds_hold, now, &ede);
+                    if (rc == ELPIS_OK) {
+                        scratch->sec = (uint8_t)ELPIS_SEC_SECURE;
+                        elpis_rcache_put_buf(w->ctx->rcache, scratch,
+                                             c->serve_stale, 0);
+                    }
+                }
                 if (rc == ELPIS_ENOTFOUND) {
                     mark_insecure_for_current(t, v);
                     v->stage = VS_VERIFY;
