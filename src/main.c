@@ -10,6 +10,7 @@
 #include "elpis/sock.h"
 #include "elpis/crypto.h"
 #include "elpis/dnssec.h"
+#include "elpis/conflict.h"
 #include "elpis/simd.h"
 #include "elpis/util.h"
 #include "elpis/log.h"
@@ -508,13 +509,89 @@ static int check_bind_privilege(const elpis_conf_t *c)
     elpis_fatal("    - start as root and set 'user:' in elpis.conf so it "
                 "drops privilege after binding");
     elpis_fatal("    - listen on an unprivileged port instead, e.g. "
-                "'listen: 127.0.0.1@5353', and point AdGuard or Pi-hole at it");
+                "'listen: 127.0.0.1@5335', and point AdGuard or Pi-hole at it");
 #if defined(__linux__)
     if (limit == 1024)
         elpis_fatal("    - or lower the range system-wide: "
                     "sysctl net.ipv4.ip_unprivileged_port_start=53");
 #endif
     return ELPIS_ERR;
+}
+
+/*
+ * Something else already owns a port we want.
+ *
+ * The only case handled automatically is systemd-resolved, and only when we
+ * are root and the config asked for a privileged port -- the two conditions
+ * under which the conflict is both likely and fixable.  Anything else is
+ * reported and refused: quietly killing an unrelated daemon is not this
+ * program's business.
+ */
+static int resolve_port_conflicts(elpis_conf_t *c)
+{
+    unsigned i;
+    int stopped = 0;
+
+    for (i = 0; i < c->nlisten; i++) {
+        elpis_conflict_t k;
+        char ab[80], cb[80];
+
+        if (!elpis_conflict_find(&c->listen[i], &k))
+            continue;
+
+        elpis_addr_str(&c->listen[i], ab, sizeof ab);
+        elpis_addr_str(&k.addr, cb, sizeof cb);
+
+        if (k.is_resolved && geteuid() == 0 && c->stop_systemd_resolved) {
+            if (stopped)
+                continue;              /* one stop clears every listener */
+            elpis_warn("systemd-resolved (pid %ld) is listening on %s, which "
+                       "conflicts with 'listen: %s'", k.pid, cb, ab);
+            /*
+             * Left alone this does not even fail.  Elpis sets SO_REUSEADDR,
+             * and as root Linux will happily bind a port systemd-resolved
+             * already holds -- the kernel then hands each arriving query to
+             * one of the two at random.
+             */
+            if (elpis_stop_systemd_resolved(&c->listen[i]) != ELPIS_OK) {
+                elpis_fatal("could not free %s; refusing to start and share "
+                            "the port with systemd-resolved", ab);
+                return ELPIS_ERR;
+            }
+            stopped = 1;
+            continue;
+        }
+
+        if (k.is_resolved && geteuid() != 0) {
+            elpis_fatal("systemd-resolved (pid %ld) is listening on %s, which "
+                        "conflicts with 'listen: %s', and this process is not "
+                        "root so it cannot stop it", k.pid, cb, ab);
+            elpis_fatal("  sudo systemctl disable --now systemd-resolved, "
+                        "or listen on another port");
+            return ELPIS_ERR;
+        }
+        if (k.is_resolved) {
+            elpis_fatal("systemd-resolved (pid %ld) holds %s and "
+                        "stop-systemd-resolved is off; refusing to share "
+                        "the port", k.pid, cb);
+            return ELPIS_ERR;
+        }
+
+        if (k.identified)
+            elpis_fatal("%s (pid %ld) is already listening on %s/%s, which "
+                        "conflicts with 'listen: %s'",
+                        k.name[0] ? k.name : "another process", k.pid, cb,
+                        k.proto[0] ? k.proto : "udp", ab);
+        else
+            elpis_fatal("something is already listening on %s/%s, which "
+                        "conflicts with 'listen: %s' (run as root to see what)",
+                        cb, k.proto[0] ? k.proto : "udp", ab);
+        if (k.cmdline[0])
+            elpis_fatal("  command: %s", k.cmdline);
+        elpis_fatal("  stop it, or move elpis to another port");
+        return ELPIS_ERR;
+    }
+    return ELPIS_OK;
 }
 
 static int drop_privilege(const elpis_conf_t *c)
@@ -666,6 +743,8 @@ int main(int argc, char **argv)
     g_nworkers = nthreads;
 
     if (check_bind_privilege(&ctx.conf) != ELPIS_OK)
+        return 1;
+    if (resolve_port_conflicts(&ctx.conf) != ELPIS_OK)
         return 1;
 
     /*

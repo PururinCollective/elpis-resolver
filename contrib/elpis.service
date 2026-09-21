@@ -12,6 +12,16 @@ Documentation=https://github.com/PururinCollective/elpis-resolver
 After=network-online.target
 Wants=network-online.target
 
+# Running under this unit, elpis is not root and cannot stop anything itself.
+# Let systemd do it: starting elpis stops systemd-resolved, and the two can
+# never be active at once fighting over port 53.  Drop these two lines if you
+# keep resolved and run elpis on another port.
+#
+# Remember that stopping resolved leaves /etc/resolv.conf pointing at a stub
+# that is no longer listening -- repoint it at elpis, or at 127.0.0.1.
+Conflicts=systemd-resolved.service
+After=systemd-resolved.service
+
 [Service]
 Type=simple
 ExecStart=/opt/elpis/elpis -d

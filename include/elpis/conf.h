@@ -6,7 +6,7 @@
  *   2. /etc/elpis/elpis.conf
  *   3. /etc/elpis.conf
  * The first that exists wins.  A missing file is not an error: the built-in
- * defaults are a working recursive resolver on 127.0.0.1 port 5353.
+ * defaults are a working recursive resolver on 127.0.0.1 port 5335.
  */
 #ifndef ELPIS_CONF_H
 #define ELPIS_CONF_H
@@ -130,6 +130,11 @@ typedef struct {
     char         chroot_dir[512];
     char         pidfile[512];
     uint8_t      daemonize;
+    /*
+     * Stop systemd-resolved when it holds a port we were told to listen on.
+     * Only ever acts on systemd-resolved, and only when running as root.
+     */
+    uint8_t      stop_systemd_resolved;
 
     /* --- logging -------------------------------------------------- */
     elpis_loglevel_t log_level;

@@ -21,6 +21,7 @@
 #include "elpis/edns.h"
 #include "elpis/resolver.h"
 #include "elpis/deleg.h"
+#include "elpis/conflict.h"
 
 #include "vectors.h"
 
@@ -922,6 +923,106 @@ static void test_dns64(void)
 }
 
 /* ================================================================== */
+static void test_conflict(void)
+{
+    elpis_addr_t addr, want;
+    unsigned long inode;
+
+    section("port conflict detection");
+
+    /*
+     * Real rows captured from /proc/net/udp on a systemd-resolved host.  The
+     * address is printed as the raw __be32, so 3500007F is 127.0.0.53, and
+     * the inode is the tenth column -- both of which this got wrong once.
+     */
+    {
+        const char *row =
+            "   93: 3500007F:0035 00000000:0000 07 00000000:00000000 "
+            "00:00000000 00000000   989        0 7590 2 0000000000000000 0";
+        uint8_t expect[4] = { 127, 0, 0, 53 };
+        CHECK(elpis_conflict_parse_row(row, AF_INET, &addr, &inode) == 1,
+              "parse a /proc/net/udp row");
+        CHECK(inode == 7590, "inode is 7590 (got %lu)", inode);
+        CHECK(elpis_addr_port(&addr) == 53, "port is 53 (got %u)",
+              elpis_addr_port(&addr));
+        CHECK(memcmp(&addr.u.v4.sin_addr, expect, 4) == 0,
+              "address decodes to 127.0.0.53");
+    }
+    {
+        const char *row =
+            "   93: 3600007F:0035 00000000:0000 07 00000000:00000000 "
+            "00:00000000 00000000   989        0 7592 2 0000000000000000 0";
+        uint8_t expect[4] = { 127, 0, 0, 54 };
+        CHECK(elpis_conflict_parse_row(row, AF_INET, &addr, &inode) == 1 &&
+              inode == 7592 &&
+              memcmp(&addr.u.v4.sin_addr, expect, 4) == 0,
+              "second row decodes to 127.0.0.54 inode 7592");
+    }
+    {   /* wildcard, the common case for a real server */
+        const char *row =
+            "  123: 00000000:0035 00000000:0000 07 00000000:00000000 "
+            "00:00000000 00000000     0        0 44321 2 0000000000000000 0";
+        uint8_t zero[4] = { 0, 0, 0, 0 };
+        CHECK(elpis_conflict_parse_row(row, AF_INET, &addr, &inode) == 1 &&
+              inode == 44321 && memcmp(&addr.u.v4.sin_addr, zero, 4) == 0,
+              "wildcard row decodes to 0.0.0.0");
+    }
+    {   /* IPv6: ::1 port 53 */
+        const char *row =
+            "   42: 00000000000000000000000001000000:0035 "
+            "00000000000000000000000000000000:0000 07 00000000:00000000 "
+            "00:00000000 00000000   989        0 7595 2 0000000000000000 0";
+        uint8_t expect[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+        CHECK(elpis_conflict_parse_row(row, AF_INET6, &addr, &inode) == 1 &&
+              inode == 7595 &&
+              memcmp(&addr.u.v6.sin6_addr, expect, 16) == 0,
+              "IPv6 row decodes to ::1");
+    }
+    {   /* a different port must not be mistaken for ours */
+        const char *row =
+            "   93: 0100007F:1F90 00000000:0000 07 00000000:00000000 "
+            "00:00000000 00000000   989        0 9999 2 0000000000000000 0";
+        CHECK(elpis_conflict_parse_row(row, AF_INET, &addr, &inode) == 1 &&
+              elpis_addr_port(&addr) == 8080, "port 0x1F90 is 8080 (got %u)",
+              elpis_addr_port(&addr));
+    }
+    CHECK(elpis_conflict_parse_row("garbage", AF_INET, &addr, &inode) == 0,
+          "a malformed row is rejected");
+
+    section("port collision rules");
+    {
+        elpis_addr_t bound;
+        elpis_addr_parse(&bound, "127.0.0.53@53", 53);
+
+        elpis_addr_parse(&want, "127.0.0.53@53", 53);
+        CHECK(elpis_conflict_collides(&bound, &want), "same address collides");
+
+        elpis_addr_parse(&want, "0.0.0.0@53", 53);
+        CHECK(elpis_conflict_collides(&bound, &want),
+              "a wildcard bind collides with a specific listener");
+
+        elpis_addr_parse(&bound, "0.0.0.0@53", 53);
+        elpis_addr_parse(&want, "127.0.0.1@53", 53);
+        CHECK(elpis_conflict_collides(&bound, &want),
+              "a specific bind collides with a wildcard listener");
+
+        elpis_addr_parse(&bound, "127.0.0.53@53", 53);
+        elpis_addr_parse(&want, "127.0.0.1@53", 53);
+        CHECK(!elpis_conflict_collides(&bound, &want),
+              "different addresses on the same port do not collide");
+
+        elpis_addr_parse(&want, "127.0.0.53@5353", 5353);
+        CHECK(!elpis_conflict_collides(&bound, &want),
+              "different ports do not collide");
+
+        elpis_addr_parse(&bound, "[::1]:53", 53);
+        elpis_addr_parse(&want, "127.0.0.1@53", 53);
+        CHECK(!elpis_conflict_collides(&bound, &want),
+              "different families do not collide");
+    }
+}
+
+/* ================================================================== */
 static void test_conf(void)
 {
     elpis_conf_t c;
@@ -1018,6 +1119,7 @@ int main(void)
     test_signatures();
     test_dnssec();
     test_dns64();
+    test_conflict();
     test_conf();
     test_cookies();
 

@@ -16,9 +16,17 @@ void elpis_conf_defaults(elpis_conf_t *c)
 {
     memset(c, 0, sizeof *c);
 
-    /* Listening: loopback only until told otherwise. */
-    elpis_addr_parse(&c->listen[0], "127.0.0.1@5353", 5353);
-    elpis_addr_parse(&c->listen[1], "[::1]@5353", 5353);
+    /*
+     * Loopback only until told otherwise, on 5335 rather than 5353.
+     *
+     * 5353 is IANA-assigned to mDNS, and avahi-daemon binds 0.0.0.0:5353 on
+     * most Linux hosts.  Because both sides set SO_REUSEADDR the two bind
+     * without any error and the kernel then splits traffic between them, so
+     * the clash is silent.  5335 is what the Pi-hole and unbound guides use
+     * for exactly this reason.
+     */
+    elpis_addr_parse(&c->listen[0], "127.0.0.1@5335", 5335);
+    elpis_addr_parse(&c->listen[1], "[::1]@5335", 5335);
     c->nlisten    = 2;
     c->listen_udp = 1;
     c->listen_tcp = 1;
@@ -99,6 +107,8 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->block_private_reverse = 1;
     c->refuse_any            = 1;
     c->answer_version_bind   = 1;
+
+    c->stop_systemd_resolved = 1;
 
     c->log_level = ELPIS_LOG_INFO;
     c->log_dst   = ELPIS_LOG_DST_STDERR;
@@ -467,6 +477,8 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("chroot"))   { elpis_strlcpy(c->chroot_dir, val, sizeof c->chroot_dir); return ELPIS_OK; }
     if (KEY("pidfile"))  { elpis_strlcpy(c->pidfile, val, sizeof c->pidfile); return ELPIS_OK; }
     if (KEY("daemonize")) return want_bool(&p, key, val, &c->daemonize);
+    if (KEY("stop-systemd-resolved"))
+        return want_bool(&p, key, val, &c->stop_systemd_resolved);
 
     /* ---- logging ---- */
     if (KEY("log-level")) {

@@ -34,7 +34,7 @@ typedef struct {
      * Authorities always answer on 53, but a configured forwarder or stub
      * often does not -- running next to AdGuard Home usually means something
      * is on a different port.  Carrying it here is what makes
-     * "stub-zone: corp.example 10.0.0.1@5353" actually work.
+     * "stub-zone: corp.example 10.0.0.1@5335" actually work.
      */
     uint16_t port;
     uint8_t  a4[ELPIS_NS_MAX_A4][4];

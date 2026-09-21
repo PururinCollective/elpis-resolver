@@ -126,11 +126,13 @@ that refuses to start.
 
 `elpis.conf` is looked for next to the binary, then in `/etc/elpis/`, then in
 `/etc/`. The first that exists wins; without one the defaults are a working
-recursive resolver on `127.0.0.1:5353`. The shipped file documents every
+recursive resolver on `127.0.0.1:5335`. (Not 5353 — that is mDNS, and
+avahi-daemon holds it on most Linux hosts; because both sides set
+`SO_REUSEADDR` the clash is silent rather than an error.) The shipped file documents every
 setting at its default value.
 
 ```
-listen: 127.0.0.1@5353
+listen: 127.0.0.1@5335
 access-control: 127.0.0.0/8 allow
 
 cache-size: auto           # or 2G
@@ -143,11 +145,11 @@ root-zone-transfer: no     # yes = pull every TLD delegation at startup
 dns64: no
 dns64-prefix: 64:ff9b::/96
 
-forward-zone: internal.example 10.0.0.53@5353   # recursive upstream
+forward-zone: internal.example 10.0.0.53@5335   # recursive upstream
 stub-zone: corp.example 10.1.0.53               # iterative, treated as authority
 ```
 
-Behind AdGuard Home, point its upstream at `127.0.0.1:5353` and leave Elpis on
+Behind AdGuard Home, point its upstream at `127.0.0.1:5335` and leave Elpis on
 loopback.
 
 ### Privileged ports
@@ -164,13 +166,54 @@ FATAL cannot listen on 0.0.0.0:53: port 53 is privileged on this system
 FATAL   pick one:
 FATAL     - grant the capability once: sudo setcap cap_net_bind_service=+ep /usr/local/sbin/elpis
 FATAL     - start as root and set 'user:' in elpis.conf so it drops privilege after binding
-FATAL     - listen on an unprivileged port instead, e.g. 'listen: 127.0.0.1@5353'
+FATAL     - listen on an unprivileged port instead, e.g. 'listen: 127.0.0.1@5335'
 FATAL     - or lower the range system-wide: sysctl net.ipv4.ip_unprivileged_port_start=53
 ```
 
 Sockets are bound before privileges are dropped, so `user:` works with either
 of the first two. Running as root with no `user:` configured is allowed but
 warned about once.
+
+### Something else on port 53
+
+Before opening any socket, Elpis asks the kernel who is already listening on
+the addresses it was told to bind, and names the process:
+
+```
+FATAL dnsmasq (pid 812) is already listening on 0.0.0.0:53/udp,
+      which conflicts with 'listen: 0.0.0.0:53'
+FATAL   command: /usr/sbin/dnsmasq --conf-file=/etc/dnsmasq.conf
+FATAL   stop it, or move elpis to another port
+```
+
+This check is not cosmetic. Elpis sets `SO_REUSEADDR`, and **as root, Linux
+lets a UDP socket bind a port another process already holds — with no error**.
+Verified on a systemd-resolved host: a bind to `0.0.0.0:53`, and even to
+`127.0.0.53:53` itself, succeeds silently while resolved keeps running, and
+the kernel then splits arriving queries between the two at random. Waiting for
+`bind()` to complain would mean waiting forever.
+
+systemd-resolved is the one case handled automatically, since it is the one
+that is both common and safely fixable. Running as root, on a port it holds:
+
+```
+WARN  systemd-resolved (pid 460) is listening on 127.0.0.53:53,
+      which conflicts with 'listen: 0.0.0.0:53'
+INFO  stopping systemd-resolved so the port can be bound cleanly
+INFO  systemd-resolved stopped
+WARN  /etc/resolv.conf still points at the systemd-resolved stub (127.0.0.53),
+      which is no longer listening -- this host cannot resolve names until you
+      repoint it
+WARN  systemd-resolved will come back on reboot; make it permanent with
+      'systemctl disable --now systemd-resolved'
+INFO  listening with 8 workers
+```
+
+Set `stop-systemd-resolved: no` to have it refuse instead. Nothing else is
+ever stopped — an unrelated daemon on the port is reported and Elpis exits.
+Under the shipped systemd unit it runs as `elpis`, not root, so it cannot stop
+anything; the unit uses `Conflicts=systemd-resolved.service` and lets systemd
+do it.
 
 ## Operating
 
