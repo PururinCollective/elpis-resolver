@@ -817,6 +817,43 @@ static int drop_privilege(const elpis_conf_t *c)
 /* Entry point                                                         */
 /* ================================================================== */
 
+/*
+ * Hash a status page password for pasting into the config.  The resolver will
+ * do this itself when it can write the file, but a deployment worth running
+ * does not let it: the shipped systemd unit mounts the install read-only, so
+ * the hashing has to happen somewhere the sandbox is not.
+ */
+static int hash_password(const char *plain)
+{
+    char buf[256], hashed[256];
+
+    elpis_random_init();
+
+    if (plain == NULL) {
+        size_t n;
+        if (isatty(STDIN_FILENO))
+            fprintf(stderr, "password: ");
+        if (fgets(buf, sizeof buf, stdin) == NULL) {
+            fprintf(stderr, "no password read\n");
+            return 2;
+        }
+        n = strlen(buf);
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+            buf[--n] = '\0';
+        plain = buf;
+    }
+    if (plain[0] == '\0') {
+        fprintf(stderr, "refusing to hash an empty password\n");
+        return 2;
+    }
+
+    elpis_webui_hash_password(plain, hashed, sizeof hashed);
+    printf("webgui-password: %s\n", hashed);
+
+    memset(buf, 0, sizeof buf);
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -829,7 +866,13 @@ static void usage(const char *argv0)
         "  -t        check the configuration and exit\n"
         "  -v        increase log verbosity (repeatable)\n"
         "  -V        print the version and exit\n"
-        "  -h        this message\n",
+        "  -h        this message\n"
+        "\n"
+        "  --hash-password [PASS]\n"
+        "            print a webgui-password: line to paste into the config.\n"
+        "            Use this when the config file is read-only, which under\n"
+        "            the shipped systemd unit it is.  With no PASS, reads one\n"
+        "            line from stdin so it stays out of your shell history.\n",
         ELPIS_VERSION, argv0, ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
 }
 
@@ -907,6 +950,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-t"))                           testonly = 1;
         else if (!strcmp(a, "-v"))                           verbose++;
         else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
+        else if (!strcmp(a, "--hash-password")) return hash_password(argv[i + 1]);
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option '%s'\n", a); usage(argv[0]); return 2; }
     }

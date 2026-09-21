@@ -14,6 +14,16 @@
 # the binary and its config stay root-owned and world-readable, the way
 # make install leaves them, and elpis only ever reads them.
 #
+# ProtectSystem=strict and ReadOnlyPaths below make the install read-only for
+# this service, whatever the files are owned by.  That is deliberate, and it
+# means the status page cannot hash a plaintext `webgui-password` back into the
+# config on first start -- it says so and carries on.  Hash it yourself instead
+# of opening the sandbox back up:
+#
+#   /opt/elpis-resolver/bin/elpis --hash-password
+#
+# and paste the line it prints into the config.
+#
 # If you do turn on `pidfile` or `log-file`, put them somewhere systemd
 # creates and hands to the service -- RuntimeDirectory=elpis for /run/elpis,
 # LogsDirectory=elpis for /var/log/elpis -- because ProtectSystem=strict

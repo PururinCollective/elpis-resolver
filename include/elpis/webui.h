@@ -24,6 +24,12 @@
  */
 int  elpis_webui_prepare(elpis_ctx_t *ctx);
 
+/* Hash a password the way the status page stores it, for putting in the
+ * config by hand.  This is what a deployment whose config file is read-only
+ * -- which a properly sandboxed one is -- uses instead of letting the
+ * resolver rewrite itself. */
+void elpis_webui_hash_password(const char *plain, char *out, size_t outsz);
+
 /* Runs until ctx->shutdown.  Intended as a pthread entry point. */
 void *elpis_webui_main(void *ctx);
 

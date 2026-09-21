@@ -181,6 +181,46 @@ renamed, so a failure part way cannot leave a truncated config behind; if the
 file cannot be written at all, the hash is still what gets used and you are
 told the plaintext is still on disk.
 
+### When the config cannot be rewritten
+
+```
+WARN  status page: /opt/elpis-resolver/bin/elpis.conf is not writable, so the
+      password stays in plaintext on disk (it is hashed in memory)
+WARN  status page: hash it yourself and paste the result in --
+      /opt/elpis-resolver/bin/elpis --hash-password
+```
+
+Under the shipped systemd unit this is expected, and it is not a permissions
+problem — `chown` will not fix it. `ProtectSystem=strict` and
+`ReadOnlyPaths=/opt/elpis-resolver/bin` make the install read-only *inside the
+service's mount namespace*, whatever the file's owner and mode say. That is why
+`runuser -u elpis -- touch` in the same directory succeeds: it runs outside
+that namespace.
+
+This is the right way round. A resolver that cannot rewrite its own config is a
+resolver whose config a compromise of it cannot rewrite either. So hash the
+password somewhere the sandbox is not:
+
+```bash
+/opt/elpis-resolver/bin/elpis --hash-password
+```
+
+It reads one line from stdin — so the password stays out of your shell history
+— and prints a line to paste in:
+
+```
+webgui-password: $pbkdf2-sha256$120000$19fabb8f...$89b97ecc...
+```
+
+Put that in the config, restart, and there is nothing left to rewrite and no
+warning. A password can also be given as an argument,
+`elpis --hash-password 'secret'`, which is convenient in a provisioning script
+and careless at a shell prompt.
+
+The alternative — adding `ReadWritePaths=/opt/elpis-resolver/bin` to the unit
+so the rewrite succeeds once — trades a permanent hole for a one-time
+convenience. It is not recommended.
+
 Passwords are checked in constant time, and so is the user name, so neither can
 be probed by timing. Sessions are 32 random bytes in an `HttpOnly`,
 `SameSite=Strict` cookie and last eight hours.

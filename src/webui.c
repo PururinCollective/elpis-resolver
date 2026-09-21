@@ -212,6 +212,15 @@ static int pw_check(const char *stored, const char *plain)
  * plaintext outliving the first start.  Written to a temp file and renamed, so
  * a failure half way cannot leave a truncated config behind.
  */
+void elpis_webui_hash_password(const char *plain, char *out, size_t outsz)
+{
+    uint8_t salt[16], hash[32];
+
+    elpis_random_bytes(salt, sizeof salt);
+    pw_hash(plain, PBKDF2_ITERS, salt, hash);
+    pw_format(out, outsz, PBKDF2_ITERS, salt, hash);
+}
+
 static int pw_rewrite_conf(const char *path, const char *hashed)
 {
     char tmp[600], line[1024];
@@ -287,12 +296,23 @@ int elpis_webui_prepare(elpis_ctx_t *ctx)
     pw_hash(c->web_pass, PBKDF2_ITERS, salt, hash);
     pw_format(hashed, sizeof hashed, PBKDF2_ITERS, salt, hash);
 
-    if (pw_rewrite_conf(c->path, hashed) == 0)
+    if (pw_rewrite_conf(c->path, hashed) == 0) {
         elpis_info("status page: password hashed into %s", c->path);
-    else
-        elpis_warn("status page: could not rewrite %s -- the password is "
-                   "hashed in memory but stays in plaintext on disk",
+    } else {
+        /*
+         * Almost always this is the config file being deliberately read-only
+         * -- ProtectSystem=strict and ReadOnlyPaths in the shipped unit both
+         * do it, whatever the file's owner and mode say -- and that is the
+         * right way round.  A resolver that cannot rewrite its own config is
+         * a resolver whose config a compromise cannot rewrite either.  So
+         * this says what to do rather than suggesting the sandbox be opened.
+         */
+        elpis_warn("status page: %s is not writable, so the password stays "
+                   "in plaintext on disk (it is hashed in memory)",
                    c->path[0] ? c->path : "(no config file)");
+        elpis_warn("status page: hash it yourself and paste the result in -- "
+                   "%s --hash-password", elpis_exe_path());
+    }
 
     memset(c->web_pass, 0, sizeof c->web_pass);
     elpis_strlcpy(c->web_pass, hashed, sizeof c->web_pass);

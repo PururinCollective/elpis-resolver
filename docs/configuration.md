@@ -170,6 +170,18 @@ identity: no                              # no probe at all
 With `identity: no` the name answers NXDOMAIN exactly like any name that does
 not exist, so nothing reveals that the feature was ever there.
 
+## Hashing a status page password
+
+```bash
+elpis --hash-password            # reads one line from stdin
+elpis --hash-password 'secret'   # or takes it as an argument
+```
+
+Prints a `webgui-password:` line to paste into the config. The resolver does
+this for itself when it can write the config file, but a properly sandboxed
+deployment does not let it — see
+[when the config cannot be rewritten](status-page.md#when-the-config-cannot-be-rewritten).
+
 ## Running it
 
 ```
