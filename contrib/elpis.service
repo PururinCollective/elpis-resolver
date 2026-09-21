@@ -3,6 +3,23 @@
 # Sockets are bound before privileges are dropped, so binding port 53 works
 # with CAP_NET_BIND_SERVICE alone -- no need to run as root.
 #
+# It still needs an account to drop to, and systemd will not invent one.  A
+# system user with no home and no shell is the whole of it -- elpis never logs
+# in and owns nothing on disk:
+#
+#   useradd --system --user-group --no-create-home \
+#           --shell /usr/sbin/nologin elpis
+#
+# (/sbin/nologin on RHEL and its relatives.)  Nothing needs chowning to it:
+# the binary and its config stay root-owned and world-readable, the way
+# make install leaves them, and elpis only ever reads them.
+#
+# If you do turn on `pidfile` or `log-file`, put them somewhere systemd
+# creates and hands to the service -- RuntimeDirectory=elpis for /run/elpis,
+# LogsDirectory=elpis for /var/log/elpis -- because ProtectSystem=strict
+# below leaves nothing else writable.  The defaults need neither: no pidfile,
+# and stderr goes to the journal.
+#
 #   install -m0644 contrib/elpis.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now elpis
 
