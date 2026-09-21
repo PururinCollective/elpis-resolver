@@ -10,6 +10,27 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.2 — 2026-09-22
+
+### Fixed
+
+**Data that failed validation stayed in the cache and was served.** The first
+client to ask for a forged name got SERVFAIL, correctly. Every client after it
+was handed the forged records straight from the cache, unvalidated, until the
+TTL ran out.
+
+RRsets are cached as a message is parsed, which happens long before the chain
+has been walked. When the verdict came back bogus the answer was dropped from
+the reply but left in the cache with no verdict attached, and a cached RRset is
+served without revalidating. One query refused and the rest allowed is the
+worst of both: from the outside it looks like validation is working.
+
+Bogus answers are now taken back out of the RRset cache before the SERVFAIL is
+sent. This is what dnscheck.tools reports as the Missing row, and it has failed
+since the first release — 1.0.0 served such records on every query including
+the first, so the earlier work in 1.1.0 and 1.1.1 made the cold query correct
+without closing the hole behind it.
+
 ## 1.1.1 — 2026-09-22
 
 ### Fixed

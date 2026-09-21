@@ -1590,6 +1590,33 @@ static void task_finish(elpis_task_t *t)
                       elpis_name_str(&t->orig_qname, nb, sizeof nb),
                       elpis_type_name(t->orig_qtype),
                       alg ? elpis_alg_name(alg) : "none");
+        /*
+         * Take the answer back out of the cache before dropping it.
+         *
+         * RRsets are cached as the message is parsed, which is long before
+         * the chain has been walked -- so by the time a verdict of forged
+         * arrives, the forged records are already in the cache with no verdict
+         * on them.  The client that asked got SERVFAIL, correctly; every
+         * client after it was served the records straight from cache without
+         * revalidation, for as long as their TTL lasted.  The first query was
+         * refused and the rest of them were not, which is the worst of both:
+         * it looks like validation is working.
+         */
+        {
+            unsigned k2;
+            for (k2 = 0; k2 < t->ans.n; k2++) {
+                elpis_name_t owner;
+                if (t->ans.rr[k2].type == ELPIS_T_RRSIG ||
+                    t->ans.rr[k2].type == ELPIS_T_OPT)
+                    continue;
+                if (elpis_trr_get_name(&t->ans, k2, &owner) != ELPIS_OK)
+                    continue;
+                elpis_rcache_del(w->ctx->rcache, &owner, t->ans.rr[k2].type,
+                                 t->ans.rr[k2].klass);
+                elpis_rcache_del(w->ctx->rcache, &owner, ELPIS_T_RRSIG,
+                                 t->ans.rr[k2].klass);
+            }
+        }
         elpis_rrlist_clear(&t->ans);
         t->rcode = ELPIS_RC_SERVFAIL;
         if (t->ede < 0)
