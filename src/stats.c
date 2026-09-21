@@ -50,6 +50,7 @@ void elpis_stats_report(elpis_ctx_t *ctx)
                (unsigned long long)s->cache_stale,
                (unsigned long long)s->recursions,
                (unsigned long long)s->upstream_queries);
+    elpis_info("  tasks=%llu", (unsigned long long)s->tasks);
     elpis_info("  loop: turns/s=%llu idle=%llu nosleep=%llu timers=%u "
                "slowest-turn=%ums",
                (unsigned long long)ctx->loop.turns,

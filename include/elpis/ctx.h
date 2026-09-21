@@ -22,6 +22,7 @@ typedef struct {
     uint64_t tcp_queries, truncated, dnssec_secure, dnssec_insecure;
     uint64_t dnssec_bogus, dns64_synth, prefetches, dropped;
     uint64_t cookie_ok, cookie_bad;
+    uint64_t tasks;            /* tasks created, client and internal alike */
 } elpis_stats_t;
 
 /*

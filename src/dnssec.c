@@ -640,6 +640,23 @@ enum {
 };
 
 #define VAL_MAX_SIGNERS 12
+
+/*
+ * Hard ceiling on the lookups one validation may make.
+ *
+ * A chain walk is bounded in principle -- a DS and a DNSKEY for each zone
+ * between the trust anchor and each signer -- but nothing enforced it, and a
+ * validation that failed to converge simply kept asking.  Measured on a
+ * resolver taking real traffic, that reached 84,684 child tasks for a single
+ * client query, at nearly two million task allocations a second: the process
+ * was not slow, it was looping.
+ *
+ * The legitimate worst case is roughly signers * depth * 2, which for twelve
+ * signers and a ten-label name is under 250.  Past this the answer is called
+ * unverifiable rather than insecure: running out of budget says nothing about
+ * the data, so it must not be mistaken for proof that a zone is unsigned.
+ */
+#define VAL_MAX_STEPS 384
 #define VAL_MAX_SETS    256
 
 #define SS_UNKNOWN  0
@@ -719,9 +736,11 @@ static void val_release(val_t *v)
 }
 
 static void val_run(elpis_task_t *t);
+static void inflight_forget(elpis_task_t *t);
 
 void elpis_val_free(elpis_task_t *t)
 {
+    inflight_forget(t);
     if (t->val != NULL) {
         val_release((val_t *)t->val);
         t->val = NULL;
@@ -735,14 +754,111 @@ static int val_cached(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
                             elpis_cached_now_s(), 0, out) == ELPIS_OK;
 }
 
-static void val_child_done(elpis_task_t *child, void *ctxp)
+/*
+ * One lookup, however many validations are waiting on it.
+ *
+ * A chain walk fetches the DS and DNSKEY of every zone from the trust anchor
+ * down, and the walk is repeated for each signer and each unsigned zone being
+ * probed -- as many as a dozen times for one answer, over the same root and
+ * TLD.  While those records are cached the repeats are free, but the moment
+ * they expire every repeat misses together and each one spawned its own child
+ * task: an allocation, a zero-millisecond timer, a deadline timer and a pass
+ * of the state machine, all to fetch a record eleven siblings were already
+ * fetching.  That is what turned a TTL expiring into a burst of work.
+ *
+ * Now the first one to ask launches the lookup and the rest wait on it.
+ */
+#define VAL_INFLIGHT 64
+#define VAL_WAITERS  24
+
+typedef struct {
+    uint64_t      hash;          /* of (name, type); 0 when the slot is free */
+    elpis_name_t  name;
+    uint16_t      type;
+    elpis_task_t *waiter[VAL_WAITERS];
+    unsigned      nwait;
+} val_inflight_t;
+
+/* Case-folded already: every name reaching the validator is lowered. */
+static uint64_t inflight_hash(const elpis_name_t *n, uint16_t type)
 {
-    elpis_task_t *p = child->parent;
+    uint64_t h = 1469598103934665603ull;
+    unsigned i;
+    for (i = 0; i < n->len; i++) {
+        h ^= n->d[i];
+        h *= 1099511628211ull;
+    }
+    h ^= type;
+    h *= 1099511628211ull;
+    return h ? h : 1u;
+}
+
+static ELPIS_TLS val_inflight_t g_inflight[VAL_INFLIGHT];
+
+static val_inflight_t *inflight_find(const elpis_name_t *n, uint16_t type)
+{
+    uint64_t h = inflight_hash(n, type);
+    unsigned i;
+
+    /* Compare the hash first: this runs on every lookup the validator makes,
+     * and comparing sixty-four names outright cost more than it saved. */
+    for (i = 0; i < VAL_INFLIGHT; i++)
+        if (g_inflight[i].hash == h && g_inflight[i].type == type &&
+            elpis_name_eq(&g_inflight[i].name, n))
+            return &g_inflight[i];
+    return NULL;
+}
+
+static val_inflight_t *inflight_new(const elpis_name_t *n, uint16_t type)
+{
+    unsigned i;
+    for (i = 0; i < VAL_INFLIGHT; i++) {
+        if (g_inflight[i].hash != 0)
+            continue;
+        g_inflight[i].hash  = inflight_hash(n, type);
+        g_inflight[i].name  = *n;
+        g_inflight[i].type  = type;
+        g_inflight[i].nwait = 0;
+        return &g_inflight[i];
+    }
+    return NULL;                        /* table full: fall back to our own */
+}
+
+static int inflight_join(val_inflight_t *f, elpis_task_t *t)
+{
+    unsigned i;
+    for (i = 0; i < f->nwait; i++)
+        if (f->waiter[i] == t)
+            return 1;                   /* already waiting on this one */
+    if (f->nwait >= VAL_WAITERS)
+        return 0;
+    f->waiter[f->nwait++] = t;
+    return 1;
+}
+
+/* A task that is going away must not be resumed afterwards. */
+static void inflight_forget(elpis_task_t *t)
+{
+    unsigned i, j;
+    for (i = 0; i < VAL_INFLIGHT; i++) {
+        if (g_inflight[i].hash == 0)
+            continue;
+        for (j = 0; j < g_inflight[i].nwait; j++) {
+            if (g_inflight[i].waiter[j] != t)
+                continue;
+            g_inflight[i].waiter[j] = g_inflight[i].waiter[--g_inflight[i].nwait];
+            break;
+        }
+    }
+}
+
+/* Carry one waiting validation forward now its lookup has landed. */
+static void val_resume(elpis_task_t *p)
+{
     val_t *v;
 
-    (void)ctxp;
     if (p == NULL)
-        return;                         /* the parent went away first */
+        return;
     if (p->nchild)
         p->nchild--;
 
@@ -759,6 +875,31 @@ static void val_child_done(elpis_task_t *child, void *ctxp)
         p->state = ELPIS_TS_FINISH;
         elpis_task_step(p);
     }
+}
+
+static void val_child_done(elpis_task_t *child, void *ctxp)
+{
+    val_inflight_t *f = (val_inflight_t *)ctxp;
+    elpis_task_t *w[VAL_WAITERS];
+    unsigned n, i;
+
+    if (f == NULL) {                    /* no slot: the old one-to-one path */
+        val_resume(child->parent);
+        return;
+    }
+
+    /*
+     * Take the list before resuming anyone: a resumed validation runs to its
+     * next suspend inside val_resume(), and may register itself here again.
+     */
+    n = f->nwait;
+    for (i = 0; i < n; i++)
+        w[i] = f->waiter[i];
+    f->nwait = 0;
+    f->hash  = 0;
+
+    for (i = 0; i < n; i++)
+        val_resume(w[i]);
 }
 
 /* Returns 1 when the data is in hand, 0 when a lookup was launched. */
@@ -790,6 +931,25 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
     v->pending_tries++;
     v->waiting = 1;
     v->steps++;
+
+    /* Someone is already fetching exactly this; wait for them instead. */
+    {
+        val_inflight_t *f = inflight_find(n, type);
+        if (f != NULL && inflight_join(f, t)) {
+            t->nchild++;                /* released again by val_resume() */
+            return 0;
+        }
+
+        f = inflight_new(n, type);
+        if (f != NULL && inflight_join(f, t)) {
+            if (elpis_task_child(t, n, type, val_child_done, f) != NULL)
+                return 0;
+            f->hash  = 0;
+            f->nwait = 0;
+        }
+    }
+
+    /* Table full, or the child could not be started: do it the plain way. */
     if (elpis_task_child(t, n, type, val_child_done, NULL) == NULL) {
         v->waiting = 0;
         elpis_rrset_buf_init(out, n, type, ELPIS_CLASS_IN, 0);
@@ -1312,6 +1472,12 @@ static void val_run(elpis_task_t *t)
 
     if (v == NULL)
         return;
+
+    if (v->steps > VAL_MAX_STEPS) {
+        t->val_unavailable = 1;
+        val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
+        return;
+    }
 
     while (++guard < 128) {
         switch (v->stage) {

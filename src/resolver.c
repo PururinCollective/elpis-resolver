@@ -135,6 +135,8 @@ static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
 elpis_task_t *elpis_task_new(elpis_worker_t *w)
 {
     elpis_task_t *t = (elpis_task_t *)elpis_calloc(1, sizeof *t);
+
+    elpis_stat_inc(&w->stats.tasks, 1);
     if (t == NULL)
         return NULL;
     t->w = w;
