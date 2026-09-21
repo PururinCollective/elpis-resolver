@@ -21,14 +21,15 @@ allows; once you size a window yourself it keeps the size you gave it.
 |---|---|
 | **Task Manager** | CPU, memory, network and queries in one window — a rail of live sparklines on the left, the one you pick drawn large on the right |
 | **Overview** | cache hit rate, response time answered from cache and resolved upstream, queries and SERVFAIL per second, every counter the resolver keeps, and how this host looks from outside: public IPv4 and IPv6, AS number and AS name |
-| **CPU** | processor time as a share of one core, the processor's model name, the worker count and which SIMD kernels were selected |
-| **Memory** | resident size over time, and each cache's entries, bytes used, budget and hit rate |
+| **CPU** | processor time as a share of one core, the processor's model name, the worker count, which SIMD kernels were selected, and how long both the resolver and the machine under it have been up |
+| **Memory** | resident size over time against the memory the resolver may use, so the line reads as a share of the ceiling rather than of its own peak, and each cache's entries, bytes used, budget and hit rate |
 | **Network** | bytes in and out per second, and the addresses actually bound |
 | **Queries** | queries per second, SERVFAIL and bogus per second, cache hits against upstream queries |
 | **Root servers** | the roots ranked by the round trip this resolver has actually measured, with how often each was asked and how often it failed to answer |
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
-| **Log** | the recent warnings and errors, newest first |
+| **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
+| **About** | version, the commit the binary was built from, uptime, and which ML-DSA parameter sets are live |
 
 The counts are exact, not sampled. Sampling was tried first and it is useless
 here: a resolver answering a few hundred queries a second gives too few samples
@@ -39,6 +40,38 @@ the first time it is seen, and every query after that finds the slot by hash and
 adds one.
 
 That still costs something, so nothing is counted at all while `webgui: no`.
+
+## Knowing which build you are looking at
+
+The About window carries the commit the binary was built from, captured by
+`make` and shown next to the version:
+
+```
+version   1.0.0
+build     b7d28e0ea6c9
+```
+
+A `-dirty` suffix means the working tree had uncommitted changes when it was
+built, so the commit alone does not describe the binary. Built outside a git
+checkout — from a release tarball — the field reads *not a git checkout*.
+Quote this line in a bug report and there is no ambiguity about what was
+running.
+
+## ML-DSA, active and available
+
+All three ML-DSA verifiers are compiled in unconditionally, so what About
+reports is not whether the code exists but whether the DNSSEC algorithm number
+it answers to means anything to anyone else:
+
+| | |
+|---|---|
+| **active** | the number is one others use too. `draft-westerbaan-dnssec-mldsa` assigns 18 to ML-DSA-44 and the deployed test zones sign with it |
+| **available** | built in and ready, but sitting on a placeholder in unassigned space that is interoperable with nothing |
+
+The draft registers no number for ML-DSA-65 and ML-DSA-87, so they default to
+placeholders and read *available*. Override one — `mldsa65-algorithm: 25` —
+and it reads *active*, because setting it can only mean the number has been
+agreed with whoever is on the other end.
 
 ## Where the host addresses come from
 

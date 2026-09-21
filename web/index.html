@@ -121,6 +121,14 @@ h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
 .tmitem .tmt span+span{color:var(--dim);font-size:10px}
 .tmpane{margin-top:2px}
 .tmname{color:var(--dim);font-size:11px;text-align:right;margin:-2px 0 4px}
+.abt{text-align:center;padding:4px 0 14px;border-bottom:1px solid var(--line);
+  margin-bottom:12px}
+.abt svg{width:42px;height:42px;stroke:var(--accent);fill:none}
+.abt h3{margin:6px 0 4px;font-size:16px;font-weight:600;letter-spacing:.04em}
+.abt p{margin:2px 0;color:var(--dim);font-size:11px}
+.pill{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;
+  border:1px solid var(--line);color:var(--dim)}
+.pill.on{border-color:var(--ok);color:var(--ok)}
 .tmmain{flex:1;min-width:0;overflow:auto;padding:12px 14px}
 .tmhead{display:flex;align-items:baseline;margin-bottom:10px}
 .tmhead h2{margin:0;font-size:26px;font-weight:400}
@@ -348,7 +356,7 @@ function resize(w, grip){
  * the size is theirs and we leave it alone.
  */
 function fit(w){
-  if (w.userSized) return;
+  if (w.userSized || w.def.nofit) return;
   var b = w.body, surf = $('surface');
   var over = b.scrollHeight - b.clientHeight;
   if (over > 2){
@@ -467,7 +475,8 @@ var TMRES = [
   val: function(d){ return bytes(last(d.history.rss)); },
   sub: function(d){ return 'of ' + bytes(d.proc.ram); },
   right: function(d){ return bytes(d.proc.ram) + ' usable'; },
-  ser: function(d){ return [{ data: d.history.rss, color:'#9b59d0' }]; } },
+  ser: function(d){ return [{ data: d.history.rss, color:'#9b59d0' }]; },
+  max: function(d){ return d.proc.ram || 0; } },
 { k:'net', label:'Network', color:'#4caf50',
   val: function(d){ return bytes(last(d.history.rx)) + '/s'; },
   sub: function(d){ return bytes(last(d.history.tx)) + '/s sent'; },
@@ -545,7 +554,10 @@ var VIEWS = [
       "<div class='kv' style='margin-top:6px'>" +
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
-      "<b>event loop</b><span>" + esc(d.server.loop) + "</span></div>" +
+      "<b>event loop</b><span>" + esc(d.server.loop) + "</span>" +
+      "<b>resolver up</b><span>" + dur(d.server.uptime) + "</span>" +
+      "<b>host up</b><span>" + (d.server.hostup ? dur(d.server.hostup) :
+        "<span style='color:var(--dim)'>unknown</span>") + "</span></div>" +
       "<h4 style='margin-top:10px'>Event loop, last second</h4><div class='kv'>" +
       "<b>turns</b><span>" + num(L.turns) + "</span>" +
       "<b>turns that did nothing</b><span>" + num(L.idle) + "</span>" +
@@ -575,7 +587,8 @@ var VIEWS = [
     });
     b.innerHTML = h + "</table>";
     graph(b.querySelector('canvas'),
-      [{ data: d.history.rss, color: '#9b59d0' }], { h: 96 });
+      [{ data: d.history.rss, color: '#9b59d0' }],
+      { h: 96, max: d.proc.ram || 0 });
   }},
 
 { id:'net', title:'Network', w:490, h:320,
@@ -627,7 +640,8 @@ var VIEWS = [
 
     var cvs = b.querySelectorAll('.tmitem canvas');
     TMRES.forEach(function(r, j){
-      graph(cvs[j], r.ser(d), { h:30, max:r.max || 0, bare:true, points:120 });
+      var mx = typeof r.max === 'function' ? r.max(d) : (r.max || 0);
+      graph(cvs[j], r.ser(d), { h:30, max:mx, bare:true, points:120 });
     });
 
     var main = b.querySelector('.tmmain'), res = null;
@@ -715,7 +729,7 @@ var VIEWS = [
       "</div>";
   }},
 
-{ id:'log', title:'Log', w:640, h:330,
+{ id:'log', title:'Log', w:640, h:330, nofit: true,
   icon:"<svg viewBox='0 0 24 24'><path d='M5 3h10l4 4v14H5z'/><path d='M15 3v4h4M8 13h8M8 17h5'/></svg>",
   render: function(b, d){
     var h = "<div class='log'>";
@@ -725,20 +739,51 @@ var VIEWS = [
       h += "<div class='lv-" + esc(p[0]) + "'>[" + esc(p[0]) + "] " +
            esc(p.slice(1).join(' ')) + "</div>";
     }
+    /* Redrawn every second: hold the scroll where the reader left it, unless
+     * they are already at the top, where new entries arrive. */
+    var top = b.scrollTop;
     b.innerHTML = h + "</div>";
+    b.scrollTop = top;
   }},
 
-{ id:'about', title:'About', w:400, h:230,
+{ id:'about', title:'About', w:430, h:470,
   icon:"<svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='9'/><path d='M12 11v6M12 8h.01'/></svg>",
   render: function(b, d){
-    b.innerHTML = "<div class='kv'>" +
+    var m = d.mldsa || [];
+    var h =
+      "<div class='abt'>" +
+        "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5'>" +
+          "<path d='M12 2 3 7v10l9 5 9-5V7z'/><path d='M12 7v10M8 9v6M16 9v6'/></svg>" +
+        "<h3>&#917;&#923;&#928;&#921;&#931; Resolver v" + esc(d.server.version) + "</h3>" +
+        "<p>Created by Anime4000, Ryukura &amp; Claude AI</p>" +
+        "<p>Copyright 2026 Pururin Collective</p>" +
+      "</div>" +
+      "<div class='kv'>" +
       "<b>version</b><span>" + esc(d.server.version) + "</span>" +
+      "<b>build</b><span>" + (d.server.build ?
+          "<code>" + esc(d.server.build) + "</code>" :
+          "<span style='color:var(--dim)'>not a git checkout</span>") + "</span>" +
       "<b>uptime</b><span>" + dur(d.server.uptime) + "</span>" +
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD</b><span>" + esc(d.server.simd) + "</span>" +
       "<b>event loop</b><span>" + esc(d.server.loop) + "</span>" +
       "<b>DNSSEC</b><span>" + (d.server.dnssec ? 'validating' : 'off') + "</span>" +
-      "</div><div style='color:var(--dim);margin-top:10px'>" +
+      "</div>";
+
+    h += "<h4 style='margin-top:12px'>Post-quantum signatures</h4><table>";
+    m.forEach(function(x){
+      h += "<tr><td>" + esc(x.name) + "</td><td><span class='pill " +
+           (x.state === 'active' ? 'on' : '') + "'>" + esc(x.state) +
+           "</span></td><td class='n'>algorithm " + x.alg + "</td>" +
+           "<td style='color:var(--dim)'>" + esc(x.note) + "</td></tr>";
+    });
+    h += "</table>";
+
+    b.innerHTML = h + "<div style='color:var(--dim);margin-top:10px'>" +
+      "All three verifiers are built in. <b>active</b> means the algorithm " +
+      "number is one somebody else uses too; <b>available</b> means it is a " +
+      "local placeholder, set with <code>mldsa65-algorithm:</code> and friends." +
+      "</div><div style='color:var(--dim);margin-top:8px'>" +
       "This page is read-only. It has no endpoint that changes anything.</div>";
   }}
 ];
