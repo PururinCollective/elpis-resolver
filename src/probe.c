@@ -26,6 +26,7 @@
 #include "elpis/resolver.h"
 
 #include <errno.h>
+#include <string.h>
 #include <poll.h>
 #include <time.h>
 #include <unistd.h>
@@ -42,9 +43,10 @@ typedef struct {
     uint64_t     sent_ms;
     uint32_t     best_ms;
     uint32_t     last_ms;
-    unsigned     sent;
+    unsigned     sent;          /* probes that left the host           */
     unsigned     replies;
     unsigned     outstanding;
+    int          send_errno;    /* why sendmsg refused, if it did      */
 } target_t;
 
 /* ------------------------------------------------------------------ */
@@ -117,10 +119,18 @@ static void probe_round(target_t *t, unsigned n, int fd4, int fd6)
         len = build_probe(buf, sizeof buf, t[i].txid);
         if (len == 0)
             continue;
+        errno = 0;
         if (elpis_sock_send(fd, buf, len, &t[i].addr, NULL) == (ssize_t)len) {
             t[i].sent_ms = elpis_now_ms();
             t[i].sent++;
             t[i].outstanding = 1;
+        } else {
+            /*
+             * The kernel refused to send at all -- almost always no route for
+             * that family.  Worth keeping apart from "sent and heard nothing",
+             * because the two have completely different causes.
+             */
+            t[i].send_errno = errno;
         }
     }
 
@@ -289,12 +299,22 @@ int elpis_probe_roots(elpis_ctx_t *ctx)
                    elpis_addr_str(&t[i].addr, ab, sizeof ab),
                    t[i].best_ms, t[i].replies, t[i].sent);
     }
+    /*
+     * Two very different failures, reported as two different things.  "No
+     * route" is this host's configuration; "sent, no reply" means the packets
+     * left and something in the path ate them, which is a firewall question.
+     */
     for (i = 0; i < n; i++) {
         char ab[80];
-        if (t[i].replies != 0 || t[i].sent == 0)
+        if (t[i].replies != 0)
             continue;
-        elpis_info("   -- %-22s %-30s unreachable", t[i].name,
-                   elpis_addr_str(&t[i].addr, ab, sizeof ab));
+        elpis_addr_str(&t[i].addr, ab, sizeof ab);
+        if (t[i].sent == 0)
+            elpis_info("   -- %-22s %-30s no route (%s)", t[i].name, ab,
+                       t[i].send_errno ? strerror(t[i].send_errno) : "send failed");
+        else
+            elpis_info("   -- %-22s %-30s sent %u, no reply", t[i].name, ab,
+                       t[i].sent);
     }
 
     /*
@@ -305,10 +325,32 @@ int elpis_probe_roots(elpis_ctx_t *ctx)
      * wrong about a transient outage.
      */
     if (tried6 > 0 && ok6 == 0 && ok4 > 0) {
+        unsigned routed6 = 0;
+        for (i = 0; i < n; i++)
+            if (t[i].family == AF_INET6 && t[i].sent > 0)
+                routed6++;
+
         ctx->conf.do_ipv6 = 0;
-        elpis_warn("root probe: no IPv6 root server answered while IPv4 works; "
-                   "disabling outbound IPv6 for this run "
-                   "(set 'do-ipv6: yes' and restart to force it back on)");
+        if (routed6 == 0) {
+            elpis_warn("root probe: this host has no route for IPv6 -- every "
+                       "probe was refused before it left. Outbound IPv6 is "
+                       "off for this run.");
+            elpis_warn("  check 'ip -6 route show default' and that the "
+                       "interface has a global address");
+        } else {
+            /*
+             * This is the one that looks like broken IPv6 but is not: the
+             * packets went out and nothing came back.
+             */
+            elpis_warn("root probe: IPv6 probes left this host (%u of %u had a "
+                       "route) but no root server replied. Outbound IPv6 is "
+                       "off for this run.", routed6, tried6);
+            elpis_warn("  the route exists, so this is filtering rather than "
+                       "configuration: check UDP/53 egress and the return path "
+                       "in this host's firewall and at the provider");
+            elpis_warn("  compare: 'dig @2001:500:2f::f . SOA +norec' -- if "
+                       "that also times out, it is not elpis");
+        }
     } else if (tried4 > 0 && ok4 == 0 && ok6 > 0) {
         ctx->conf.do_ipv4 = 0;
         elpis_warn("root probe: no IPv4 root server answered while IPv6 works; "

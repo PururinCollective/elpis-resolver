@@ -152,6 +152,11 @@ int elpis_worker_init(elpis_worker_t *w, elpis_ctx_t *ctx, unsigned index)
 
         if (c->listen_udp) {
             if (elpis_sock_udp_listen(&c->listen[i], 1, &fd) == ELPIS_OK) {
+                if (index == 0) {
+                    char lb[80];
+                    elpis_info("  bound udp %s",
+                               elpis_addr_str(&c->listen[i], lb, sizeof lb));
+                }
                 w->udp_fd[w->n_udp] = fd;
                 if (elpis_loop_add(w->loop, &w->udp_ev[w->n_udp], fd,
                                    ELPIS_EV_READ, elpis_server_udp_event, w) != ELPIS_OK)
@@ -179,6 +184,11 @@ int elpis_worker_init(elpis_worker_t *w, elpis_ctx_t *ctx, unsigned index)
 
         if (c->listen_tcp) {
             if (elpis_sock_tcp_listen(&c->listen[i], 1, 512, &fd) == ELPIS_OK) {
+                if (index == 0) {
+                    char lb[80];
+                    elpis_info("  bound tcp %s",
+                               elpis_addr_str(&c->listen[i], lb, sizeof lb));
+                }
                 w->tcp_fd[w->n_tcp] = fd;
                 if (elpis_loop_add(w->loop, &w->tcp_ev[w->n_tcp], fd,
                                    ELPIS_EV_READ, elpis_server_tcp_event, w) != ELPIS_OK)
@@ -527,6 +537,70 @@ static int check_bind_privilege(const elpis_conf_t *c)
  * reported and refused: quietly killing an unrelated daemon is not this
  * program's business.
  */
+/*
+ * A specific address listed alongside a wildcard on the same port is covered
+ * twice.  It works -- the kernel prefers the specific socket -- but it doubles
+ * the descriptors for no gain, and it usually means someone was not sure the
+ * wildcard would do the job.  Say so rather than leave them guessing.
+ *
+ * Also worth stating: IPV6_V6ONLY is set on every IPv6 listener, so "[::]"
+ * serves IPv6 only.  Serving both families from wildcards needs both lines.
+ */
+static void warn_redundant_listeners(const elpis_conf_t *c)
+{
+    static const uint8_t zero16[16] = { 0 };
+    unsigned i, j;
+    int have_v4_wild = 0, have_v6_wild = 0;
+
+    for (i = 0; i < c->nlisten; i++) {
+        if (elpis_addr_family(&c->listen[i]) == AF_INET &&
+            memcmp(&c->listen[i].u.v4.sin_addr, zero16, 4) == 0)
+            have_v4_wild = 1;
+        if (elpis_addr_family(&c->listen[i]) == AF_INET6 &&
+            memcmp(&c->listen[i].u.v6.sin6_addr, zero16, 16) == 0)
+            have_v6_wild = 1;
+    }
+
+    for (i = 0; i < c->nlisten; i++) {
+        int wild_i = 0;
+        if (elpis_addr_family(&c->listen[i]) == AF_INET)
+            wild_i = memcmp(&c->listen[i].u.v4.sin_addr, zero16, 4) == 0;
+        else if (elpis_addr_family(&c->listen[i]) == AF_INET6)
+            wild_i = memcmp(&c->listen[i].u.v6.sin6_addr, zero16, 16) == 0;
+        if (wild_i)
+            continue;
+
+        for (j = 0; j < c->nlisten; j++) {
+            char a[80], b[80];
+            int wild_j = 0;
+            if (j == i)
+                continue;
+            if (elpis_addr_family(&c->listen[j]) == AF_INET)
+                wild_j = memcmp(&c->listen[j].u.v4.sin_addr, zero16, 4) == 0;
+            else if (elpis_addr_family(&c->listen[j]) == AF_INET6)
+                wild_j = memcmp(&c->listen[j].u.v6.sin6_addr, zero16, 16) == 0;
+            if (!wild_j)
+                continue;
+            if (!elpis_conflict_collides(&c->listen[j], &c->listen[i]))
+                continue;
+
+            elpis_warn("listen %s is already covered by %s; the specific line "
+                       "is redundant and can be removed",
+                       elpis_addr_str(&c->listen[i], a, sizeof a),
+                       elpis_addr_str(&c->listen[j], b, sizeof b));
+            break;
+        }
+    }
+
+    if (have_v6_wild && !have_v4_wild)
+        elpis_warn("only the IPv6 wildcard is configured: elpis sets "
+                   "IPV6_V6ONLY, so '[::]' does not serve IPv4 -- add a "
+                   "'listen: 0.0.0.0@<port>' line if you want both");
+    if (have_v4_wild && !have_v6_wild)
+        elpis_info("no IPv6 listener configured; add 'listen: [::]@<port>' "
+                   "to serve IPv6 clients");
+}
+
 static int resolve_port_conflicts(elpis_conf_t *c)
 {
     unsigned i;
@@ -746,6 +820,7 @@ int main(int argc, char **argv)
         return 1;
     if (resolve_port_conflicts(&ctx.conf) != ELPIS_OK)
         return 1;
+    warn_redundant_listeners(&ctx.conf);
 
     /*
      * Running as root with nowhere to drop to is a choice, not a mistake, but

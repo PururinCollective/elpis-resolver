@@ -45,6 +45,20 @@ On this host that cut cold TLD lookups from 11.9s to 6.7s. A host whose IPv6
 is configured but not working is detected the same way, and outbound IPv6 is
 disabled for the run rather than burning a timeout on every other query.
 
+The probe separates the two ways that fails, because they have nothing to do
+with each other. "No route" means the kernel refused to send — that is this
+host's configuration. "Sent, no reply" means the packets left and nothing came
+back, which is a firewall somewhere, not a missing route:
+
+```
+   -- a.root-servers.net.  [2001:503:ba3e::2:30]:53   sent 3, no reply
+WARN  IPv6 probes left this host (13 of 13 had a route) but no root server
+      replied. Outbound IPv6 is off for this run.
+WARN    the route exists, so this is filtering rather than configuration:
+        check UDP/53 egress and the return path in this host's firewall and
+        at the provider
+```
+
 ```
 root probe: 26 of 26 addresses answered (IPv4 13/13, IPv6 13/13), 3 rounds
    1. e.root-servers.net.    192.203.230.10:53          11 ms  (3/3)
@@ -173,6 +187,34 @@ FATAL     - or lower the range system-wide: sysctl net.ipv4.ip_unprivileged_port
 Sockets are bound before privileges are dropped, so `user:` works with either
 of the first two. Running as root with no `user:` configured is allowed but
 warned about once.
+
+### Listening on everything
+
+Two lines, and that is the whole of it:
+
+```
+listen: 0.0.0.0@53
+listen: [::]@53
+```
+
+Both are needed. Every IPv6 listener sets `IPV6_V6ONLY`, so `[::]` carries
+IPv6 only — it will not pick up IPv4 the way a dual-stack socket does. That is
+deliberate: a dual-stack socket reports IPv4 peers as v4-mapped addresses,
+which would make `access-control` rules quietly ambiguous about which family
+they matched.
+
+Listing a specific address *as well as* the wildcard is redundant — the kernel
+prefers the specific socket, so it works, but it costs descriptors for nothing
+and Elpis says so. Startup names every socket it actually bound, which is the
+first thing to check when a client cannot reach it:
+
+```
+INFO    bound udp 0.0.0.0:53
+INFO    bound tcp 0.0.0.0:53
+INFO    bound udp [::]:53
+INFO    bound tcp [::]:53
+INFO  listening with 8 workers
+```
 
 ### Something else on port 53
 
