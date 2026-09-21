@@ -17,6 +17,11 @@ resized from the grip in the bottom right corner, and tiled from the toolbar.
 A window whose content does not fit grows to show it, as far as the desktop
 allows; once you size a window yourself it keeps the size you gave it.
 
+The desktop you leave is the desktop you come back to: which windows are open,
+where, how big, which is in front and which Task Manager pane was showing are
+all remembered by the browser. **Reset** in the toolbar forgets the lot and
+puts the defaults back.
+
 | | |
 |---|---|
 | **Task Manager** | CPU, memory, network and queries in one window — a rail of live sparklines on the left, the one you pick drawn large on the right |
@@ -72,6 +77,32 @@ The draft registers no number for ML-DSA-65 and ML-DSA-87, so they default to
 placeholders and read *available*. Override one — `mldsa65-algorithm: 25` —
 and it reads *active*, because setting it can only mean the number has been
 agreed with whoever is on the other end.
+
+## What the browser remembers
+
+The window layout and the light/dark choice live in the browser's
+`localStorage`, not in a cookie. The page asks `/api/status` for a fresh
+snapshot every second, and a cookie would be attached to every one of those
+requests — uploading window coordinates to a resolver that has no use for
+them. Nothing about the layout ever reaches the server.
+
+Two consequences worth knowing:
+
+*It is per origin.* Reaching the same resolver through an SSH tunnel at
+`127.0.0.1:8082` and directly at `[fd00:1::53]:8082` gives you two independent
+desktops, because the browser treats them as two different sites.
+
+*It is per browser.* There is no account behind it, so the layout does not
+follow you to another machine, and a private window starts on the defaults
+every time.
+
+If storage is unavailable — a private window, site data blocked — the page
+opens on its defaults and simply does not remember. Nothing breaks.
+
+A layout saved on a large screen and reopened on a small one is fitted to the
+desktop it finds: windows are shrunk to what will fit and pulled back on
+screen, and each remembers the size it would rather be, so widening the browser
+gives it back.
 
 ## Where the host addresses come from
 

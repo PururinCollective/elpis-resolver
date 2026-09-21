@@ -175,6 +175,7 @@ h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
     <span class='spacer'></span>
     <button class='tbtn' id='theme'>Light</button>
     <button class='tbtn' id='tile'>Tile</button>
+    <button class='tbtn' id='reset' title='Forget the saved window layout'>Reset</button>
     <button class='tbtn' id='out'>Log out</button>
   </div>
   <div id='surface'><div id='icons'></div></div>
@@ -304,6 +305,7 @@ function focusWin(w){
   for (k in wins) if (wins[k]) wins[k].el.classList.remove('active');
   w.el.classList.add('active');
   w.el.style.zIndex = ++zTop;
+  layoutSave();
 }
 
 function drag(w, handle){
@@ -320,7 +322,8 @@ function drag(w, handle){
       w.el.style.left = nx + 'px'; w.el.style.top = ny + 'px';
     }
     function up(){ document.removeEventListener('mousemove', mv);
-                   document.removeEventListener('mouseup', up); }
+                   document.removeEventListener('mouseup', up);
+                   layoutSave(); }
     document.addEventListener('mousemove', mv);
     document.addEventListener('mouseup', up);
     e.preventDefault();
@@ -340,14 +343,99 @@ function resize(w, grip){
       nw = Math.min(nw, surf.clientWidth  - w.el.offsetLeft);
       nh = Math.min(nh, surf.clientHeight - w.el.offsetTop);
       w.el.style.width = nw + 'px'; w.el.style.height = nh + 'px';
+      w.want = { w: nw, h: nh };
       if (D) w.def.render(w.body, D, w);
     }
     function up(){ document.removeEventListener('mousemove', mv);
-                   document.removeEventListener('mouseup', up); }
+                   document.removeEventListener('mouseup', up);
+                   layoutSave(); }
     document.addEventListener('mousemove', mv);
     document.addEventListener('mouseup', up);
     e.preventDefault(); e.stopPropagation();
   });
+}
+
+/* ---------- remembered layout ----------
+ *
+ * Where the windows are, how big they are and which is in front, kept in
+ * localStorage rather than a cookie: the page polls /api/status once a second
+ * and a cookie would ride along on every one of those requests, telling the
+ * resolver something it has no use for. This is the browser's business.
+ *
+ * Storage can be absent or throw outright -- private windows, blocked site
+ * data -- so every read and write is guarded and the page opens on its
+ * defaults when anything is wrong. The layout is per origin, so reaching the
+ * same resolver through an SSH tunnel and directly are two different desktops.
+ */
+var LAYOUT_KEY = 'elpis-layout';
+var LAYOUT_VER = 1;
+var saveTimer  = null;
+
+function layoutSave(){
+  if (saveTimer) return;                 /* coalesce a flurry of focus changes */
+  saveTimer = setTimeout(function(){
+    var list = [], k;
+    saveTimer = null;
+    for (k in wins) if (wins[k]) list.push(wins[k]);
+    /* Stored bottom to front, so reopening rebuilds the same stack. */
+    list.sort(function(a, b){
+      return (+a.el.style.zIndex || 0) - (+b.el.style.zIndex || 0);
+    });
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify({
+        v: LAYOUT_VER,
+        wins: list.map(function(w){
+          return { id: w.def.id,
+                   x: w.el.offsetLeft, y: w.el.offsetTop,
+                   w: w.want.w, h: w.want.h,
+                   sized: w.userSized ? 1 : 0,
+                   sel: w.def.sel || '' };
+        })
+      }));
+    } catch(_){}
+  }, 400);
+}
+
+function layoutRestore(){
+  var raw = null, saved, surf = $('surface'), i, opened = 0;
+  try { raw = localStorage.getItem(LAYOUT_KEY); } catch(_){ return false; }
+  if (!raw) return false;
+  try { saved = JSON.parse(raw); } catch(_){ return false; }
+  if (!saved || saved.v !== LAYOUT_VER || !saved.wins || !saved.wins.length)
+    return false;
+
+  for (i = 0; i < saved.wins.length; i++){
+    var s = saved.wins[i], def = viewOf(s.id), w;
+    if (!def) continue;                  /* a window this build no longer has */
+    if (s.sel) def.sel = s.sel;
+    openWin(def);
+    w = wins[s.id];
+    if (!w) continue;
+    clampTo(w, surf, s.w, s.h, s.x, s.y);
+    w.userSized = s.sized ? 1 : 0;
+    paintWin(w);
+    opened++;
+  }
+  return opened > 0;
+}
+
+function layoutForget(){
+  try { localStorage.removeItem(LAYOUT_KEY); } catch(_){}
+}
+
+/* Put a window at this geometry, but never outside the desktop it is being
+ * put on -- the screen it was saved from may have been a larger one, and a
+ * title bar out of reach cannot be dragged back. */
+function clampTo(w, surf, ww, hh, x, y){
+  w.want = { w: ww, h: hh };            /* what it would like, if there is room */
+  ww = Math.max(260, Math.min(ww, surf.clientWidth));
+  hh = Math.max(140, Math.min(hh, surf.clientHeight));
+  w.el.style.width  = ww + 'px';
+  w.el.style.height = hh + 'px';
+  /* Prefer the window wholly on the desktop; where it cannot fit, at least
+   * leave enough title bar to grab. */
+  w.el.style.left = Math.max(0, Math.min(x, Math.max(0, surf.clientWidth  - ww))) + 'px';
+  w.el.style.top  = Math.max(0, Math.min(y, Math.max(0, surf.clientHeight - hh))) + 'px';
 }
 
 /*
@@ -362,20 +450,29 @@ function fit(w){
   if (over > 2){
     var room = surf.clientHeight - w.el.offsetTop - 8;
     var want = Math.min(w.el.offsetHeight + over + 2, room);
-    if (want > w.el.offsetHeight) w.el.style.height = want + 'px';
+    if (want > w.el.offsetHeight){
+      w.el.style.height = want + 'px';
+      w.want.h = want;
+    }
   }
   over = b.scrollWidth - b.clientWidth;
   if (over > 2){
     var roomw = surf.clientWidth - w.el.offsetLeft - 8;
     var wantw = Math.min(w.el.offsetWidth + over + 2, roomw);
-    if (wantw > w.el.offsetWidth) w.el.style.width = wantw + 'px';
+    if (wantw > w.el.offsetWidth){
+      w.el.style.width = wantw + 'px';
+      w.want.w = wantw;
+    }
   }
 }
 
 function paintWin(w){
+  var h, ww;
   if (!D) return;
+  h = w.el.offsetHeight; ww = w.el.offsetWidth;
   w.def.render(w.body, D, w);
   fit(w);
+  if (w.el.offsetHeight !== h || w.el.offsetWidth !== ww) layoutSave();
 }
 
 var placed = 0;
@@ -397,10 +494,11 @@ function openWin(def){
                  "<div class='wb'></div><div class='rz'></div>";
   $('surface').appendChild(el);
 
-  var w = { el: el, body: el.querySelector('.wb'), def: def };
+  var w = { el: el, body: el.querySelector('.wb'), def: def,
+            want: { w: def.w || 460, h: def.h || 320 } };
   wins[def.id] = w;
   el.querySelector('.x').onclick = function(){
-    el.remove(); wins[def.id] = null;
+    el.remove(); wins[def.id] = null; layoutSave();
   };
   el.addEventListener('mousedown', function(){ focusWin(w); });
   drag(w, el.querySelector('.wt'));
@@ -423,9 +521,11 @@ function tile(){
     w.el.style.top  = (Math.floor(i / cols) * ch) + 'px';
     w.el.style.width  = (cw - 6) + 'px';
     w.el.style.height = (ch - 6) + 'px';
+    w.want = { w: cw - 6, h: ch - 6 };
     w.userSized = 1;
     if (D) w.def.render(w.body, D, w);
   });
+  layoutSave();
 }
 
 /* ---------- renderers ---------- */
@@ -657,6 +757,7 @@ var VIEWS = [
       if (!t) return;
       self.sel = t.dataset.k;
       paintWin(w);
+      layoutSave();
     });
   }},
 
@@ -816,7 +917,7 @@ function poll(){
 function showDesk(){
   $('login').style.display = 'none';
   $('desk').style.display = 'flex';
-  if (!Object.keys(wins).length){
+  if (!Object.keys(wins).length && !layoutRestore()){
     openWin(viewOf('overview')); openWin(viewOf('taskman'));
   }
   poll();
@@ -865,6 +966,15 @@ $('out').onclick = function(){
     .then(showLogin).catch(showLogin);
 };
 $('tile').onclick = tile;
+$('reset').onclick = function(){
+  var k;
+  layoutForget();
+  for (k in wins) if (wins[k]){ wins[k].el.remove(); wins[k] = null; }
+  /* back to defaults means the panes too, not just the geometry */
+  VIEWS.forEach(function(v){ delete v.sel; });
+  placed = 0; zTop = 10;
+  openWin(viewOf('overview')); openWin(viewOf('taskman'));
+};
 $('theme').onclick = function(){
   var r = document.documentElement;
   var light = r.getAttribute('data-theme') === 'light';
@@ -881,7 +991,16 @@ try {
   }
 } catch(_){}
 
-window.addEventListener('resize', function(){ if (D) paint(); });
+window.addEventListener('resize', function(){
+  var surf = $('surface'), k, w;
+  for (k in wins){
+    w = wins[k];
+    if (!w) continue;
+    clampTo(w, surf, w.want.w, w.want.h, w.el.offsetLeft, w.el.offsetTop);
+  }
+  if (D) paint();
+  layoutSave();
+});
 
 fetch('/api/session', { credentials:'same-origin' })
   .then(function(r){ return r.json(); })
