@@ -18,6 +18,7 @@
 #include "elpis/infra.h"
 #include "elpis/deleg.h"
 #include "webui_assets.h"
+#include "gitrev.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -418,6 +419,49 @@ static void json_top(buf_t *b, const char *name, elpis_top_t which)
  * estimates come from the infrastructure cache and move as the network does,
  * which is what actually decides who gets asked next.
  */
+/*
+ * The ML-DSA parameter sets, and how much the number each one answers to is
+ * worth.  All three verifiers are always built in, so "available" is never in
+ * doubt; what varies is whether the DNSSEC algorithm number is one anybody
+ * else uses.  draft-westerbaan-dnssec-mldsa assigns 18 to ML-DSA-44 and the
+ * deployed test zones sign with it, so that one is live.  It registers nothing
+ * for 65 and 87, so those default to placeholders in unassigned space that are
+ * interoperable with nothing -- until an operator overrides them, which can
+ * only mean they have agreed the numbers with whoever they are talking to.
+ */
+static void json_mldsa(const elpis_conf_t *c, buf_t *b)
+{
+    static const struct {
+        const char *name;
+        uint8_t     dflt;
+        int         assigned;       /* a number from the draft, not a placeholder */
+    } set[3] = {
+        { "ML-DSA-44", ELPIS_ALG_MLDSA44_DEFAULT, 1 },
+        { "ML-DSA-65", ELPIS_ALG_MLDSA65_DEFAULT, 0 },
+        { "ML-DSA-87", ELPIS_ALG_MLDSA87_DEFAULT, 0 }
+    };
+    const uint8_t alg[3] = { c->alg_mldsa44, c->alg_mldsa65, c->alg_mldsa87 };
+    unsigned i;
+
+    bputs(b, "\"mldsa\":[");
+    for (i = 0; i < 3; i++) {
+        int live = set[i].assigned || alg[i] != set[i].dflt;
+        if (i) bputs(b, ",");
+        bputs(b, "{\"name\":");
+        bputq(b, set[i].name);
+        bputs(b, ",\"alg\":");
+        bputu(b, alg[i]);
+        bputs(b, ",\"state\":");
+        bputq(b, live ? "active" : "available");
+        bputs(b, ",\"note\":");
+        bputq(b, set[i].assigned      ? "assigned by the draft"
+              : alg[i] != set[i].dflt ? "agreed locally"
+                                      : "placeholder, unassigned space");
+        bputs(b, "}");
+    }
+    bputs(b, "],");
+}
+
 static void json_roots(elpis_ctx_t *ctx, buf_t *b)
 {
     typedef struct { char addr[80]; char name[72]; uint32_t rtt, to, q; } row_t;
@@ -494,6 +538,9 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputq(b, ELPIS_VERSION);
     bputs(b, ",\"uptime\":");
     bputu(b, (elpis_now_ms() - ctx->start_ms) / 1000u);
+    bputs(b, ",\"hostup\":");
+    bputu(b, (unsigned long)elpis_host_uptime());
+    bputs(b, ",\"build\":");  bputq(b, ELPIS_GITREV);
     bputs(b, ",\"simd\":");   bputq(b, elpis_simd_backend());
     bputs(b, ",\"loop\":");   bputq(b, elpis_loop_backend());
     bputs(b, ",\"workers\":"); bputu(b, c->threads ? c->threads : elpis_cpu_count());
@@ -512,6 +559,8 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
         bputq(b, elpis_addr_str(&c->listen[i], ab, sizeof ab));
     }
     bputs(b, "]},");
+
+    json_mldsa(c, b);
 
     bputs(b, "\"self\":{\"v4\":");
     bputq(b, ctx->self.v4);

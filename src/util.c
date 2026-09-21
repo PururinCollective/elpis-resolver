@@ -363,6 +363,33 @@ void elpis_cpu_model(char *out, size_t outsz)
 #endif
 }
 
+uint64_t elpis_host_uptime(void)
+{
+#if defined(__linux__)
+    char buf[64];
+    int fd = open("/proc/uptime", O_RDONLY);
+    ssize_t n;
+    uint64_t secs = 0;
+    const char *p;
+
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    /* "12345.67 8901.23" -- seconds up, then seconds idle.  Only the whole
+     * part of the first field is wanted, so stop at the decimal point. */
+    for (p = buf; *p >= '0' && *p <= '9'; p++)
+        secs = secs * 10u + (uint64_t)(*p - '0');
+    return secs;
+#else
+    return 0;
+#endif
+}
+
 unsigned elpis_cpu_count(void)
 {
     long n = -1;

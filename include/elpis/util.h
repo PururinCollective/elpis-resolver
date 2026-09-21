@@ -98,6 +98,12 @@ void elpis_random_bytes(void *buf, size_t n);
 /* Processor model name, e.g. "AMD Ryzen 9 3950X 16-Core Processor".
  * Empty when the platform will not say. */
 void elpis_cpu_model(char *out, size_t outsz);
+
+/* Seconds since the host booted, 0 when the platform will not say.  This is
+ * the machine's uptime, not the resolver's: a resolver that restarted an hour
+ * ago on a box that has been up for a month is a different story from one
+ * where both numbers agree. */
+uint64_t elpis_host_uptime(void);
 uint32_t elpis_random_u32(void);
 /* Uniform in [0, n) without modulo bias. */
 uint32_t elpis_random_below(uint32_t n);

@@ -3,6 +3,10 @@
 The failure modes that are hard to tell apart from the outside, and what
 Elpis logs so you do not have to guess.
 
+Before reporting any of them, get the exact build: the About window on the
+[status page](status-page.md) shows the commit `make` built from, and a
+`-dirty` suffix if the tree had uncommitted changes at the time.
+
 ## The query arrives but no answer comes back
 
 A resolver that cannot route its reply looks exactly like one that is not
