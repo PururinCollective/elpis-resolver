@@ -216,6 +216,52 @@ INFO    bound tcp [::]:53
 INFO  listening with 8 workers
 ```
 
+### The query arrives but no answer comes back
+
+A resolver that cannot route its reply looks exactly like one that is not
+listening: the client times out either way. Elpis separates the two. Every
+failed `sendmsg` is logged with the destination, the source address it tried,
+and the kernel's reason:
+
+```
+WARN  could not send the reply to [2001:db8::5]:34766 from [2001:db8::1]:0:
+      No route to host -- the query arrived but this host cannot route the
+      answer back
+```
+
+If that line appears, the problem is routing, not DNS — `ip -6 route get`
+the client address and see what the kernel says.
+
+Replies are normally sent from whatever address the query arrived on, which is
+what a multi-homed host wants. On a container whose global address sits on one
+interface while the default route sits on another, the kernel rejects that
+combination outright. Rather than lose the answer, Elpis drops the pinned
+source and retries, letting the kernel choose; for an on-link client it picks
+the same address anyway.
+
+The same question applies outbound, so the root probe answers it before it
+sends anything:
+
+```
+INFO  root probe: IPv4 queries will leave from 192.168.88.118:39698
+INFO  root probe: IPv6 queries will leave from [2001:db8::1]:53539
+INFO  root probe: 26 of 26 addresses answered (IPv4 13/13, IPv6 13/13), 3 rounds
+```
+
+That is a route lookup, not a packet, so it costs nothing and it distinguishes
+*this host has no route for that family* from *the packets leave and nothing
+comes back*. A host with no IPv6 route says so plainly:
+
+```
+INFO  root probe: no IPv6 route to the root servers (Network is unreachable)
+```
+
+Having an address is not the same as having a route. An interface can hold a
+global IPv6 address and still carry no outbound traffic — `ifconfig` showing
+millions of RX packets against a few hundred TX on that interface is the
+signature. Use `outgoing-interface:` to pin the source address Elpis sends
+from when the kernel's own choice is wrong.
+
 ### Something else on port 53
 
 Before opening any socket, Elpis asks the kernel who is already listening on

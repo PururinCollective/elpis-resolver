@@ -79,6 +79,7 @@ typedef enum {
     ELPIS_DROP_OVERSIZE,         /* larger than the declared TCP length   */
     ELPIS_DROP_LOOP,             /* query loop / recursion depth          */
     ELPIS_DROP_RESOURCE,         /* out of memory or descriptors          */
+    ELPIS_DROP_SENDFAIL,         /* the answer could not be put on the wire */
     ELPIS_DROP__MAX
 } elpis_drop_t;
 

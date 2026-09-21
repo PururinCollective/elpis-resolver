@@ -90,12 +90,40 @@ static void fill_edns(elpis_task_t *t, elpis_edns_t *e, unsigned rcode)
     (void)rcode;
 }
 
+/*
+ * Send a reply, and say so when it does not go.
+ *
+ * This used to return a status that every caller ignored, which meant a
+ * resolver on a host that could not route the answer looked exactly like one
+ * that was not listening: the query arrives, the work happens, and the reply
+ * evaporates with nothing in the log.  A failed send is now counted and
+ * reported with the reason and both addresses involved.
+ */
 static int send_udp(elpis_worker_t *w, int fd, const uint8_t *buf, size_t len,
                     const elpis_addr_t *to, const elpis_addr_t *from)
 {
     ssize_t n = elpis_sock_send(fd, buf, len, to, from);
-    (void)w;
-    return (n == (ssize_t)len) ? ELPIS_OK : ELPIS_ERR;
+    int err;
+
+    if (n == (ssize_t)len)
+        return ELPIS_OK;
+    err = errno;
+
+    elpis_stat_inc(&w->stats.dropped, 1);
+    {
+        char db[80], sb[80];
+        elpis_addr_str(to, db, sizeof db);
+        if (from != NULL && from->len != 0)
+            elpis_addr_str(from, sb, sizeof sb);
+        else
+            elpis_strlcpy(sb, "(kernel choice)", sizeof sb);
+        elpis_drop_log_quiet(ELPIS_DROP_SENDFAIL, to, NULL, 0, NULL);
+        elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP_SENDFAIL, __FILE__, __LINE__,
+                      "could not send the reply to %s from %s: %s -- the "
+                      "query arrived but this host cannot route the answer "
+                      "back", db, sb, strerror(err));
+    }
+    return ELPIS_ERR;
 }
 
 static int tcp_queue(elpis_tcpconn_t *c, const uint8_t *buf, size_t len);

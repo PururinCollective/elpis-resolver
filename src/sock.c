@@ -386,5 +386,26 @@ ssize_t elpis_sock_send(int fd, const void *buf, size_t n,
         }
     }
 
-    return sendmsg(fd, &msg, 0);
+    {
+        ssize_t r = sendmsg(fd, &msg, 0);
+
+        /*
+         * We pinned the reply's source address to whatever the query arrived
+         * on, which is right on a multi-homed host -- but only if that address
+         * is usable for the route the reply will take.  On a container whose
+         * global address lives on one interface and whose route lives on
+         * another, the kernel refuses the combination and the answer would
+         * simply never be sent.  Rather than lose it, drop the pin and let the
+         * kernel choose; for an on-link client it picks the same address
+         * anyway.
+         */
+        if (r < 0 && msg.msg_controllen != 0 &&
+            (errno == EINVAL || errno == ENETUNREACH ||
+             errno == EADDRNOTAVAIL || errno == EHOSTUNREACH)) {
+            msg.msg_control    = NULL;
+            msg.msg_controllen = 0;
+            r = sendmsg(fd, &msg, 0);
+        }
+        return r;
+    }
 }

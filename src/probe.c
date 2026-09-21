@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <string.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -202,6 +203,49 @@ static void probe_round(target_t *t, unsigned n, int fd4, int fd6)
     }
 }
 
+/*
+ * Which source address would the kernel use to reach the roots, if any?
+ *
+ * A UDP connect() does no I/O -- it just runs the route lookup -- so this is
+ * free, and it separates "this host has no route for that family" from "the
+ * packets go out and nothing comes back" before a single probe is sent.  On a
+ * multi-homed container where the global address is on one interface and the
+ * default route is on another, this is the line that shows it.
+ */
+static void report_source(int family, const target_t *t, unsigned n)
+{
+    int fd;
+    unsigned i;
+    elpis_addr_t local;
+    socklen_t sl = (socklen_t)sizeof local.u.ss;
+    const char *fam = (family == AF_INET) ? "IPv4" : "IPv6";
+    char ab[80], sb[80];
+
+    for (i = 0; i < n; i++)
+        if (t[i].family == family)
+            break;
+    if (i == n)
+        return;
+
+    fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0)
+        return;
+
+    if (connect(fd, &t[i].addr.u.sa, t[i].addr.len) != 0) {
+        elpis_warn("root probe: no %s route to %s: %s", fam,
+                   elpis_addr_str(&t[i].addr, ab, sizeof ab), strerror(errno));
+        close(fd);
+        return;
+    }
+    memset(&local, 0, sizeof local);
+    if (getsockname(fd, &local.u.sa, &sl) == 0) {
+        local.len = sl;
+        elpis_info("root probe: %s queries will leave from %s", fam,
+                   elpis_addr_str(&local, sb, sizeof sb));
+    }
+    close(fd);
+}
+
 /* ------------------------------------------------------------------ */
 
 static int cmp_target(const void *a, const void *b)
@@ -245,6 +289,9 @@ int elpis_probe_roots(elpis_ctx_t *ctx)
         elpis_warn("root probe: no usable outbound socket");
         return ELPIS_ERR;
     }
+
+    if (fd4 >= 0) report_source(AF_INET, t, n);
+    if (fd6 >= 0) report_source(AF_INET6, t, n);
 
     rounds = c->probe_rounds ? c->probe_rounds : 3u;
     if (rounds > 10)

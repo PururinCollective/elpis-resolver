@@ -283,7 +283,7 @@ void elpis_logf_rl(elpis_loglevel_t lvl, int slot, const char *file, int line,
 static const char *const k_drop_name[ELPIS_DROP__MAX] = {
     "none", "short", "qr-set", "opcode", "qdcount", "name", "compress",
     "trailing", "rdlength", "rdata", "class", "edns", "tsig", "multi-opt",
-    "spoof", "acl", "ratelimit", "oversize", "loop", "resource"
+    "spoof", "acl", "ratelimit", "oversize", "loop", "resource", "sendfail"
 };
 
 const char *elpis_drop_name(elpis_drop_t d)
