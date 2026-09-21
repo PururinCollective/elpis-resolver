@@ -10,6 +10,29 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.4 — 2026-09-22
+
+### Fixed
+
+**Validation stopped working after some minutes of uptime.** DS lookups began
+failing in bulk — `no DS for google.com. after 2 attempts`, hundreds a
+minute — for names that resolve perfectly well, on a resolver that had been
+answering correctly since start.
+
+Lookups that several validations want at once are deduplicated through a small
+table: the first asks, the rest wait on its answer. The child doing the asking
+belongs to the task that started it, so when that task goes away — its deadline
+fires, the client gives up — the child goes with it and the callback that frees
+the table slot never runs. The slot stayed occupied for the life of the
+process, and from then on every validation wanting that name joined a lookup
+that had already died, waited for nothing, and gave up. Popular names went
+first, because they are the ones most likely to be in flight when a task is
+abandoned.
+
+Slots are now retired when the task that owns the lookup goes away or when
+nobody is left waiting, and a child reporting into a slot that has since been
+handed to a different lookup no longer wakes that lookup's waiters.
+
 ## 1.1.3 — 2026-09-22
 
 ### Fixed

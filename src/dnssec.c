@@ -823,6 +823,15 @@ typedef struct {
     uint16_t      type;
     elpis_task_t *waiter[VAL_WAITERS];
     unsigned      nwait;
+    /*
+     * The task whose child feeds this slot.  When it goes, the child goes
+     * with it and val_child_done() never runs, so the slot has to be retired
+     * here or it stays occupied for the life of the process -- and every
+     * later lookup of that name joins a child that is already dead.  From
+     * outside that reads as "no DS for google.com after 2 attempts" on a
+     * resolver that was answering perfectly ten minutes earlier.
+     */
+    elpis_task_t *owner;
 } val_inflight_t;
 
 /* Case-folded already: every name reaching the validator is lowered. */
@@ -930,6 +939,18 @@ static void val_child_done(elpis_task_t *child, void *ctxp)
     unsigned n, i;
 
     if (f == NULL) {                    /* no slot: the old one-to-one path */
+        val_resume(child->parent);
+        return;
+    }
+
+    /*
+     * Retiring a slot means it can be handed to a different lookup before
+     * this child reports back.  Resuming that lookup's waiters here would
+     * wake them for an answer to a question they did not ask, so make sure
+     * the slot is still ours before touching it; if it is not, this child
+     * still owes its own parent a resume.
+     */
+    if (f->owner != child->parent || f->hash == 0) {
         val_resume(child->parent);
         return;
     }
