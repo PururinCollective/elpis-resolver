@@ -10,6 +10,32 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.8 — 2026-09-23
+
+### Fixed
+
+**"Answered from cache" was the average over every query, not over cache
+hits.** Each query was added to the cache figure and recursions were then
+added to the upstream figure as well, so the number labelled as the cache's
+was the mean of both. At a 70% hit rate it read around 138 ms for answers that
+take microseconds — the recursions in it were doing all the work.
+
+Each query now lands in exactly one of the two.
+
+**Cache hits are measured in microseconds.** They were recorded as a flat
+zero, on the grounds that the whole of a hit fits inside one tick of the
+resolver's millisecond clock — true, but it makes the panel say nothing. The
+clock is read for real on that path now, and only while the status page is on,
+so a hit costs nothing extra when nobody is looking.
+
+A cache hit reads about **9 µs** of resolver time. A `dig` against loopback
+reporting 1 ms is measuring the round trip, not the lookup.
+
+### Changed
+
+- Latency figures carry their unit: microseconds below a millisecond,
+  milliseconds above. `9 µs` rather than `0.01 ms`.
+
 ## 1.1.7 — 2026-09-22
 
 ### Fixed

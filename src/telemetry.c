@@ -178,17 +178,21 @@ void elpis_tm_observe(elpis_wtm_t *w, uint64_t service_us, int recursed)
 {
     if (!elpis_tm_enabled || w == NULL)
         return;
-    w->rtt_sum_us += service_us;
-    w->rtt_count++;
     /*
      * Answered from cache and answered by asking the internet differ by three
-     * orders of magnitude, so one average over both says almost nothing: at a
-     * 99% hit rate it is the cache's number with a rounding error.  Both are
-     * kept, and the page shows both.
+     * orders of magnitude, so one average over both says almost nothing.  The
+     * two are kept apart and the page shows both -- which only works if each
+     * query lands in exactly one of them.  Adding every query to the cache
+     * figure and recursions to both made the "from cache" number the mean
+     * over everything: at a 70% hit rate it read a hundred milliseconds for
+     * answers that took none.
      */
     if (recursed) {
         w->rec_sum_us += service_us;
         w->rec_count++;
+    } else {
+        w->rtt_sum_us += service_us;
+        w->rtt_count++;
     }
     w->dirty = 1;
 }

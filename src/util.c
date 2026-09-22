@@ -55,6 +55,16 @@ uint32_t elpis_now_s(void)
     return (uint32_t)ts.tv_sec;
 }
 
+uint64_t elpis_now_us(void)
+{
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+#endif
+    return elpis_now_ms() * 1000ull;
+}
+
 int64_t elpis_wall_s(void)
 {
     struct timespec ts;

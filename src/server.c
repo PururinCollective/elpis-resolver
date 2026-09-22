@@ -449,6 +449,9 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     elpis_task_t *t;
     size_t outlen = 0;
     uint8_t kflags;
+    /* Only when the status page is on: a cache hit is a few microseconds of
+     * work, so the clock read would otherwise be a visible share of it. */
+    uint64_t t0 = elpis_tm_enabled ? elpis_now_us() : 0;
 
     elpis_stat_inc(&w->stats.queries, 1);
     elpis_tm_bytes(&w->tm, len, 0);
@@ -549,12 +552,12 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
                        w->txbuf, ELPIS_MAX_MSG, &outlen)) {
         /*
          * A cache hit never becomes a task, so this is the only place it can
-         * be counted.  Its service time is the few microseconds spent here,
-         * which rounds to nothing -- and that is the honest number: it is why
-         * the cache exists.
+         * be counted.  Measured in microseconds rather than the resolver's
+         * millisecond clock: the whole of it fits inside one tick of that,
+         * so it would otherwise read as zero and say nothing.
          */
         unsigned rc = outlen >= 4 ? (unsigned)(elpis_get16(w->txbuf + 2) & 0x0Fu) : 0u;
-        elpis_tm_observe(&w->tm, 0, 0);
+        elpis_tm_observe(&w->tm, t0 ? elpis_now_us() - t0 : 0, 0);
         elpis_tm_answer(&w->tm, &m.qname, from, rc, 0);
         if (conn != NULL)
             tcp_queue(conn, w->txbuf, outlen);

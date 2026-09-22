@@ -14,6 +14,10 @@
 uint64_t elpis_now_ms(void);
 /* Monotonic seconds -- the TTL time base used throughout the cache. */
 uint32_t elpis_now_s(void);
+/* Monotonic microseconds.  Unlike elpis_cached_now_ms() this reads the clock,
+ * so it is for things measured once per query rather than per event loop
+ * turn -- and only when something is actually going to look at the number. */
+uint64_t elpis_now_us(void);
 /* Wall-clock seconds since the UNIX epoch (RRSIG inception/expiration). */
 int64_t  elpis_wall_s(void);
 /* Cheap cached clock, refreshed once per event-loop tick. */

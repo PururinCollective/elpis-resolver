@@ -225,8 +225,15 @@ function wmean(vals, weights){
   for (i = 0; i < vals.length; i++){ s += vals[i]*weights[i]; n += weights[i]; }
   return n ? s/n : 0;
 }
-function ms(us){ return us >= 1000 ? (us/1000).toFixed(1) + ' ms'
-                                   : (us/1000).toFixed(2) + ' ms'; }
+/* Cache hits are tens of microseconds and recursions are hundreds of
+   milliseconds, so the unit follows the number rather than forcing four
+   leading zeros on one of them. */
+function ms(us){
+  us = Number(us) || 0;
+  if (us < 1000)   return us.toFixed(0) + ' \u00b5s';
+  if (us < 100000) return (us/1000).toFixed(1) + ' ms';
+  return (us/1000).toFixed(0) + ' ms';
+}
 /* cpu_milli counts 1000 per fully busy core, so four busy cores read 4000.
    Divide by the cores actually present to get the figure every other tool
    shows: a share of the whole machine, 0 to 100. */
