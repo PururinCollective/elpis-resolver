@@ -168,6 +168,38 @@ int elpis_nsec_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
     return 0;
 }
 
+/*
+ * Is this name an *insecure delegation* -- a zone cut the parent has no DS
+ * for?  Stricter than proves_no_ds(), and the difference matters.
+ *
+ * "No DS here" is true of every ordinary name in a signed zone: www has no DS
+ * and neither does an empty non-terminal.  What makes a name a zone cut is NS
+ * present without SOA (RFC 4035 section 5.2) -- NS says the parent delegates
+ * it, no SOA says we are looking at the parent's side of the cut.  Only then
+ * does a missing DS mean the child is unsigned rather than simply that this
+ * name is not a cut at all.
+ *
+ * Without the NS test, a record inside a signed zone whose signatures were
+ * stripped is indistinguishable from an unsigned child, and treating one as
+ * the other serves the forgery.
+ */
+int elpis_nsec_proves_insecure_deleg(const elpis_denial_rr_t *rrs, unsigned n,
+                                     const elpis_name_t *qname)
+{
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        if (!nsec_matches(&rrs[i], qname))
+            continue;
+        if (bitmap_has(&rrs[i], ELPIS_T_DS))
+            return 0;                   /* signed delegation */
+        if (bitmap_has(&rrs[i], ELPIS_T_SOA))
+            return 0;                   /* the child's apex, not the cut */
+        return bitmap_has(&rrs[i], ELPIS_T_NS);
+    }
+    return 0;                           /* no NSEC for the name: prove nothing */
+}
+
 int elpis_nsec_proves_no_ds(const elpis_denial_rr_t *rrs, unsigned n,
                             const elpis_name_t *qname)
 {

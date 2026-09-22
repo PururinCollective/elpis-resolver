@@ -379,6 +379,31 @@ int elpis_nsec3_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
     return 0;
 }
 
+/* See elpis_nsec_proves_insecure_deleg().  Opt-out (RFC 5155 section 6) is
+ * the other way a delegation is proven insecure: an opt-out span covers
+ * exactly the unsigned delegations the zone chose not to sign over. */
+int elpis_nsec3_proves_insecure_deleg(const elpis_denial_rr_t *rrs, unsigned n,
+                                      const elpis_name_t *qname,
+                                      const elpis_name_t *zone)
+{
+    n3_t params, hit;
+
+    if (n == 0 || !pick_params(rrs, n, zone, &params))
+        return 0;
+    if (params.iterations > ELPIS_NSEC3_MAX_ITER)
+        return 0;
+
+    if (matched_by_any(rrs, n, zone, &params, qname, &hit)) {
+        if (elpis_bitmap_has(hit.bitmap, hit.bitmaplen, ELPIS_T_DS))
+            return 0;
+        if (elpis_bitmap_has(hit.bitmap, hit.bitmaplen, ELPIS_T_SOA))
+            return 0;
+        return elpis_bitmap_has(hit.bitmap, hit.bitmaplen, ELPIS_T_NS);
+    }
+    /* No NSEC3 for the name itself: only an opt-out span can speak for it. */
+    return elpis_nsec3_proves_no_ds(rrs, n, qname, zone);
+}
+
 int elpis_nsec3_proves_no_ds(const elpis_denial_rr_t *rrs, unsigned n,
                              const elpis_name_t *qname,
                              const elpis_name_t *zone)

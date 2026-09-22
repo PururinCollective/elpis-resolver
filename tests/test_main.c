@@ -1457,6 +1457,73 @@ static void test_licence(void)
 
 /* ================================================================== */
 /*
+ * An insecure delegation is a zone cut the parent has no DS for, and a zone
+ * cut is NS without SOA.  Everything else with no DS -- an ordinary name, an
+ * empty non-terminal, a record whose signatures were stripped -- is not a
+ * delegation and must not be mistaken for one, because that is the difference
+ * between serving an unsigned child and serving a forgery.
+ */
+static void test_insecure_delegation(void)
+{
+    static const uint8_t next[] = { 4,'n','e','x','t', 0 };
+    elpis_denial_rr_t rr;
+    elpis_name_t q;
+    uint8_t rd[64];
+    size_t  n;
+
+    section("insecure delegation");
+
+#define MKNSEC(...) do {                                                  \
+        static const uint16_t types[] = { __VA_ARGS__ };                  \
+        uint8_t bits[32]; unsigned k, hi = 0;                             \
+        memset(bits, 0, sizeof bits);                                     \
+        for (k = 0; k < ELPIS_ARRAY_LEN(types); k++) {                    \
+            bits[types[k] / 8u] |= (uint8_t)(0x80u >> (types[k] % 8u));   \
+            if (types[k] / 8u > hi) hi = types[k] / 8u;                   \
+        }                                                                 \
+        memcpy(rd, next, sizeof next); n = sizeof next;                   \
+        rd[n++] = 0; rd[n++] = (uint8_t)(hi + 1u);                        \
+        memcpy(rd + n, bits, hi + 1u); n += hi + 1u;                      \
+        rr.rd = rd; rr.rdlen = (uint16_t)n;                               \
+    } while (0)
+
+    CHECK(elpis_name_from_text(&rr.owner, "child.example.com.") == ELPIS_OK,
+          "owner parses");
+    CHECK(elpis_name_from_text(&q, "child.example.com.") == ELPIS_OK,
+          "query name parses");
+
+    MKNSEC(ELPIS_T_NS, ELPIS_T_RRSIG, ELPIS_T_NSEC);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 1,
+          "NS without SOA and without DS is an insecure delegation");
+    CHECK(elpis_nsec_proves_no_ds(&rr, 1, &q) == 1, "and it proves no DS");
+
+    MKNSEC(ELPIS_T_A, ELPIS_T_RRSIG, ELPIS_T_NSEC);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
+          "a name with no NS is not a delegation, however absent the DS");
+    CHECK(elpis_nsec_proves_no_ds(&rr, 1, &q) == 1,
+          "though no-DS is still true of it -- which is why the two differ");
+
+    MKNSEC(ELPIS_T_NS, ELPIS_T_SOA, ELPIS_T_RRSIG);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
+          "NS with SOA is an apex, not an insecure delegation");
+
+    MKNSEC(ELPIS_T_NS, ELPIS_T_DS, ELPIS_T_RRSIG);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
+          "a DS makes the delegation secure, not insecure");
+
+    MKNSEC(ELPIS_T_RRSIG, ELPIS_T_NSEC);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
+          "a compact-denial NSEC proves no delegation exists");
+
+    CHECK(elpis_name_from_text(&q, "other.example.com.") == ELPIS_OK, "other parses");
+    MKNSEC(ELPIS_T_NS, ELPIS_T_RRSIG);
+    CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
+          "an NSEC for a different name proves nothing about this one");
+#undef MKNSEC
+}
+
+/* ================================================================== */
+/*
  * The retry budget has to be per lookup.  A chain walk asks for a zone's DS
  * and then its DNSKEY repeatedly, restarting from the top each time one
  * suspends; a single counter for "the last thing asked for" was reset by the
@@ -1549,6 +1616,7 @@ int main(void)
     test_conflict();
     test_conf();
     test_licence();
+    test_insecure_delegation();
     test_val_retry_budget();
     test_cookies();
 

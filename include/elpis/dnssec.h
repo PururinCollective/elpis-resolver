@@ -101,6 +101,14 @@ int elpis_nsec_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
                                const elpis_name_t *qname);
 int elpis_nsec_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
                              const elpis_name_t *qname, uint16_t qtype);
+/* Proves the name is a zone cut the parent has no DS for: NS present, SOA
+ * absent, DS absent -- or, for NSEC3, covered by an opt-out span. */
+int elpis_nsec_proves_insecure_deleg(const elpis_denial_rr_t *rrs, unsigned n,
+                                     const elpis_name_t *qname);
+int elpis_nsec3_proves_insecure_deleg(const elpis_denial_rr_t *rrs, unsigned n,
+                                      const elpis_name_t *qname,
+                                      const elpis_name_t *zone);
+
 int elpis_nsec_proves_no_ds(const elpis_denial_rr_t *rrs, unsigned n,
                             const elpis_name_t *qname);
 
