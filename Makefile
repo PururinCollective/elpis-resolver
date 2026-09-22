@@ -8,7 +8,7 @@ BINDIR    := bin
 BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
-VERSION   := 1.1.8
+VERSION   := 1.1.9
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.
@@ -115,6 +115,21 @@ src/gitrev.h: FORCE
 	@rm -f $@.tmp
 
 src/util.o: src/gitrev.h
+
+# The status page is compiled in, so the generated header has to be rebuilt
+# whenever the page changes.  Doing that by hand is a trap: regenerate it
+# within the same second as the last build and make's mtime comparison says
+# the object is current, so the old page stays in the binary and every test
+# of the new one silently measures the old one.
+src/webui_assets.h: web/index.html tools/mkassets.py
+	@if command -v python3 >/dev/null 2>&1; then \
+	    python3 tools/mkassets.py; \
+	else \
+	    echo "  python3 not found: keeping the committed $@"; \
+	    touch $@; \
+	fi
+
+src/webui.o: src/webui_assets.h
 
 # Changing LICENCE_ISSUER changes a -D, and make does not watch flags: without
 # this, `make LICENCE_ISSUER=...` over an existing build leaves the old key

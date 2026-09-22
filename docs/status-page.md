@@ -34,7 +34,8 @@ puts the defaults back.
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
 | **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
-| **About** | edition and operator, version, the commit the binary was built from, uptime, and which ML-DSA parameter sets are live |
+| **About** | edition and operator, version, the commit and compiler the binary was built with, uptime, and which ML-DSA parameter sets are live |
+| **Layout** | the desktop as one line, to carry an arrangement to another browser |
 
 The counts are exact, not sampled. Sampling was tried first and it is useless
 here: a resolver answering a few hundred queries a second gives too few samples
@@ -102,7 +103,10 @@ desktops, because the browser treats them as two different sites.
 
 *It is per browser.* There is no account behind it, so the layout does not
 follow you to another machine, and a private window starts on the defaults
-every time.
+every time. The **Layout** window is the way across: it prints the whole
+arrangement as one line, which the same window on another browser will take
+back. The text is produced and read entirely in the browser and is never sent
+anywhere.
 
 If storage is unavailable — a private window, site data blocked — the page
 opens on its defaults and simply does not remember. Nothing breaks.

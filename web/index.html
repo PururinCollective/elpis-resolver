@@ -428,6 +428,51 @@ function layoutRestore(){
   return opened > 0;
 }
 
+/*
+ * The layout as one pasteable line, so an arrangement can be carried to
+ * another browser.  localStorage is per origin and per browser: the same
+ * resolver reached through a tunnel and reached directly are two different
+ * desktops, and nothing syncs between them.  This is the manual way across.
+ *
+ * It stays entirely in the browser -- the text is produced and consumed here
+ * and never sent anywhere, which is the same promise as the rest of the page.
+ */
+var LAYOUT_TAG = 'elpis-layout:v1:';
+
+function layoutExport(){
+  var list = [], k;
+  for (k in wins) if (wins[k]) list.push(wins[k]);
+  list.sort(function(a, b){
+    return (+a.el.style.zIndex || 0) - (+b.el.style.zIndex || 0);
+  });
+  try {
+    return LAYOUT_TAG + btoa(JSON.stringify({
+      v: LAYOUT_VER,
+      wins: list.map(function(w){
+        return { id: w.def.id, x: w.el.offsetLeft, y: w.el.offsetTop,
+                 w: w.want.w, h: w.want.h,
+                 sized: w.userSized ? 1 : 0, sel: w.def.sel || '' };
+      })
+    }));
+  } catch(_){ return ''; }
+}
+
+function layoutImport(text){
+  var raw = String(text || '').replace(/\s+/g, '');
+  var saved, k;
+  if (raw.indexOf(LAYOUT_TAG) !== 0) return 'That is not an elpis layout.';
+  try { saved = JSON.parse(atob(raw.slice(LAYOUT_TAG.length))); }
+  catch(_){ return 'That layout is damaged and could not be read.'; }
+  if (!saved || saved.v !== LAYOUT_VER || !saved.wins || !saved.wins.length)
+    return 'That layout came from a different version of this page.';
+
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(saved)); } catch(_){}
+  for (k in wins) if (wins[k]){ wins[k].el.remove(); wins[k] = null; }
+  placed = 0; zTop = 10;
+  VIEWS.forEach(function(v){ delete v.sel; });
+  return layoutRestore() ? '' : 'Nothing in that layout could be opened.';
+}
+
 function layoutForget(){
   try { localStorage.removeItem(LAYOUT_KEY); } catch(_){}
 }
@@ -880,6 +925,58 @@ var VIEWS = [
     var top = b.scrollTop;
     b.innerHTML = h + "</div>";
     b.scrollTop = top;
+  }},
+
+{ id:'layout', title:'Layout', w:520, h:330, nofit: true,
+  icon:"<svg viewBox='0 0 24 24'><rect x='3' y='3' width='8' height='8' rx='1'/>" +
+       "<rect x='13' y='3' width='8' height='5' rx='1'/>" +
+       "<rect x='13' y='10' width='8' height='11' rx='1'/>" +
+       "<rect x='3' y='13' width='8' height='8' rx='1'/></svg>",
+  render: function(b, d, w){
+    if (b.dataset.built) return;        /* do not stamp on the typing */
+    b.dataset.built = '1';
+    b.innerHTML =
+      "<div style='color:var(--dim);margin-bottom:6px'>Where the windows are, " +
+      "as one line. Copy it, then paste it into this same window on another " +
+      "browser. It never leaves the browser.</div>" +
+      "<textarea id='lay-out' readonly rows='3' " +
+        "style='width:100%;box-sizing:border-box;font:11px ui-monospace,monospace;" +
+        "background:var(--desk);color:var(--fg);border:1px solid var(--line);" +
+        "border-radius:4px;padding:6px;resize:none'></textarea>" +
+      "<div style='margin:6px 0 12px'><button class='tbtn' id='lay-copy'>Copy</button>" +
+        "<span id='lay-said' style='margin-left:10px;color:var(--dim)'></span></div>" +
+      "<h4>Paste one in</h4>" +
+      "<textarea id='lay-in' rows='3' placeholder='elpis-layout:v1:...' " +
+        "style='width:100%;box-sizing:border-box;font:11px ui-monospace,monospace;" +
+        "background:var(--desk);color:var(--fg);border:1px solid var(--line);" +
+        "border-radius:4px;padding:6px;resize:none'></textarea>" +
+      "<div style='margin-top:6px'><button class='tbtn' id='lay-apply'>Apply</button>" +
+        "<span id='lay-err' style='margin-left:10px'></span></div>";
+
+    var out = b.querySelector('#lay-out');
+    out.value = layoutExport();
+
+    b.querySelector('#lay-copy').onclick = function(){
+      var said = b.querySelector('#lay-said');
+      out.focus(); out.select();
+      function ok(){ said.textContent = 'copied'; setTimeout(function(){
+        said.textContent = ''; }, 2000); }
+      /* The clipboard API needs a secure context, which plain HTTP to a LAN
+       * address is not.  Selecting the text is the fallback that always
+       * works, even where the copy itself has to be Ctrl-C. */
+      if (navigator.clipboard && navigator.clipboard.writeText)
+        navigator.clipboard.writeText(out.value).then(ok, function(){
+          said.textContent = 'selected -- press Ctrl-C'; });
+      else
+        said.textContent = 'selected -- press Ctrl-C';
+    };
+
+    b.querySelector('#lay-apply').onclick = function(){
+      var err = b.querySelector('#lay-err');
+      var msg = layoutImport(b.querySelector('#lay-in').value);
+      if (msg){ err.style.color = 'var(--bad)'; err.textContent = msg; }
+      else     { err.style.color = 'var(--ok)'; err.textContent = 'applied'; }
+    };
   }},
 
 { id:'about', title:'About', w:430, h:470,

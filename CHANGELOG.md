@@ -10,6 +10,31 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.9 — 2026-09-23
+
+### Added
+
+- **Layout window.** The desktop as one line, to carry an arrangement to
+  another browser. The layout lives in `localStorage`, which is per browser
+  and per origin, so the same resolver reached through a tunnel and reached
+  directly are two separate desktops with nothing between them. This is the
+  way across. The text is produced and read in the browser and never sent
+  anywhere.
+- **The compiler that built the binary**, on the startup line, in About, and
+  in the Task Manager's CPU pane. Two builds of one commit are not the same
+  binary.
+
+### Fixed
+
+- `GET /?v=1` returned 404. A query string on the page URL is the client's
+  business, and refusing it turns an ordinary cache-buster into a dead page.
+- `make static` did not seed `bin/elpis.conf`, so a tuned build on a fresh
+  clone produced a binary with no config beside it.
+- The generated status-page header is now built by `make` from
+  `web/index.html` rather than by hand. Regenerating it within the same second
+  as the previous build left the old page compiled in, which is a very quiet
+  way to spend an afternoon testing the wrong thing.
+
 ## 1.1.8 — 2026-09-23
 
 ### Fixed

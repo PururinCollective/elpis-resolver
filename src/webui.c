@@ -844,7 +844,11 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
     else
         tok[0] = '\0';
 
-    if (strncmp(req, "GET / ", 6) == 0 || strncmp(req, "GET /index.html ", 16) == 0) {
+    /* "GET /?v=2" is the same page: a query string is the client's business,
+     * and refusing it turns an ordinary cache-buster into a 404. */
+    if (strncmp(req, "GET / ", 6) == 0 || strncmp(req, "GET /?", 6) == 0 ||
+        strncmp(req, "GET /index.html ", 16) == 0 ||
+        strncmp(req, "GET /index.html?", 16) == 0) {
         respond(fd, "200 OK", "text/html; charset=utf-8", NULL,
                 elpis_webui_page, strlen(elpis_webui_page));
         return;
