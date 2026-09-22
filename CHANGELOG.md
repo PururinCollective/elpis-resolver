@@ -10,6 +10,28 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.6 — 2026-09-22
+
+### Fixed
+
+**Validation collapsed the moment serve-stale started working.** About a
+quarter of an hour after start — however long a DS TTL happens to be — every
+signed zone began failing with `no DS for <zone> after 2 attempts`, on a
+resolver that had been validating correctly since boot.
+
+The answer path serves expired data while a refresh is in flight, which is the
+whole point of RFC 8767. The validator did not: it asked the cache for
+validation material with serve-stale switched off, so the instant a DS or
+DNSKEY expired it could no longer see the record sitting right there, retried
+twice, and gave up. The client got the stale answer marked `EDE 3 (Stale
+Answer)` while the validator behind it was told the DS did not exist.
+
+Whether a DS or DNSKEY is still good is decided by the inception and expiration
+on the signature over it, not by how long it has sat in the cache — those dates
+are checked either way. The validator now reads stale material under the same
+serve-stale budget as everything else. The one moment the resolver is designed
+to keep working was the one this made it stop.
+
 ## 1.1.5 — 2026-09-22
 
 ### Fixed

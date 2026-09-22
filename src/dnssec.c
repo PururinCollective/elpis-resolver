@@ -793,11 +793,28 @@ static val_fail_t *fail_slot(val_t *v, const elpis_name_t *n, uint16_t type)
     return &v->failed[weakest];
 }
 
+/*
+ * Validation material out of the cache, stale included.
+ *
+ * Whether a DNSKEY or a DS is still good is decided by the inception and
+ * expiration on the signature over it, not by how long it has sat in the
+ * cache -- elpis_rrset_validate() checks those dates either way, so a stale
+ * record that is still in its signature's validity window proves exactly what
+ * a fresh copy of the same record proves.
+ *
+ * Refusing stale material here meant validation collapsed the moment
+ * serve-stale started doing its job: the answer path handed out the stale
+ * answer, the validator could not see the stale DS behind it, and every
+ * signed zone failed with "no DS for x after 2 attempts" -- a quarter of an
+ * hour after start, which is simply how long a DS TTL lasts.  The one moment
+ * the resolver is meant to keep working is the one where this made it stop.
+ */
 static int val_cached(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
                       elpis_rrset_buf_t *out)
 {
     return elpis_rcache_get(t->w->ctx->rcache, n, type, ELPIS_CLASS_IN,
-                            elpis_cached_now_s(), 0, out) == ELPIS_OK;
+                            elpis_cached_now_s(),
+                            t->w->ctx->conf.serve_stale, out) == ELPIS_OK;
 }
 
 /*
