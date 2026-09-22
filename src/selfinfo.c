@@ -28,6 +28,7 @@
 typedef enum {
     SI_V4 = 0,          /* ask what our public IPv4 is        */
     SI_ORIGIN,          /* which network announces it         */
+    SI_ORIGIN6,         /* the same question, asked about v6  */
     SI_ASNAME,          /* and what that network is called    */
     SI_DONE
 } si_stage_t;
@@ -36,6 +37,7 @@ typedef struct {
     elpis_worker_t *w;
     elpis_timer_t   timer;
     si_stage_t      stage;
+    uint8_t         tried_v4;   /* the origin lookup used the v4 address */
     char            asn[20];
 } si_state_t;
 
@@ -263,11 +265,18 @@ static void si_done(elpis_task_t *child, void *ctx)
         break;
 
     case SI_ORIGIN:
+    case SI_ORIGIN6:
         if (child->rcode == ELPIS_RC_NOERROR && first_txt(child, txt, sizeof txt)) {
             txt_field(txt, 0, s->asn, sizeof s->asn);
-            snprintf(si->asn, sizeof si->asn, "AS%s", s->asn);
+            if (s->asn[0] != '\0')
+                snprintf(si->asn, sizeof si->asn, "AS%s", s->asn);
         }
-        s->stage = (s->asn[0] != '\0') ? SI_ASNAME : SI_DONE;
+        if (s->asn[0] != '\0')
+            s->stage = SI_ASNAME;
+        else if (s->stage == SI_ORIGIN && s->tried_v4 && si->v6[0] != '\0')
+            s->stage = SI_ORIGIN6;      /* the v4 answer told us nothing */
+        else
+            s->stage = SI_DONE;
         break;
 
     case SI_ASNAME:
@@ -314,15 +323,32 @@ static void si_step(si_state_t *s)
 
     switch (s->stage) {
     case SI_V4:
-        if (si_ask(s, "whoami.akamai.net", ELPIS_T_A))
-            return;
+        /*
+         * Only worth asking when there is an IPv4 route to ask over.  On a
+         * v6-only host the question still resolves -- over IPv6 -- and comes
+         * back with something that is not this host's address, which then
+         * gets looked up as if it were and yields no AS at all.
+         */
+        {
+            char a4[80];
+            if (outbound_addr(AF_INET, a4, sizeof a4) &&
+                si_ask(s, "whoami.akamai.net", ELPIS_T_A))
+                return;
+        }
         s->stage = SI_ORIGIN;
         /* fall through */
     case SI_ORIGIN:
+        s->tried_v4 = 0;
         if (si->v4[0] != '\0' && origin4_name(si->v4, name, sizeof name)) {
+            s->tried_v4 = 1;
             if (si_ask(s, name, ELPIS_T_TXT))
                 return;
-        } else if (si->v6[0] != '\0') {
+        }
+        s->stage = SI_ORIGIN6;
+        /* fall through */
+
+    case SI_ORIGIN6:
+        if (si->v6[0] != '\0') {
             elpis_addr_t a;
             char withport[96];
             snprintf(withport, sizeof withport, "[%s]@53", si->v6);
