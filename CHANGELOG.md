@@ -10,6 +10,33 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.7 — 2026-09-22
+
+### Fixed
+
+**Unsigned children of signed parents were refused.** `forums.linuxmint.com`
+and anything shaped like it returned SERVFAIL with `EDE 10 (RRSIGs Missing)`
+while every other resolver answered.
+
+`linuxmint.com` is signed; `forums.linuxmint.com` is delegated to an unsigned
+child; both live on `ns1.loopiagroup.com`. Ask that server for the child's
+address and it answers authoritatively for the child — `AA` set, no referral —
+so nothing on the wire says a zone cut was crossed. The validator placed the
+answer in the signed parent, found no signatures, and called it forged.
+
+Telling the two apart needs the NSEC bitmap at the delegation: a zone cut is
+**NS present, SOA absent**, and only then does a missing DS mean the child is
+unsigned. `DS google.com`, `DS forums.linuxmint.com` and a name in a signed
+zone with its signatures stripped all answer `NODATA` identically — two must be
+served, one must be refused, and without the bitmap no rule gets all three
+right.
+
+The proof was being thrown away. Negative answers were cached as the SOA alone,
+so by the time the descent saw "no DS here" the records proving it were gone.
+They are now kept with the marker and checked against the keys of the zone
+above — the same check a positive DS on that path already gets. Nothing is
+believed that has not been verified.
+
 ## 1.1.6 — 2026-09-22
 
 ### Fixed

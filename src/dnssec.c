@@ -685,6 +685,10 @@ typedef struct {
      * unsigned zone from one whose signatures were stripped in flight.
      */
     uint8_t           probe[VAL_MAX_SIGNERS];
+    /* Set when the descent proved an unsigned delegation on the way down.
+     * Everything below such a cut is insecure, so an unsigned record from
+     * there is unsigned -- not a signed record stripped of its signatures. */
+    uint8_t           cut[VAL_MAX_SIGNERS];
     unsigned          nsigners, si;
 
     elpis_name_t      anchor;     /* trust anchor covering signers[si]   */
@@ -1353,6 +1357,80 @@ static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone)
     elpis_dcache_put(t->w->ctx->dcache, &d, d.ttl, d.pinned);
 }
 
+static int denial_proves_cut(elpis_task_t *t, val_t *v,
+                             const elpis_name_t *name,
+                             const elpis_rrset_buf_t *b,
+                             const elpis_name_t *zone)
+{
+    static ELPIS_TLS elpis_rrset_buf_t set;
+    static ELPIS_TLS uint8_t pool[8][768];
+    elpis_denial_rr_t proof[8];
+    elpis_name_t owners[8];
+    unsigned nproof = 0;
+    unsigned i, j;
+    int any_nsec3 = 0, any_nsec = 0;
+
+    for (i = 1; i < b->count && nproof < ELPIS_ARRAY_LEN(proof); i++) {
+        const uint8_t *p = b->data + b->off[i];
+        uint16_t ty;
+        unsigned olen;
+        size_t used;
+        elpis_name_t owner;
+
+        if (b->len[i] < 4) continue;
+        ty   = elpis_get16(p);
+        olen = p[2];
+        if (ty != ELPIS_T_NSEC && ty != ELPIS_T_NSEC3) continue;
+        if (3u + olen >= b->len[i]) continue;
+        if (elpis_name_parse_nocomp(&owner, p + 3, olen, &used) != ELPIS_OK) continue;
+
+        elpis_rrset_buf_init(&set, &owner, ty, b->klass, b->ttl);
+        elpis_rrset_buf_add(&set, p + 3 + olen, (uint16_t)(b->len[i] - 3u - olen));
+        for (j = 1; j < b->count; j++) {
+            const uint8_t *q = b->data + b->off[j];
+            elpis_name_t o2; unsigned ol2; size_t u2;
+            if (b->len[j] < 4 || elpis_get16(q) != ELPIS_T_RRSIG) continue;
+            ol2 = q[2];
+            if (3u + ol2 >= b->len[j]) continue;
+            if (elpis_name_parse_nocomp(&o2, q + 3, ol2, &u2) != ELPIS_OK) continue;
+            if (!elpis_name_eq(&o2, &owner)) continue;
+            if (b->len[j] - 3u - ol2 < 19u || elpis_get16(q + 3 + ol2) != ty) continue;
+            elpis_rrset_buf_add_sig(&set, q + 3 + ol2, (uint16_t)(b->len[j] - 3u - ol2));
+        }
+        if (set.sigcount == 0)
+            continue;
+        /* Wall clock, not the cache's monotonic seconds: a signature's
+         * validity window is a pair of real dates. */
+        if (elpis_rrset_validate(&t->w->ctx->conf, &set, &v->keys,
+                                 elpis_wall_s(), NULL, NULL) != ELPIS_OK)
+            continue;                   /* unverified proves nothing */
+        if (set.len[0] > sizeof pool[0]) continue;
+        memcpy(pool[nproof], set.data + set.off[0], set.len[0]);
+        owners[nproof]      = owner;
+        proof[nproof].owner = owners[nproof];
+        proof[nproof].rd    = pool[nproof];
+        proof[nproof].rdlen = set.len[0];
+        if (ty == ELPIS_T_NSEC3) any_nsec3 = 1; else any_nsec = 1;
+        nproof++;
+    }
+
+    if (nproof == 0)
+        return 0;
+    {
+        /* 0x20 leaves the name mixed case; NSEC3 hashing and NSEC ordering
+         * are over the canonical, lowercased form. */
+        elpis_name_t qn = *name, zn = *zone;
+        elpis_name_lower(&qn);
+        elpis_name_lower(&zn);
+        if (any_nsec3 &&
+            elpis_nsec3_proves_insecure_deleg(proof, nproof, &qn, &zn))
+            return 1;
+        if (any_nsec && elpis_nsec_proves_insecure_deleg(proof, nproof, &qn))
+            return 1;
+    }
+    return 0;
+}
+
 /* Is this zone already known to be unsigned? */
 static int zone_known_unsigned(elpis_task_t *t, const elpis_name_t *zone)
 {
@@ -1382,6 +1460,16 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
         if (!set_is_unsigned(t, i))
             continue;
         if (!serving_zone(t, i, &zone))
+            continue;
+        /*
+         * Walk to the record's own name, not just to the delegation we
+         * queried.  The cut can be below that and invisible on the wire: one
+         * nameserver authoritative for both a signed parent and an unsigned
+         * child answers for the child directly, AA set, no referral --
+         * forums.linuxmint.com on ns1.loopiagroup.com.  Safe only because
+         * the cut must now be proven.
+         */
+        if (elpis_trr_get_name(&t->ans, i, &zone) != ELPIS_OK)
             continue;
 
         /*
@@ -1419,6 +1507,7 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
 static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached)
 {
     elpis_worker_t *w = t->w;
+    (void)reached;                      /* the cut decides it now */
     elpis_rrset_buf_t *set = w->rrbuf;
     unsigned i;
 
@@ -1427,11 +1516,16 @@ static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached
 
         if (v->status[i] != SS_UNKNOWN || !set_is_unsigned(t, i))
             continue;
-        if (!serving_zone(t, i, &zone) ||
+        if (elpis_trr_get_name(&t->ans, i, &zone) != ELPIS_OK ||
             !elpis_name_eq(&zone, &v->signers[v->si]))
             continue;
 
-        if (reached && w->ctx->conf.harden_dnssec_stripped) {
+        /*
+         * Unsigned only where an unsigned delegation was proven on the way
+         * down.  Anywhere else the record sits in a signed zone and arrived
+         * without signatures, which is the attack this exists to catch.
+         */
+        if (!v->cut[v->si] && w->ctx->conf.harden_dnssec_stripped) {
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
                 t->ede = ELPIS_EDE_RRSIGS_MISSING;
@@ -1708,8 +1802,18 @@ static void val_run(elpis_task_t *t)
                  * zone does -- is the expensive part of validating the
                  * unsigned majority of the internet.
                  */
-                if (scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))
+                if ((scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) &&
+                    denial_proves_cut(t, v, &next, scratch, &v->cur)) {
+                    /*
+                     * A proven unsigned delegation: NS present, no SOA, no DS,
+                     * on an NSEC or NSEC3 verified against the keys of the
+                     * zone above.  Everything below is insecure; stop here.
+                     */
                     note_unsigned_zone(t, &next);
+                    v->cut[v->si] = 1;
+                    v->stage = VS_VERIFY;
+                    continue;
+                }
                 v->walk = next;
                 continue;
             }

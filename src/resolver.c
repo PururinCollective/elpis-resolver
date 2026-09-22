@@ -938,6 +938,44 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
         b->sec   = (uint8_t)t->sec;
         b->flags = nxdomain ? ELPIS_RRF_NXDOMAIN : ELPIS_RRF_NODATA;
         elpis_rrset_buf_add(b, rdp, rdl);
+        /*
+         * Keep the proof with the marker, not just the SOA.  The descent
+         * checks a positive DS against the parent's keys itself, because DS
+         * lookups deliberately do not re-enter the validator; a negative DS
+         * answer got no such treatment, and the records proving it were
+         * dropped after answering the client.  Stored as type, owner length,
+         * owner, rdata, after the SOA in slot 0 -- readers of the SOA are
+         * unaffected.
+         */
+        {
+            elpis_rr_iter_t it2;
+            elpis_rr_t rr2;
+            int d2 = 0;
+            elpis_rr_iter(&it2, m, ELPIS_SEC_AUTHORITY);
+            while (elpis_rr_next(&it2, &rr2, &d2) == ELPIS_OK) {
+                uint8_t item[ELPIS_MAX_NAME + 1024];
+                uint8_t crd[1024];
+                size_t  crdlen, need;
+
+                if (rr2.klass != t->qclass)
+                    continue;
+                if (rr2.type != ELPIS_T_NSEC && rr2.type != ELPIS_T_NSEC3 &&
+                    rr2.type != ELPIS_T_RRSIG)
+                    continue;
+                if (elpis_rdata_canonical(rr2.type, m->wire, m->len, rr2.rdoff,
+                                          rr2.rdlen, crd, sizeof crd,
+                                          &crdlen, 0) != ELPIS_OK)
+                    continue;
+                need = 3u + rr2.name.len + crdlen;
+                if (need > sizeof item)
+                    continue;
+                elpis_put16(item, rr2.type);
+                item[2] = rr2.name.len;
+                memcpy(item + 3, rr2.name.d, rr2.name.len);
+                memcpy(item + 3 + rr2.name.len, crd, crdlen);
+                elpis_rrset_buf_add(b, item, (uint16_t)need);
+            }
+        }
         elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
 
         /* Carry the SOA into the reply so the client sees the proof, and the
