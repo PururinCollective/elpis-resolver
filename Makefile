@@ -163,7 +163,7 @@ $(BIN): $(OBJ) | $(BINDIR)
 STATIC_OPT ?= $(OPT)
 static:
 	$(MAKE) clean
-	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(BIN)
+	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(BIN) $(BINCONF)
 	-strip $(BIN)
 
 debug:
