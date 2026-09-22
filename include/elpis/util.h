@@ -118,6 +118,10 @@ void elpis_os_string(char *out, size_t outsz);
 /* The commit this binary was built from, "" outside a git checkout.  Captured
  * by make into a generated header that only util.c includes. */
 const char *elpis_build_rev(void);
+
+/* The compiler that produced this binary, e.g. "gcc 13.2.0".  Two builds of
+ * the same commit can behave differently, so a bug report wants both. */
+const char *elpis_compiler(void);
 void elpis_host_name(char *out, size_t outsz);
 uint32_t elpis_random_u32(void);
 /* Uniform in [0, n) without modulo bias. */

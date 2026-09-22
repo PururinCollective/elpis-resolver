@@ -689,6 +689,7 @@ var VIEWS = [
       "<b>workers</b><span>" + d.server.workers + "</span>" +
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
       "<b>event loop</b><span>" + esc(d.server.loop) + "</span>" +
+      "<b>compiler</b><span>" + esc(d.server.cc || 'unknown') + "</span>" +
       "<b>resolver up</b><span>" + dur(d.server.uptime) + "</span>" +
       "<b>host up</b><span>" + (d.server.hostup ? dur(d.server.hostup) :
         "<span style='color:var(--dim)'>unknown</span>") + "</span></div>" +
@@ -905,6 +906,7 @@ var VIEWS = [
       "</div><div style='height:10px'></div>" +
       "<div class='kv'>" +
       "<b>version</b><span>" + esc(d.server.version) + "</span>" +
+      "<b>compiler</b><span>" + esc(d.server.cc || 'unknown') + "</span>" +
       "<b>build</b><span>" + (d.server.build ?
           "<code>" + esc(d.server.build) + "</code>" :
           "<span style='color:var(--dim)'>not a git checkout</span>") + "</span>" +

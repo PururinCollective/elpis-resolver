@@ -408,6 +408,22 @@ const char *elpis_build_rev(void)
     return ELPIS_GITREV;
 }
 
+#define ELPIS_STR_(x) #x
+#define ELPIS_STR(x)  ELPIS_STR_(x)
+
+const char *elpis_compiler(void)
+{
+#if defined(__clang__)
+    return "clang " ELPIS_STR(__clang_major__) "." ELPIS_STR(__clang_minor__)
+           "." ELPIS_STR(__clang_patchlevel__);
+#elif defined(__GNUC__)
+    return "gcc " ELPIS_STR(__GNUC__) "." ELPIS_STR(__GNUC_MINOR__)
+           "." ELPIS_STR(__GNUC_PATCHLEVEL__);
+#else
+    return "unknown compiler";
+#endif
+}
+
 void elpis_os_string(char *out, size_t outsz)
 {
     struct utsname u;
