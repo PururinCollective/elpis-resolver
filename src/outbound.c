@@ -55,8 +55,10 @@ int elpis_out_init(elpis_worker_t *w)
 
         if (elpis_sock_udp_client(family,
                                   family == AF_INET
-                                      ? (c->have_src4 ? &c->out_src4 : NULL)
-                                      : (c->have_src6 ? &c->out_src6 : NULL),
+                                      ? (c->have_src4
+                                         ? &c->out_src4[i % c->have_src4] : NULL)
+                                      : (c->have_src6
+                                         ? &c->out_src6[i % c->have_src6] : NULL),
                                   c->port_lo, c->port_hi, &fd) != ELPIS_OK) {
             if (family == AF_INET6) {
                 /* No IPv6 on this host: stop asking for it. */
@@ -565,8 +567,10 @@ static int start_tcp(elpis_task_t *t, elpis_outq_t *q, const uint8_t *msg,
 
     if (elpis_sock_tcp_connect(&q->server,
                                elpis_addr_family(&q->server) == AF_INET
-                                   ? (w->ctx->conf.have_src4 ? &w->ctx->conf.out_src4 : NULL)
-                                   : (w->ctx->conf.have_src6 ? &w->ctx->conf.out_src6 : NULL),
+                                   ? (w->ctx->conf.have_src4
+                                      ? &w->ctx->conf.out_src4[0] : NULL)
+                                   : (w->ctx->conf.have_src6
+                                      ? &w->ctx->conf.out_src6[0] : NULL),
                                &fd) != ELPIS_OK)
         return ELPIS_ERR;
 

@@ -277,11 +277,11 @@ int elpis_probe_roots(elpis_ctx_t *ctx)
         return ELPIS_ERR;
 
     if (c->do_ipv4 &&
-        elpis_sock_udp_client(AF_INET, c->have_src4 ? &c->out_src4 : NULL,
+        elpis_sock_udp_client(AF_INET, c->have_src4 ? &c->out_src4[0] : NULL,
                               c->port_lo, c->port_hi, &fd4) != ELPIS_OK)
         fd4 = -1;
     if (c->do_ipv6 &&
-        elpis_sock_udp_client(AF_INET6, c->have_src6 ? &c->out_src6 : NULL,
+        elpis_sock_udp_client(AF_INET6, c->have_src6 ? &c->out_src6[0] : NULL,
                               c->port_lo, c->port_hi, &fd6) != ELPIS_OK)
         fd6 = -1;
 

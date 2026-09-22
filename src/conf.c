@@ -447,8 +447,13 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("outgoing-interface")) {
         elpis_addr_t a;
         if (elpis_addr_parse(&a, val, 0) != 0) { perr(&p, key, val); return ELPIS_ERR; }
-        if (elpis_addr_family(&a) == AF_INET) { c->out_src4 = a; c->have_src4 = 1; }
-        else { c->out_src6 = a; c->have_src6 = 1; }
+        if (elpis_addr_family(&a) == AF_INET) {
+            if (c->have_src4 >= ELPIS_MAX_OUT_SRC) { perr(&p, key, val); return ELPIS_ERR; }
+            c->out_src4[c->have_src4++] = a;
+        } else {
+            if (c->have_src6 >= ELPIS_MAX_OUT_SRC) { perr(&p, key, val); return ELPIS_ERR; }
+            c->out_src6[c->have_src6++] = a;
+        }
         return ELPIS_OK;
     }
 

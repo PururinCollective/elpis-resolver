@@ -20,6 +20,7 @@
 #define ELPIS_MAX_ACL    64
 #define ELPIS_MAX_FORWARD 8
 #define ELPIS_MAX_STUB   16
+#define ELPIS_MAX_OUT_SRC 8
 
 /*
  * The default name of the identity probe.  It sits in an undelegated TLD on
@@ -124,8 +125,15 @@ typedef struct {
     uint8_t      do_ipv4;
     uint8_t      do_ipv6;
     uint8_t      tcp_upstream;
-    elpis_addr_t out_src4, out_src6;
-    uint8_t      have_src4;
+    /*
+     * Source addresses for outbound queries.  More than one of a family is
+     * allowed and they are used round-robin across the socket pool: a query
+     * an off-path attacker wants to forge then has to guess the source
+     * address as well as the port and the ID, and the load spreads over the
+     * addresses rather than resting on whichever one the kernel prefers.
+     */
+    elpis_addr_t out_src4[ELPIS_MAX_OUT_SRC], out_src6[ELPIS_MAX_OUT_SRC];
+    uint8_t      have_src4;             /* count, not a flag */
     uint8_t      have_src6;
 
     /* --- forwarders / stubs --------------------------------------- */

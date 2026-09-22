@@ -170,6 +170,21 @@ identity: no                              # no probe at all
 With `identity: no` the name answers NXDOMAIN exactly like any name that does
 not exist, so nothing reveals that the feature was ever there.
 
+## Outbound source addresses
+
+The kernel picks one source address per family, so every query leaves from it
+and that is the only address the outside world sees. To use more than one,
+repeat the setting — up to eight per family:
+
+```
+outgoing-interface: 2402:4e20:bab1::1001
+outgoing-interface: 2402:4e20:bab1::1111
+```
+
+They are used round-robin across the outbound socket pool. An off-path
+attacker forging a reply then has to guess the source address as well as the
+port and the message ID.
+
 ## Hashing a status page password
 
 ```bash
