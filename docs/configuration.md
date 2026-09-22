@@ -167,6 +167,10 @@ identity-name: whoami.internal.example    # a name only you know
 identity: no                              # no probe at all
 ```
 
+`identity-name:` is a licensed setting — see [Signed licences](licensing.md).
+Without a valid licence the line is ignored with a warning and the default
+name is used. `identity: no` is not gated.
+
 With `identity: no` the name answers NXDOMAIN exactly like any name that does
 not exist, so nothing reveals that the feature was ever there.
 

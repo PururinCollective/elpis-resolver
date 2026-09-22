@@ -883,13 +883,43 @@ static void usage(const char *argv0)
  * changes how a single query is handled: it decides what the resolver says
  * about itself, and that is all.
  */
+/*
+ * Settings that only a licensed build may change.  Applied after the licence
+ * has been checked, because the config file is read long before that: at
+ * parse time there is nothing to check against.
+ *
+ * A lapsed licence keeps them.  Expiry does not stop the resolver resolving
+ * and it should not quietly move a name somebody's monitoring points at
+ * either; the warning is the signal, not a change of behaviour.
+ */
+static void apply_licensed_settings(elpis_ctx_t *ctx)
+{
+    elpis_conf_t *c = &ctx->conf;
+
+    if (elpis_strcasecmp_ascii(c->identity_name,
+                               ELPIS_IDENTITY_NAME_DEFAULT) == 0)
+        return;                         /* unchanged: nothing to gate */
+    if (ctx->licence.valid)
+        return;
+
+    elpis_warn("identity-name is a licensed setting; '%s' ignored",
+               c->identity_name);
+    elpis_warn("using the default name '%s' -- 'identity: no' turns the probe "
+               "off entirely, which needs no licence",
+               ELPIS_IDENTITY_NAME_DEFAULT);
+    elpis_strlcpy(c->identity_name, ELPIS_IDENTITY_NAME_DEFAULT,
+                  sizeof c->identity_name);
+}
+
 static void check_licence(elpis_ctx_t *ctx)
 {
     elpis_conf_t *c = &ctx->conf;
     char expires[32];
 
-    if (c->licence[0] == '\0')
+    if (c->licence[0] == '\0') {
+        apply_licensed_settings(ctx);
         return;
+    }
 
     elpis_licence_parse(c->licence, (int64_t)time(NULL), &ctx->licence);
     elpis_licence_date(ctx->licence.expires, expires, sizeof expires);
@@ -897,6 +927,7 @@ static void check_licence(elpis_ctx_t *ctx)
     if (!ctx->licence.valid) {
         elpis_warn("licence not accepted: %s", ctx->licence.why);
         elpis_warn("continuing with the self-declared edition '%s'", c->edition);
+        apply_licensed_settings(ctx);
         return;
     }
 
@@ -915,6 +946,8 @@ static void check_licence(elpis_ctx_t *ctx)
         elpis_info("licence %lu for \"%s\": %s, expires %s",
                    (unsigned long)ctx->licence.serial, ctx->licence.org,
                    elpis_edition_name(ctx->licence.edition), expires);
+
+    apply_licensed_settings(ctx);
 }
 
 static int write_pidfile(const char *path)

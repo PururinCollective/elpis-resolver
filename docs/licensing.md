@@ -45,6 +45,20 @@ licence never changes how a query is answered. An expired one is logged and
 reported and nothing stops working — a resolver that stopped resolving because
 a date passed would be a far worse failure than anything this protects against.
 
+## What a licence unlocks
+
+| setting | without a licence |
+|---|---|
+| `identity-name:` | ignored with a warning; the probe answers at its default name |
+
+Everything else works the same either way. A licence never changes how a query
+is resolved, and nothing is withheld that affects whether the resolver answers
+correctly — see the note on enforcement above.
+
+A lapsed licence keeps what it unlocked. Expiry already does not stop the
+resolver resolving, and quietly moving a name that somebody's monitoring points
+at would be a worse surprise than the warning in the log.
+
 ## Issuing licences
 
 The tool is built separately and never installed:
