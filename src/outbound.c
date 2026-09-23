@@ -215,10 +215,12 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
             memcpy(e.cookie, q->cookie, 8);
             e.cookie_len = 8;
             /* Replay the server half we were given last time, if any. */
-            if ((inf->flags & ELPIS_INF_COOKIE_OK) && inf->cookie_len > 0 &&
+            if ((inf->flags & ELPIS_INF_COOKIE_OK) &&
+                !(inf->flags & ELPIS_INF_COOKIE_ROAM) && inf->cookie_len > 0 &&
                 (size_t)inf->cookie_len + 8u <= sizeof e.cookie) {
                 memcpy(e.cookie + 8, inf->cookie, inf->cookie_len);
                 e.cookie_len = (uint8_t)(8u + inf->cookie_len);
+                q->sent_server_cookie = 1;
             }
             e.have_cookie = 1;
             q->used_cookie = 1;
@@ -374,7 +376,6 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
     }
 
     q->sent_ms = elpis_cached_now_ms();
-    q->attempt = t->sends;
 
     if (q->over_tcp) {
         if (start_tcp(t, q, w->txbuf, len) != ELPIS_OK) {
@@ -612,14 +613,29 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     /*
      * BADCOOKIE means "resend with the cookie I just gave you"; we have
      * already stored it, so a single retry to the same server is correct.
+     *
+     * Single per query, that is.  This used to test the task's send count,
+     * so only a task's very first query was ever retried: behind a QNAME
+     * minimisation probe or a referral, BADCOOKIE was taken as the server
+     * failing, and the next one was tried instead.
+     *
+     * And if it was our replay of its own cookie that it refused, it is one
+     * of many machines behind one address; stop replaying to it.
      */
-    if (rcode == ELPIS_RC_BADCOOKIE && q->used_cookie && q->attempt < 2) {
+    if (rcode == ELPIS_RC_BADCOOKIE && q->used_cookie) {
         elpis_addr_t server = q->server;
-        elpis_out_free(w, q);
-        t->sends++;
-        if (elpis_task_resend(t, &server, 0) != ELPIS_OK)
-            elpis_resolver_on_error(t, NULL, ELPIS_EDE_NETWORK_ERROR);
-        return;
+        if (q->sent_server_cookie)
+            elpis_infra_set_flag(w->ctx->infra, &server,
+                                 ELPIS_INF_COOKIE_ROAM, 1);
+        if (!q->cookie_retry) {
+            elpis_out_free(w, q);
+            t->sends++;
+            if (elpis_task_resend(t, &server, 0) != ELPIS_OK)
+                elpis_resolver_on_error(t, NULL, ELPIS_EDE_NETWORK_ERROR);
+            else if (t->out != NULL)
+                t->out->cookie_retry = 1;
+            return;
+        }
     }
 
     /* Truncated over UDP: repeat the query over TCP (RFC 7766). */

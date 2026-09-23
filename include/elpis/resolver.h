@@ -51,10 +51,11 @@ struct elpis_outq {
 
     int            sockidx;
     uint64_t       sent_ms;
-    unsigned       attempt;
     uint16_t       edns_size;
     unsigned       used_edns   : 1;
     unsigned       used_cookie : 1;
+    unsigned       sent_server_cookie : 1;
+    unsigned       cookie_retry : 1;  /* already resent once for BADCOOKIE */
     unsigned       over_tcp    : 1;
     unsigned       dead        : 1;
     /*

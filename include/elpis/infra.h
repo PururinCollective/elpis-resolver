@@ -32,6 +32,14 @@
  */
 #define ELPIS_INF_0X20_OK    0x10u
 #define ELPIS_INF_NO_0X20    0x20u
+/*
+ * Rejected a server cookie it had handed out itself.  An anycast address is
+ * many machines, each with its own secret: g-root and the .uk servers answer
+ * BADCOOKIE to their own cookie from a query ago about half the time, and the
+ * retry can land on a third.  Such a server is sent the client half only,
+ * which RFC 7873 section 5.2.3 has it answer normally.
+ */
+#define ELPIS_INF_COOKIE_ROAM 0x40u
 
 /* Starting estimate for a server we have never talked to. */
 #define ELPIS_RTT_INITIAL    376u
