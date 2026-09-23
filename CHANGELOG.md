@@ -10,6 +10,156 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.14 — 2026-09-24
+
+Mostly speed: new names under unsigned zones, and cold lookups anywhere. Along
+the way, a handful of lookups that failed, and two DNSSEC answers that claimed
+more than they had proven.
+
+### Fixed
+
+**AD was set on answers that passed through an unsigned CNAME.** A CNAME chain
+answered from cache took the security status of its last link, so an unsigned
+zone's CNAME into a signed name came out authenticated:
+
+```
+distro-gateway-prod.ol.epicgames.com.         CNAME  ...cdn.cloudflare.net.  unsigned
+distro-gateway-prod.ol.epicgames.com.cdn.cloudflare.net.  A  104.18.12.27     secure
+```
+
+That is every Epic Games Launcher name behind Cloudflare, and anything shaped
+like it. It also happened when the CNAME had just come off the wire and had not
+been validated at all: a secure record cached at its target vouched for it, and
+validation was skipped because that record needed none.
+
+An answer is now as secure as its weakest link. One with a link nobody has
+checked is validated whole before it is sent. Chains signed end to end —
+`www.icann.org`, `www.apnic.net`, `www.sidn.nl` — keep AD, and chains from a
+signed zone into an unsigned one still get none.
+
+**Records fetched after a cached secure CNAME were cached as validated.** They
+were stamped with the task's status as they arrived, and following a cached
+CNAME had set that to the CNAME's. A later hit served them with AD, and the
+chain walk takes a DS or DNSKEY marked secure without checking it again.
+Everything off the wire is cached unchecked now; only the validator records
+verdicts.
+
+**`www.gov.uk` failed now and then with SERVFAIL, `EDE 20`.** A QNAME
+minimisation probe drew BADCOOKIE, and the retry asked the full question
+instead of the probe. nic.uk answers `www.gov.uk` with a CNAME into
+`service.gov.uk` and that zone's NS set alongside. Read as the answer to the
+probe, that looked like a referral, and `www.gov.uk` was sent to
+`service.gov.uk`'s servers, which refused it one after another. Retries now
+resend the question actually in flight, and a referral is only taken for a
+zone that contains the name being resolved.
+
+**A zone was given up on after one pass through its servers.** Once each
+address had been asked, the lookup failed: about a second in, with most of
+`query-total-timeout` unspent. `max-retries` was read from the config and never
+used. It is now the number of further rounds through the zone's servers, and
+each attempt after the first round is held to `query-timeout`, so a zone whose
+servers are all down still fails in seconds.
+
+A reply slower than its timer is no longer thrown away, either. The query keeps
+listening for one more timeout, so the server is measured and the next lookup
+waits for it properly. Against a test server answering 500 ms late, the first
+lookup takes 876 ms and the next 500, where it used to fail.
+
+**Servers that drop case-randomised names are asked in lowercase.** For a while
+on release day `intel.com`'s four servers answered `www.intel.com` and ignored
+`wWw.InTeL.cOm` completely, and with 0x20 on — the default — every cold lookup
+of the name failed. A server that has timed out without ever answering a
+randomised name is now asked once as-is. If that is answered, it is remembered,
+and the log says so:
+
+```
+INFO  192.0.2.53:53 answers only names sent in lowercase; case randomisation is off for it
+```
+
+Any later answer to a randomised name clears it again, so a server that is only
+slow keeps its 0x20. Nothing is randomised over TCP any more, where the
+handshake already keeps an off-path attacker out.
+
+**BADCOOKIE was only ever retried on a task's first query.** Anywhere after a
+minimisation probe or a referral, it was taken as the server failing and the
+next one was tried. Each query now gets its own single retry.
+
+Once a server rejects a cookie it issued itself, it is sent the client half
+only. g-root and the `.uk` servers do this often — one address, many machines,
+each with its own secret — and the retry could land on a third. Over the DNSSEC
+test set, 7 to 20 BADCOOKIEs a run became 2 to 4, one per such server.
+
+### Changed
+
+**An unsigned zone is proven unsigned once, not once per name under it.** A new
+name in an unsigned zone was validated by walking from the root, down to the
+parent's signed proof that the zone has no DS. The verdict was recorded, but
+only looked up for the zone apex, so the next name walked again. `com` and
+`net` sign with P-256, at 2.6 ms a signature here, and the proof is two of
+them. Every new name under an unsigned `.com` domain held its worker for five
+milliseconds, with the other queries on that worker queued behind it.
+
+dnscheck.tools times exactly this, with random names under `null-addr.com`,
+`.net` and `.org` (A and AAAA together, warm):
+
+| | 1.1.13 | 1.1.14 |
+|---|---|---|
+| `null-addr.com`, `.net` | 12.4 ms | 1.8 ms |
+| `null-addr.org` | 2.3 ms | 1.7 ms |
+
+1.1.1.1 measures 3.3–4.0 ms from the same host. The reply now leaves 37 µs after
+the answer arrives, down from 5.7 ms. The root key set's check against the
+trust anchor is recorded the same way, once per copy rather than once per
+validation.
+
+**A slow server no longer hides a fast one.** A server never used was ranked on
+a 376 ms guess, so once one server of a zone had been measured, however slow,
+the rest were never tried. From the test host every `com` and `net` referral
+went to a gtld server 160–200 ms away, while `b.gtld-servers.net` answers over
+IPv6 in 11.
+
+When the best known server is slower than 10 ms, the same question now also
+goes to one never-measured address in the delegation, and the first usable
+answer wins; the other is measured anyway. While nothing under 40 ms is known,
+up to eight more addresses are asked as well, purely to be measured, so a
+delegation the size of `com`'s is mapped within a few queries. Exploring stops
+once every address has been measured, until its infra entry expires an hour
+after last use. Forwarders, stub zones and TLD warming never explore. The
+statistics line counts the extra queries as `raced=`.
+
+**The DS a signed referral carries is kept.** It is what a DS query returns,
+and the validator asked for it anyway, one zone at a time, after the answer
+was in hand. `www.baidu.com` crosses three unsigned `com` zones and waited on
+three sequential DS round trips for proofs it had been given on the way down.
+The data is cached unchecked and verified on the walk like anything fetched. A
+kept denial that proves nothing is dropped and the parent asked directly, as
+before.
+
+Together, from a fresh start, 157 sites resolved the way a browser does —
+`www.` names, A + AAAA + HTTPS, six at a time — three runs each:
+
+| | median | p90 | mean |
+|---|---|---|---|
+| 1.1.13 | 502–527 ms | 1220–1385 ms | 655–676 ms |
+| 1.1.14 | 80–96 ms | 350–370 ms | 156–164 ms |
+
+No SERVFAILs in either. And every host the sites reported as not opening load,
+all at once, from a fresh start — the time until the last one answers:
+
+| | 1.1.13 | 1.1.14 |
+|---|---|---|
+| forums.linuxmint.com | 1.2 s | 0.6–0.7 s |
+| Epic Games Launcher, 37 hosts | 2.5–2.6 s | 0.6–0.8 s |
+| Taobao, 30 hosts | 2.6–2.9 s | 0.9–1.0 s |
+| Shopee MY, SG, ID | 0.8–1.7 s | 0.2–0.5 s |
+
+All 285 of those answers match 1.1.1.1's, on both versions.
+
+**Failing takes longer.** With `max-retries` in effect, a zone whose servers are
+all unreachable answers SERVFAIL after a few seconds rather than about one. The
+shipped `elpis.conf` has always said `max-retries: 3`, so existing configs get
+this too; set it to `0` for a single pass, as before.
+
 ## 1.1.13 — 2026-09-24
 
 ### Changed
