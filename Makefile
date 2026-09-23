@@ -100,7 +100,7 @@ OBJ += $(SIMD_OBJ)
 
 # ---- targets ---------------------------------------------------------------
 .PHONY: all static debug asan clean distclean install uninstall test check fmt \
-        licence-tool FORCE
+        licence-tool fuzz FORCE
 
 
 all: $(BIN) $(BINCONF)
@@ -255,6 +255,39 @@ $(TESTBIN): $(TEST_OBJ) tests/test_main.o | $(BINDIR)
 test check: $(TESTBIN)
 	./$(TESTBIN)
 
+# ---- fuzzing ---------------------------------------------------------------
+# libFuzzer over everything a DNS message passes through before it is trusted:
+# the parser, every record type's rdata, and the NSEC and NSEC3 proofs
+# (tests/fuzz_msg.c).  Needs clang.  Its objects are compiled apart from the
+# normal ones, under bin/fuzz/, with the fuzzer's coverage and ASan/UBSan.
+#
+#   make fuzz
+#   mkdir -p bin/corpus && cd bin && ./fuzz-msg -max_total_time=300 corpus/
+#
+# From bin/, because with -jobs libFuzzer writes a fuzz-N.log wherever it runs.
+FUZZ_CC     ?= clang
+FUZZ_BIN    := $(BINDIR)/fuzz-msg
+FUZZ_DIR    := $(BINDIR)/fuzz
+FUZZ_CFLAGS  = $(STD) $(POSIX) $(WARN) $(DEFS) $(DEPFLAGS) -O1 -g \
+               -fno-omit-frame-pointer -fsanitize=address,undefined \
+               -Iinclude -Isrc -pthread
+FUZZ_OBJ    := $(patsubst %.c,$(FUZZ_DIR)/%.o,$(filter-out src/main.c,$(SRC) $(SIMD_SRC)))
+
+fuzz: $(FUZZ_BIN)
+
+$(FUZZ_DIR)/src/simd_avx2.o: FUZZ_ISA := -mavx2 -mbmi -mbmi2
+$(FUZZ_DIR)/src/simd_sse2.o: FUZZ_ISA := -msse2
+$(FUZZ_DIR)/src/util.o: src/gitrev.h src/buildtarget.h
+$(FUZZ_DIR)/src/webui.o: src/webui_assets.h
+$(FUZZ_DIR)/src/licence.o: src/licence_issuer.stamp
+
+$(FUZZ_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer-no-link $(FUZZ_ISA) -c -o $@ $<
+
+$(FUZZ_BIN): tests/fuzz_msg.c $(FUZZ_OBJ) | $(BINDIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -o $@ $^ $(LIBS)
+
 # Installs the same shape as the build tree, so the config lookup behaves
 # identically whether you run it from bin/ or from /opt.  An existing config is
 # never overwritten.
@@ -272,7 +305,8 @@ uninstall:
 
 clean:
 	rm -f $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o \
-	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence
+	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence $(FUZZ_BIN)
+	rm -rf $(FUZZ_DIR)
 	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h src/licence_issuer.stamp \
 	      src/buildtarget.h src/cflags.stamp
 	@rmdir $(BINDIR) 2>/dev/null || true
@@ -284,4 +318,4 @@ distclean: clean
 # The test object is built outside $(OBJ), so its own .d has to be named here
 # as well -- otherwise a change to a header leaves tests/test_main.o stale and
 # it is linked against a struct layout it was not compiled for.
--include $(OBJ:.o=.d) tests/test_main.d
+-include $(OBJ:.o=.d) tests/test_main.d $(FUZZ_OBJ:.o=.d)

@@ -88,7 +88,6 @@ int elpis_root_hints_load(const char *path, elpis_deleg_t *out)
 {
     FILE *fp = fopen(path, "r");
     char line[512];
-    unsigned nns = 0, naddr = 0;
     elpis_deleg_t d;
 
     if (fp == NULL) {
@@ -142,7 +141,6 @@ int elpis_root_hints_load(const char *path, elpis_deleg_t *out)
                     continue;
                 elpis_name_lower(&ns);
                 elpis_deleg_add_ns(&d, &ns);
-                nns++;
             } else {
                 elpis_name_t ns;
                 uint8_t ip[16];
@@ -158,7 +156,6 @@ int elpis_root_hints_load(const char *path, elpis_deleg_t *out)
                         continue;
                     elpis_deleg_add_addr(&d, &ns, ip, AF_INET6, ELPIS_NSF_GLUE);
                 }
-                naddr++;
             }
         }
     }
