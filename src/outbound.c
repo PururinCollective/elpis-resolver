@@ -357,6 +357,17 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
     timeout = inf.srtt + 4u * inf.rttvar;
     if (q->over_tcp)
         timeout += inf.srtt;
+    /*
+     * A server that has never answered or timed out has no round trip to go
+     * on, and the formula turns the starting guess into 376 + 4 x 188 =
+     * 1128 ms.  Wait the guess itself instead, as Unbound does.  Every cold
+     * lookup meets servers like this, and on a path that drops one packet in
+     * twenty, each loss cost a client more than a second before the next
+     * server was tried.  A server genuinely further away than this loses its
+     * first answer and is tried again with the doubled estimate.
+     */
+    if (inf.queries == 0)
+        timeout = q->over_tcp ? 2u * ELPIS_RTT_INITIAL : ELPIS_RTT_INITIAL;
     if (timeout < 250u)
         timeout = 250u;
     if (timeout > c->query_timeout_ms * 4u)
