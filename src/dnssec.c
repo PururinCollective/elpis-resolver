@@ -776,6 +776,25 @@ static void val_release(val_t *v)
     g_val_pooled++;
 }
 
+/*
+ * Both are kept for the life of the thread, which is the point of them -- and
+ * so, when the thread ends, they are the only memory the validator still
+ * holds.  Nothing grows: one buffer and at most VAL_POOL_MAX states a worker.
+ * But left behind they are what a leak checker reports at every shutdown,
+ * burying anything that really is lost.
+ */
+void elpis_dnssec_thread_done(void)
+{
+    elpis_free(g_signbuf);
+    g_signbuf = NULL;
+    while (g_val_pool != NULL) {
+        val_t *v = g_val_pool;
+        g_val_pool = *(val_t **)v;
+        elpis_free(v);
+    }
+    g_val_pooled = 0;
+}
+
 static void val_run(elpis_task_t *t);
 static void inflight_forget(elpis_task_t *t);
 

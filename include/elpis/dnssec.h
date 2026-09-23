@@ -72,6 +72,9 @@ int elpis_rrsig_verify(const elpis_conf_t *conf,
 /* Signature verifications done on the calling thread since the last call,
  * which zeroes the count.  The worker folds it into its statistics. */
 uint64_t elpis_dnssec_take_verifies(void);
+/* Give back what the validator kept for this thread: its signing buffer and
+ * its pool of validation states.  Called by a worker as it finishes. */
+void elpis_dnssec_thread_done(void);
 
 int elpis_rrset_validate(const elpis_conf_t *conf,
                          const elpis_rrset_buf_t *set,

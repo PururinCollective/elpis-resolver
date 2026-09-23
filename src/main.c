@@ -451,6 +451,7 @@ void elpis_worker_run(elpis_worker_t *w)
         elpis_loop_once(w->loop, 500);
     publish_stats(w);
     elpis_tm_publish(&w->tm);
+    elpis_dnssec_thread_done();
 }
 
 /* ================================================================== */
