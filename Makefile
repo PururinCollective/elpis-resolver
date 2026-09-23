@@ -116,6 +116,19 @@ src/gitrev.h: FORCE
 
 src/util.o: src/gitrev.h
 
+# make watches files, not flags.  Change OPT, CFLAGS or VERSION over an
+# existing build and every object stays as it was compiled: a binary built
+# with -march=znver3 that is mostly generic, or a 1.1.14 that still calls
+# itself 1.1.13 until someone thinks to run make clean.  The stamp holds the
+# flags, is rewritten only when they change, and everything compiled with them
+# depends on it.
+src/cflags.stamp: FORCE
+	@printf '%s\n' '$(CC) $(ALL_CFLAGS)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv -f $@.tmp $@
+	@rm -f $@.tmp
+
+$(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o: src/cflags.stamp
+
 # The status page is compiled in, so the generated header has to be rebuilt
 # whenever the page changes.  Doing that by hand is a trap: regenerate it
 # within the same second as the last build and make's mtime comparison says
@@ -247,7 +260,8 @@ uninstall:
 clean:
 	rm -f $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o \
 	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence
-	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h src/licence_issuer.stamp
+	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h src/licence_issuer.stamp \
+	      src/cflags.stamp
 	@rmdir $(BINDIR) 2>/dev/null || true
 
 # clean keeps bin/elpis.conf because it is yours by then; this drops it too.

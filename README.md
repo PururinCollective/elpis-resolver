@@ -97,6 +97,9 @@ Pick the one that matches your processor:
 Use `-march=native` only when you build on the same machine you run on — the
 binary will not start on an older CPU.
 
+Changing `OPT` needs no `make clean`: the build notices the flags changed and
+recompiles everything they apply to.
+
 ```bash
 make            # ordinary build      -> bin/elpis + bin/elpis.conf
 make static     # one relocatable binary, no shared libraries
