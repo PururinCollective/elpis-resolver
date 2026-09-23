@@ -10,7 +10,14 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 1.1.15 — 2026-09-24
+
+A release review: the faults a resolver meets after weeks of running that a
+benchmark never shows. TCP, which answered only from the cache, and stub zones
+under DNSSEC work again. Memory has a ceiling, the status page no longer waits
+on a slow client, and valgrind reports nothing at exit. No config that worked
+stops working. `tld-refresh` and `root-refresh`, always in the shipped config,
+now take effect, and `tcp-idle-timeout` means what it says.
 
 ### Added
 

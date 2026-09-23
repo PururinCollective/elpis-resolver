@@ -11,7 +11,7 @@ and run.
 
 ```
 $ make && ./bin/elpis -d
-elpis 1.1.14 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
+elpis 1.1.15 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
               gcc 13.3.0, x86_64 generic, 4096 MiB RAM detected, cache budget 819 MiB
 msg-cache: 32 shards, budget 409 MiB
 rrset-cache: 32 shards, budget 262 MiB
@@ -102,7 +102,7 @@ CPU as the compiler resolved `-march` and `-mtune`, or `generic` when neither
 was given — and so do the About window and the CPU pane of the status page:
 
 ```
-elpis 1.1.14 starting: ..., epoll, gcc 13.3.0, x86_64 znver3 (native), ...
+elpis 1.1.15 starting: ..., epoll, gcc 13.3.0, x86_64 znver3 (native), ...
 ```
 
 Changing `OPT` needs no `make clean`: the build notices the flags changed and
