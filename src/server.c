@@ -171,8 +171,9 @@ void elpis_task_respond(elpis_task_t *t)
         return;
 
     fill_edns(t, &e, t->rcode);
-    /* Reserve room for the OPT record we will append last. */
-    {
+    /* Reserve room for the OPT record we will append last -- if there is to
+     * be one; see below. */
+    if (t->client_edns) {
         size_t opt = 11 + (e.have_cookie ? 4u + e.cookie_len : 0u) +
                      (e.ede_code >= 0 ? 6u : 0u) +
                      (e.want_nsid && e.nsid ? 4u + strlen(e.nsid) : 0u);
@@ -219,7 +220,16 @@ void elpis_task_respond(elpis_task_t *t)
         elpis_stat_inc(&w->stats.truncated, 1);
     }
 
-    (void)elpis_edns_write(&b, &e, t->rcode);
+    /*
+     * Only to a client that sent one.  RFC 6891 section 7: a query without an
+     * OPT record says the client does not speak EDNS, and the responder MUST
+     * NOT include one in its reply.  Every answer that had to be resolved got
+     * one anyway -- a SERVFAIL carrying an extended error to a client that
+     * cannot read it -- while the same name answered from cache a moment
+     * later did not, because the fast path already checked.
+     */
+    if (t->client_edns)
+        (void)elpis_edns_write(&b, &e, t->rcode);
     elpis_bld_finish(&b);
     if (truncated && !t->from_tcp)
         elpis_put16(w->txbuf + 2, (uint16_t)(flags | ELPIS_FLAG_TC));
