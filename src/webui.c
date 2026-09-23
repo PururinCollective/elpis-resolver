@@ -562,6 +562,8 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputu(b, (unsigned long)elpis_host_uptime());
     bputs(b, ",\"build\":");  bputq(b, elpis_build_rev());
     bputs(b, ",\"cc\":");     bputq(b, elpis_compiler());
+    bputs(b, ",\"arch\":");   bputq(b, elpis_build_arch());
+    bputs(b, ",\"target\":"); bputq(b, elpis_build_target());
     bputs(b, ",\"edition\":");  bputq(b, c->edition);
     bputs(b, ",\"operator\":"); bputq(b, c->operator_name);
     bputs(b, ",\"identity\":");

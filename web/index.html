@@ -216,6 +216,14 @@ function dur(s){
   return (d ? d+'d ' : '') + h + 'h ' + m + 'm';
 }
 function last(a){ return (a && a.length) ? a[a.length-1] : 0; }
+/* The instruction set and the CPU the binary was compiled for, as the startup
+   line has them: "x86_64 znver3".  A build that asked for no particular CPU
+   says generic, dimmed, since that is the absence of a choice. */
+function builtFor(d){
+  var t = d.server.target || 'generic';
+  return esc(d.server.arch || 'unknown') + ' ' + (t === 'generic' ?
+    "<span style='color:var(--dim)'>generic</span>" : esc(t));
+}
 /* Query-weighted mean over the kept history: one idle second must not make
    the figure read zero, and a busy second must count for more than a quiet
    one. */
@@ -736,6 +744,7 @@ var VIEWS = [
       "<b>SIMD kernels</b><span>" + esc(d.server.simd) + "</span>" +
       "<b>event loop</b><span>" + esc(d.server.loop) + "</span>" +
       "<b>compiler</b><span>" + esc(d.server.cc || 'unknown') + "</span>" +
+      "<b>built for</b><span>" + builtFor(d) + "</span>" +
       "<b>resolver up</b><span>" + dur(d.server.uptime) + "</span>" +
       "<b>host up</b><span>" + (d.server.hostup ? dur(d.server.hostup) :
         "<span style='color:var(--dim)'>unknown</span>") + "</span></div>" +
@@ -1008,6 +1017,7 @@ var VIEWS = [
       "<div class='kv'>" +
       "<b>version</b><span>" + esc(d.server.version) + "</span>" +
       "<b>compiler</b><span>" + esc(d.server.cc || 'unknown') + "</span>" +
+      "<b>built for</b><span>" + builtFor(d) + "</span>" +
       "<b>build</b><span>" + (d.server.build ?
           "<code>" + esc(d.server.build) + "</code>" :
           "<span style='color:var(--dim)'>not a git checkout</span>") + "</span>" +

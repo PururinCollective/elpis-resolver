@@ -26,7 +26,7 @@ puts the defaults back.
 |---|---|
 | **Task Manager** | CPU, memory, network and queries in one window — a rail of live sparklines on the left, the one you pick drawn large on the right |
 | **Overview** | cache hit rate, response time answered from cache and resolved upstream, queries and SERVFAIL per second, every counter the resolver keeps, and how this host looks from outside: public IPv4 and IPv6, AS number and AS name |
-| **CPU** | processor time as a share of one core, the processor's model name, the worker count, which SIMD kernels were selected, and how long both the resolver and the machine under it have been up |
+| **CPU** | processor time as a share of one core, the processor's model name, the worker count, which SIMD kernels were selected, the compiler and the CPU the binary was built for, and how long both the resolver and the machine under it have been up |
 | **Memory** | resident size over time against the memory the resolver may use, so the line reads as a share of the ceiling rather than of its own peak, and each cache's entries, bytes used, budget and hit rate |
 | **Network** | bytes in and out per second, and the addresses actually bound |
 | **Queries** | queries per second, SERVFAIL and bogus per second, cache hits against upstream queries |
@@ -34,7 +34,7 @@ puts the defaults back.
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
 | **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
-| **About** | edition and operator, version, the commit and compiler the binary was built with, uptime, and which ML-DSA parameter sets are live |
+| **About** | edition and operator, version, the commit and compiler the binary was built with and the CPU it was built for, uptime, and which ML-DSA parameter sets are live |
 | **Layout** | the desktop as one line, to carry an arrangement to another browser |
 
 The counts are exact, not sampled. Sampling was tried first and it is useless

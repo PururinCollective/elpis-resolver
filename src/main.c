@@ -108,11 +108,11 @@ int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
         if (cpu->avx512f)  elpis_strlcat(feat, " avx512f", sizeof feat);
         if (cpu->neon)     elpis_strlcat(feat, " neon", sizeof feat);
         if (cpu->crc32)    elpis_strlcat(feat, " crc32", sizeof feat);
-        elpis_info("elpis %s starting: %s kernels (cpu:%s), %s, %s, "
+        elpis_info("elpis %s starting: %s kernels (cpu:%s), %s, %s, %s %s, "
                    "%llu MiB RAM detected, cache budget %llu MiB",
                    ELPIS_VERSION, elpis_simd_backend(),
                    feat[0] ? feat : " none", elpis_loop_backend(),
-                   elpis_compiler(),
+                   elpis_compiler(), elpis_build_arch(), elpis_build_target(),
                    (unsigned long long)(ctx->plan.ram_total / (1024 * 1024)),
                    (unsigned long long)(ctx->plan.budget_total / (1024 * 1024)));
     }

@@ -8,6 +8,7 @@
 #include "elpis/util.h"
 #include "elpis/log.h"
 #include "gitrev.h"
+#include "buildtarget.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -422,6 +423,55 @@ const char *elpis_compiler(void)
 #else
     return "unknown compiler";
 #endif
+}
+
+/*
+ * The instruction set, from the compiler's own predefined macros: what this
+ * binary is, not what the machine running it is.  Named as Debian and the
+ * kernel's uname do, except arm64 for AArch64, which is what most people
+ * reading it will call it.
+ */
+const char *elpis_build_arch(void)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "i386";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__arm__) || defined(_M_ARM)
+    return "arm";
+#elif defined(__riscv) && defined(__riscv_xlen) && __riscv_xlen == 64
+    return "riscv64";
+#elif defined(__riscv)
+    return "riscv32";
+#elif defined(__powerpc64__) && defined(__LITTLE_ENDIAN__)
+    return "ppc64le";
+#elif defined(__powerpc64__)
+    return "ppc64";
+#elif defined(__powerpc__)
+    return "ppc";
+#elif defined(__s390x__)
+    return "s390x";
+#elif defined(__loongarch64)
+    return "loongarch64";
+#elif defined(__mips64)
+    return "mips64";
+#elif defined(__mips__)
+    return "mips";
+#else
+    return "unknown";
+#endif
+}
+
+/*
+ * The CPU the build was compiled for: -march and -mtune as the compiler
+ * resolved them, "native" turned into the CPU it stood for, "generic" when the
+ * build asked for nothing.  Worked out by tools/cputarget.sh at build time.
+ */
+const char *elpis_build_target(void)
+{
+    return ELPIS_BUILD_TARGET;
 }
 
 void elpis_os_string(char *out, size_t outsz)

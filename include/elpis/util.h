@@ -122,6 +122,10 @@ const char *elpis_build_rev(void);
 /* The compiler that produced this binary, e.g. "gcc 13.2.0".  Two builds of
  * the same commit can behave differently, so a bug report wants both. */
 const char *elpis_compiler(void);
+/* And what it made it for: "x86_64", "arm64", ...; and the CPU it was tuned
+ * for, "znver3", "znver3 (native)", or "generic" when the build set none. */
+const char *elpis_build_arch(void);
+const char *elpis_build_target(void);
 void elpis_host_name(char *out, size_t outsz);
 uint32_t elpis_random_u32(void);
 /* Uniform in [0, n) without modulo bias. */

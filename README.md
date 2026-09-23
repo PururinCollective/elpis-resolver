@@ -11,8 +11,8 @@ and run.
 
 ```
 $ make && ./bin/elpis -d
-elpis 1.1.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
-              4096 MiB RAM detected, cache budget 819 MiB
+elpis 1.1.14 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
+              gcc 13.3.0, x86_64 generic, 4096 MiB RAM detected, cache budget 819 MiB
 msg-cache: 32 shards, budget 409 MiB
 rrset-cache: 32 shards, budget 262 MiB
 listening with 4 workers
@@ -97,13 +97,21 @@ Pick the one that matches your processor:
 Use `-march=native` only when you build on the same machine you run on — the
 binary will not start on an older CPU.
 
+Startup says what a binary was built for — compiler, instruction set, and the
+CPU as the compiler resolved `-march` and `-mtune`, or `generic` when neither
+was given — and so do the About window and the CPU pane of the status page:
+
+```
+elpis 1.1.14 starting: ..., epoll, gcc 13.3.0, x86_64 znver3 (native), ...
+```
+
 Changing `OPT` needs no `make clean`: the build notices the flags changed and
 recompiles everything they apply to.
 
 ```bash
 make            # ordinary build      -> bin/elpis + bin/elpis.conf
 make static     # one relocatable binary, no shared libraries
-make test       # 242 self tests, no network needed
+make test       # 360 self tests, no network needed
 make debug      # -O0 -g3
 make asan       # address and UB sanitizers
 make clean      # objects and binaries; keeps your bin/elpis.conf
