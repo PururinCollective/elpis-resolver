@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 static void tcp_close(elpis_tcpconn_t *c);
+static void tcp_resolved(elpis_tcpconn_t *c);
 
 /* Kick off a background refresh of the name just served from cache. */
 static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
@@ -237,8 +238,7 @@ void elpis_task_respond(elpis_task_t *t)
 
     if (t->from_tcp && t->conn != NULL) {
         tcp_queue(t->conn, w->txbuf, b.len);
-        if (t->conn->pending)
-            t->conn->pending--;
+        tcp_resolved(t->conn);
     } else {
         /*
          * Response rate limiting.  Over the limit we answer truncated rather
@@ -680,6 +680,28 @@ void elpis_server_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
 static void tcp_conn_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
 static void tcp_idle_timeout(elpis_loop_t *lp, elpis_timer_t *tm);
 
+/*
+ * Answers queued for a client that is not reading them.  Past this, no more of
+ * its queries are read until it catches up.  Without it a client could
+ * pipeline queries for cached names and never read a reply: each connection's
+ * buffer grew to 4 MB, and at 512 connections a worker that is 2 GB.
+ */
+#define TCP_TX_HIGH (64u * 1024u)
+
+/* What to wait for: replies to write, and queries unless held back. */
+static void tcp_want(elpis_tcpconn_t *c)
+{
+    unsigned mask = 0;
+
+    if (c->fd < 0)
+        return;
+    if (!c->stalled)
+        mask |= ELPIS_EV_READ;
+    if (c->txsent < c->txlen)
+        mask |= ELPIS_EV_WRITE;
+    elpis_loop_mod(c->w->loop, &c->ev, mask ? mask : ELPIS_EV_READ);
+}
+
 static int tcp_queue(elpis_tcpconn_t *c, const uint8_t *buf, size_t len)
 {
     size_t need = c->txlen + len + 2u;
@@ -703,24 +725,35 @@ static int tcp_queue(elpis_tcpconn_t *c, const uint8_t *buf, size_t len)
     elpis_put16(c->tx + c->txlen, (uint16_t)len);
     memcpy(c->tx + c->txlen + 2, buf, len);
     c->txlen += len + 2u;
-    elpis_loop_mod(c->w->loop, &c->ev, ELPIS_EV_READ | ELPIS_EV_WRITE);
+    tcp_want(c);
     return ELPIS_OK;
 }
 
+/*
+ * Close the socket now; free the connection once nothing refers to it.
+ *
+ * Resolutions still in flight hold a pointer to the connection, so the memory
+ * has to wait for the last of them -- but the socket does not.  It used to:
+ * the connection was only marked, left registered with a descriptor the
+ * client had already closed, and a closed socket is permanently readable.
+ * Every client that gave up before its answer came -- AdGuard does, as a
+ * matter of course -- set a worker spinning flat out until that answer
+ * arrived, up to query-total-timeout later: four of them held 2.8 cores.
+ */
 static void tcp_close(elpis_tcpconn_t *c)
 {
     elpis_worker_t *w = c->w;
 
-    if (c->pending > 0) {
-        /* Resolutions still reference this connection; mark and let them
-         * drain.  The last one to finish closes it. */
-        c->closing = 1;
-        return;
-    }
     elpis_timer_del(w->loop, &c->idle);
-    elpis_loop_del(w->loop, &c->ev);
-    if (c->fd >= 0)
+    if (c->fd >= 0) {
+        elpis_loop_del(w->loop, &c->ev);
         close(c->fd);
+        c->fd = -1;
+    }
+    c->closing = 1;
+    if (c->pending > 0)
+        return;                         /* the last resolution frees it */
+
     if (c->prev) c->prev->next = c->next;
     else         w->conns = c->next;
     if (c->next) c->next->prev = c->prev;
@@ -731,11 +764,73 @@ static void tcp_close(elpis_tcpconn_t *c)
     elpis_free(c);
 }
 
+/* A resolution for this connection is done, answered or not. */
+static void tcp_resolved(elpis_tcpconn_t *c)
+{
+    if (c->pending)
+        c->pending--;
+    if (c->closing && c->pending == 0)
+        tcp_close(c);
+}
+
 static void tcp_idle_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_tcpconn_t *c = (elpis_tcpconn_t *)tm->data;
-    (void)lp;
+    /*
+     * A connection with queries still being resolved, or answers not yet
+     * written, is not idle however long the client has been quiet: it is
+     * waiting for us.  Closing it here threw away any answer slower than
+     * tcp-idle-timeout, which is shorter than query-total-timeout.
+     */
+    if (c->pending > 0 || c->txsent < c->txlen) {
+        elpis_timer_add(lp, &c->idle, c->w->ctx->conf.tcp_idle_ms,
+                        tcp_idle_timeout, c);
+        return;
+    }
     tcp_close(c);
+}
+
+/*
+ * Answer the queries already read, for as long as the client keeps reading.
+ * Returns ELPIS_ERR when the stream is broken and the connection must go.
+ */
+static int tcp_serve(elpis_tcpconn_t *c)
+{
+    elpis_worker_t *w = c->w;
+
+    for (;;) {
+        if (c->txlen - c->txsent > TCP_TX_HIGH) {
+            c->stalled = 1;
+            tcp_want(c);
+            return ELPIS_OK;
+        }
+        if (c->rxwant == 0) {
+            if (c->rxlen < 2)
+                break;
+            c->rxwant = elpis_get16(c->rx);
+            if (c->rxwant < ELPIS_HDR_LEN) {
+                elpis_drop_log(ELPIS_DROP_SHORT, &c->peer, c->rx, c->rxlen,
+                               "tcp length prefix");
+                return ELPIS_ERR;
+            }
+            continue;
+        }
+        if (c->rxlen < c->rxwant + 2u)
+            break;
+
+        elpis_stat_inc(&w->stats.tcp_queries, 1);
+        handle_query(w, c->rx + 2, c->rxwant, &c->peer, &c->local, c->fd, c);
+
+        /* Slide any pipelined remainder to the front (RFC 7766). */
+        memmove(c->rx, c->rx + 2 + c->rxwant, c->rxlen - (c->rxwant + 2u));
+        c->rxlen -= c->rxwant + 2u;
+        c->rxwant = 0;
+    }
+    if (c->stalled) {
+        c->stalled = 0;
+        tcp_want(c);
+    }
+    return ELPIS_OK;
 }
 
 static void tcp_conn_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
@@ -764,15 +859,16 @@ static void tcp_conn_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
         }
         if (c->txsent >= c->txlen) {
             c->txlen = c->txsent = 0;
-            elpis_loop_mod(lp, &c->ev, ELPIS_EV_READ);
-            if (c->closing && c->pending == 0) {
+            /* Caught up: take the queries that were held back. */
+            if (c->stalled && tcp_serve(c) != ELPIS_OK) {
                 tcp_close(c);
                 return;
             }
+            tcp_want(c);
         }
     }
 
-    if (!(events & ELPIS_EV_READ))
+    if (!(events & ELPIS_EV_READ) || c->stalled)
         return;
 
     for (;;) {
@@ -811,30 +907,12 @@ static void tcp_conn_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
         }
         c->rxlen += (size_t)n;
 
-        for (;;) {
-            if (c->rxwant == 0) {
-                if (c->rxlen < 2)
-                    break;
-                c->rxwant = elpis_get16(c->rx);
-                if (c->rxwant < ELPIS_HDR_LEN) {
-                    elpis_drop_log(ELPIS_DROP_SHORT, &c->peer, c->rx, c->rxlen,
-                                   "tcp length prefix");
-                    tcp_close(c);
-                    return;
-                }
-                continue;
-            }
-            if (c->rxlen < c->rxwant + 2u)
-                break;
-
-            elpis_stat_inc(&w->stats.tcp_queries, 1);
-            handle_query(w, c->rx + 2, c->rxwant, &c->peer, &c->local, c->fd, c);
-
-            /* Slide any pipelined remainder to the front (RFC 7766). */
-            memmove(c->rx, c->rx + 2 + c->rxwant, c->rxlen - (c->rxwant + 2u));
-            c->rxlen -= c->rxwant + 2u;
-            c->rxwant = 0;
+        if (tcp_serve(c) != ELPIS_OK) {
+            tcp_close(c);
+            return;
         }
+        if (c->stalled)
+            break;
     }
 
     elpis_timer_add(w->loop, &c->idle, w->ctx->conf.tcp_idle_ms,

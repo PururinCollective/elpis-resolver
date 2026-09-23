@@ -205,7 +205,8 @@ struct elpis_tcpconn {
     size_t           rxlen, rxwant, rxcap;
     uint8_t         *tx;
     size_t           txlen, txsent, txcap;
-    unsigned         closing : 1;
+    unsigned         closing : 1;      /* socket gone; freed when pending is 0 */
+    unsigned         stalled : 1;      /* not reading until the client reads */
     unsigned         pending;          /* queries still resolving */
     elpis_tcpconn_t *next, *prev;
 };
