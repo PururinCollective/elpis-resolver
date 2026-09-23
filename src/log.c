@@ -150,6 +150,20 @@ static void log_emit(elpis_loglevel_t lvl, const char *file, int line,
         return;
     if ((size_t)n >= sizeof msg)
         elpis_strlcpy(msg + sizeof msg - 5, "...", 5);
+    /*
+     * One call, one line.  Some of what is logged came from outside -- the
+     * name tried at the status page's login, a config value, a peer's reply
+     * -- and a newline in it would let the sender write a line of its own,
+     * with its own timestamp and level, into the log and onto the page.
+     * DNS names are already escaped by elpis_name_to_text(); this catches
+     * everything else.
+     */
+    {
+        char *p;
+        for (p = msg; *p != '\0'; p++)
+            if ((unsigned char)*p < 0x20 || (unsigned char)*p == 0x7F)
+                *p = '?';
+    }
 
     /*
      * Keep anything a person would want to see on the status page, whatever

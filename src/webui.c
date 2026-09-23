@@ -33,7 +33,8 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 
-#define REQ_MAX      8192u        /* a GET and its headers, nothing more    */
+#define REQ_MAX      8192u        /* a request and its headers, nothing more */
+#define REQ_MS       3000u        /* the whole request, however it arrives   */
 #define OUT_MAX      262144u      /* one JSON snapshot                      */
 #define SESSIONS     8u
 #define SESSION_SECS 28800u       /* eight hours                            */
@@ -820,28 +821,72 @@ static int form_field(const char *body, const char *name, char *out, size_t outs
     return 0;
 }
 
+/*
+ * Read one request: the headers, then as much body as Content-Length says,
+ * all inside REQ_MAX bytes and REQ_MS milliseconds.
+ *
+ * The deadline is for the request, not for each read.  The page serves one
+ * connection at a time, and a per-read timeout let a client that sent a byte
+ * every few seconds hold it for hours -- nobody else could load the page, and
+ * the once-a-second history sampling done on this thread stopped with it.
+ *
+ * The body is read on purpose, not taken from whatever came with the
+ * headers: a browser is free to send a POST's body in a segment of its own,
+ * and when it did, the login form failed with the right password.
+ *
+ * Returns the length read, or 0 when there is no complete request.
+ */
+static size_t read_request(int fd, char *req, const char **body)
+{
+    uint64_t deadline = elpis_now_ms() + REQ_MS;
+    size_t got = 0, want = 0;
+
+    req[0] = '\0';
+    for (;;) {
+        struct pollfd p;
+        uint64_t now = elpis_now_ms();
+        const char *end;
+        ssize_t r;
+
+        if (want != 0 && got >= want)
+            break;
+        if (now >= deadline || got >= REQ_MAX)
+            return 0;
+        p.fd = fd;
+        p.events = POLLIN;
+        if (poll(&p, 1, (int)(deadline - now)) <= 0)
+            return 0;
+        r = recv(fd, req + got, REQ_MAX - got, 0);
+        if (r <= 0)
+            return 0;
+        got += (size_t)r;
+        req[got] = '\0';
+
+        if (want == 0 && (end = strstr(req, "\r\n\r\n")) != NULL) {
+            char cl[24];
+            size_t head = (size_t)(end - req) + 4u;
+            unsigned long n = 0;
+            if (header_of(req, "Content-Length", cl, sizeof cl) != NULL)
+                n = strtoul(cl, NULL, 10);
+            if (n > REQ_MAX - head)
+                return 0;               /* more than the page ever sends */
+            want = head + (size_t)n;
+        }
+    }
+    *body = strstr(req, "\r\n\r\n") + 4;
+    return got;
+}
+
 static void handle_conn(elpis_ctx_t *ctx, int fd)
 {
     static char req[REQ_MAX + 1];
     static char out[OUT_MAX];
     char hdr[1024], tok[128];
-    size_t got = 0;
-    const char *body;
+    const char *body = "";
     int authed = 0;
 
-    /* Read until the headers end, or the cap, or the timeout. */
-    for (;;) {
-        ssize_t r = recv(fd, req + got, REQ_MAX - got, 0);
-        if (r <= 0)
-            return;
-        got += (size_t)r;
-        req[got] = '\0';
-        if (strstr(req, "\r\n\r\n") != NULL || got >= REQ_MAX)
-            break;
-    }
-    req[got] = '\0';
-    body = strstr(req, "\r\n\r\n");
-    body = body ? body + 4 : "";
+    if (read_request(fd, req, &body) == 0)
+        return;
 
     if (header_of(req, "Cookie", hdr, sizeof hdr) != NULL &&
         cookie_token(hdr, tok, sizeof tok))
@@ -875,10 +920,15 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
             memset(pass, 0, sizeof pass);
         }
         if (!ok) {
-            char ab[80];
-            (void)ab;
-            elpis_warn("status page: failed login for user '%s'",
-                       user[0] ? user : "(none)");
+            /*
+             * Rate limited: a guessing script must not be able to push
+             * everything else off the log, here or on the page's own view
+             * of it.  The name it tried is shown with control characters
+             * replaced, as every log line now is.
+             */
+            elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX + 2, __FILE__,
+                          __LINE__, "status page: failed login for user '%s'",
+                          user[0] ? user : "(none)");
             respond(fd, "401 Unauthorized", "application/json", NULL,
                     "{\"ok\":false}", 12);
             return;
@@ -1008,8 +1058,9 @@ void *elpis_webui_main(void *ctxv)
         {
             struct timeval io;
             int on = 1;
-            io.tv_sec = 5; io.tv_usec = 0;
-            (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof io);
+            /* Sending a snapshot to a client that will not read it is held
+             * to the same few seconds; reading is bounded by read_request(). */
+            io.tv_sec = 3; io.tv_usec = 0;
             (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &io, sizeof io);
             (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
         }
