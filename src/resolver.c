@@ -251,6 +251,14 @@ static int add_rrset(elpis_task_t *t, elpis_section_t sec,
 {
     unsigned i;
     for (i = 0; i < b->count; i++) {
+        /*
+         * With the zone that served it, as the cache recorded it.  Replayed
+         * without one, an RRset is one the validator declines to judge, and
+         * an unjudged set counts as insecure: a copy whose signatures had
+         * been stripped went out as a plain unsigned answer to anyone who
+         * asked while the first copy was still being validated.
+         */
+        t->ans.zone_labels = b->zone_labels;
         if (elpis_rrlist_add(&t->ans, sec, &b->name, b->type, b->klass, b->ttl,
                              b->data + b->off[i], b->len[i]) != ELPIS_OK)
             return ELPIS_ENOMEM;
@@ -262,6 +270,7 @@ static int add_rrset(elpis_task_t *t, elpis_section_t sec,
      */
     if (t->client_do || t->w->ctx->conf.dnssec) {
         for (i = 0; i < b->sigcount; i++) {
+            t->ans.zone_labels = b->zone_labels;
             if (elpis_rrlist_add(&t->ans, sec, &b->name, ELPIS_T_RRSIG, b->klass,
                                  b->ttl, b->data + b->off[b->count + i],
                                  b->len[b->count + i]) != ELPIS_OK)
@@ -1115,6 +1124,8 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
          */
         elpis_rrset_buf_init(b, &rr.name, rr.type, rr.klass, ttl);
         b->flags = ELPIS_RRF_AUTH;
+        /* Which zone served it, as accept_rr() stamps the live copy. */
+        b->zone_labels = zone->labels;
 
         /*
          * Gather the RRset, then its signatures, in two passes.  The records

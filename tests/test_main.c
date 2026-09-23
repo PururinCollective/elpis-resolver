@@ -488,6 +488,26 @@ static void test_cache(void)
           buf->count == 1 && buf->len[0] == 4 &&
           memcmp(buf->data, rd, 4) == 0, "get returns what was put");
     CHECK(buf->sec == ELPIS_SEC_SECURE, "security status survives");
+    CHECK(buf->zone_labels == 0, "a plain put records no serving zone");
+
+    /*
+     * The serving zone has to survive the cache.  Without it a replayed
+     * RRset is one the validator declines to judge, and a copy stripped of
+     * its signatures was served as merely unsigned to whoever asked while
+     * the first copy was still being validated.
+     */
+    {
+        elpis_name_t zn;
+        elpis_name_from_text(&zn, "stamped.example.");
+        elpis_rrset_buf_init(buf, &zn, ELPIS_T_A, ELPIS_CLASS_IN, 300);
+        buf->zone_labels = 2;
+        elpis_rrset_buf_add(buf, rd, 4);
+        CHECK(elpis_rcache_put_buf(rc, buf, 0, 0) == ELPIS_OK, "put with a zone");
+        elpis_rrset_buf_init(buf, &n, ELPIS_T_A, ELPIS_CLASS_IN, 0);
+        CHECK(elpis_rcache_get(rc, &zn, ELPIS_T_A, ELPIS_CLASS_IN,
+                               elpis_now_s(), 0, buf) == ELPIS_OK &&
+              buf->zone_labels == 2, "the serving zone comes back out");
+    }
 
     /* Lookups fold case. */
     {

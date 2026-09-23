@@ -18,7 +18,8 @@ typedef struct {
     uint8_t  count;
     uint8_t  sigcount;
     uint8_t  flags;
-    uint8_t  pad[3];
+    uint8_t  zone_labels;       /* see elpis_rrset_buf_t */
+    uint8_t  pad[2];
     uint32_t stored;
     uint32_t ttl;
     uint32_t datalen;
@@ -95,6 +96,7 @@ void elpis_rrset_buf_copy(elpis_rrset_buf_t *dst, const elpis_rrset_buf_t *src)
     dst->ttl      = src->ttl;
     dst->orig_ttl = src->orig_ttl;
     dst->sec      = src->sec;
+    dst->zone_labels = src->zone_labels;
     dst->count    = src->count;
     dst->sigcount = src->sigcount;
     dst->flags    = src->flags;
@@ -124,6 +126,7 @@ void elpis_rrset_buf_init(elpis_rrset_buf_t *b, const elpis_name_t *name,
     b->ttl      = ttl;
     b->orig_ttl = ttl;
     b->sec      = ELPIS_SEC_UNCHECKED;
+    b->zone_labels = 0;
     b->count    = 0;
     b->sigcount = 0;
     b->flags    = 0;
@@ -195,6 +198,7 @@ int elpis_rcache_get(elpis_cache_t *c, const elpis_name_t *name,
     out->orig_ttl = e->ttl;
     out->ttl      = (elapsed >= e->ttl) ? 0u : (e->ttl - elapsed);
     out->sec      = e->sec;
+    out->zone_labels = e->zone_labels;
     out->count    = e->count;
     out->sigcount = e->sigcount;
     out->flags    = e->flags;
@@ -226,13 +230,13 @@ out:
 /* Store                                                               */
 /* ------------------------------------------------------------------ */
 
-int elpis_rcache_put(elpis_cache_t *c, const elpis_name_t *name,
-                     uint16_t type, uint16_t klass, uint32_t ttl,
-                     elpis_sec_t sec, uint8_t flags,
-                     const uint8_t *const *rd, const uint16_t *rdlen,
-                     unsigned count,
-                     const uint8_t *const *sig, const uint16_t *siglen,
-                     unsigned sigcount, uint32_t max_stale, int pinned)
+static int rcache_put(elpis_cache_t *c, const elpis_name_t *name,
+                      uint16_t type, uint16_t klass, uint32_t ttl,
+                      elpis_sec_t sec, uint8_t flags, uint8_t zone_labels,
+                      const uint8_t *const *rd, const uint16_t *rdlen,
+                      unsigned count,
+                      const uint8_t *const *sig, const uint16_t *siglen,
+                      unsigned sigcount, uint32_t max_stale, int pinned)
 {
     rkey_t k;
     rent_t *e;
@@ -279,6 +283,7 @@ int elpis_rcache_put(elpis_cache_t *c, const elpis_name_t *name,
     e->count    = (uint8_t)count;
     e->sigcount = (uint8_t)sigcount;
     e->flags    = flags;
+    e->zone_labels = zone_labels;
     e->stored   = elpis_cached_now_s();
     e->ttl      = ttl;
     e->datalen  = (uint32_t)datalen;
@@ -302,6 +307,18 @@ int elpis_rcache_put(elpis_cache_t *c, const elpis_name_t *name,
     return elpis_cache_insert(c, e, &k);
 }
 
+int elpis_rcache_put(elpis_cache_t *c, const elpis_name_t *name,
+                     uint16_t type, uint16_t klass, uint32_t ttl,
+                     elpis_sec_t sec, uint8_t flags,
+                     const uint8_t *const *rd, const uint16_t *rdlen,
+                     unsigned count,
+                     const uint8_t *const *sig, const uint16_t *siglen,
+                     unsigned sigcount, uint32_t max_stale, int pinned)
+{
+    return rcache_put(c, name, type, klass, ttl, sec, flags, 0, rd, rdlen,
+                      count, sig, siglen, sigcount, max_stale, pinned);
+}
+
 int elpis_rcache_put_buf(elpis_cache_t *c, const elpis_rrset_buf_t *b,
                          uint32_t max_stale, int pinned)
 {
@@ -319,10 +336,10 @@ int elpis_rcache_put_buf(elpis_cache_t *c, const elpis_rrset_buf_t *b,
         sg[i] = b->data + b->off[b->count + i];
         sl[i] = b->len[b->count + i];
     }
-    return elpis_rcache_put(c, &b->name, b->type, b->klass, b->ttl,
-                            (elpis_sec_t)b->sec, b->flags,
-                            rd, rl, b->count, sg, sl, b->sigcount,
-                            max_stale, pinned);
+    return rcache_put(c, &b->name, b->type, b->klass, b->ttl,
+                      (elpis_sec_t)b->sec, b->flags, b->zone_labels,
+                      rd, rl, b->count, sg, sl, b->sigcount,
+                      max_stale, pinned);
 }
 
 int elpis_rcache_del(elpis_cache_t *c, const elpis_name_t *name,

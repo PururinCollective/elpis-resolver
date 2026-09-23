@@ -1163,6 +1163,7 @@ static int build_set(elpis_task_t *t, unsigned i, elpis_rrset_buf_t *set)
     if (elpis_trr_get_name(&t->ans, i, &owner) != ELPIS_OK)
         return 0;
     elpis_rrset_buf_init(set, &owner, rr->type, rr->klass, rr->ttl);
+    set->zone_labels = rr->zone_labels;     /* kept through the write-back */
 
     /*
      * Two passes: all the data, then all the signatures.  The buffer stores

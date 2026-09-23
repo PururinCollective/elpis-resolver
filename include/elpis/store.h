@@ -115,6 +115,12 @@ typedef struct {
     uint8_t      count;        /* data records                     */
     uint8_t      sigcount;     /* RRSIGs following the data        */
     uint8_t      flags;
+    /*
+     * Labels of the zone that served this RRset, or 0 when unknown -- the
+     * same stamp elpis_trr_t carries, kept here so a cached RRset can be
+     * judged as fairly as the copy that came off the wire.
+     */
+    uint8_t      zone_labels;
     uint16_t     len[ELPIS_RRSET_MAX_RR];
     uint32_t     off[ELPIS_RRSET_MAX_RR];
     uint32_t     used;
