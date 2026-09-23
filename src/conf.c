@@ -271,7 +271,20 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         return want_u32(&p, key, val, &c->threads);
     }
     if (KEY("tcp-max-connections")) return want_u32(&p, key, val, &c->tcp_max_conn);
-    if (KEY("tcp-idle-timeout"))    return want_dur(&p, key, val, &c->tcp_idle_ms);
+    if (KEY("tcp-idle-timeout")) {
+        /*
+         * Durations parse to seconds; this one is kept in milliseconds.  It
+         * was stored as parsed, so the shipped "10s" made a ten-millisecond
+         * idle timeout: every TCP query not answered from the cache lost its
+         * connection before the answer was ready, and the client waited in
+         * vain.  Answers from the cache take microseconds, which is why TCP
+         * looked as if it worked.
+         */
+        uint32_t secs;
+        if (want_dur(&p, key, val, &secs) != 0) return ELPIS_ERR;
+        c->tcp_idle_ms = (secs == 0 ? 1u : ELPIS_MIN(secs, 3600u)) * 1000u;
+        return ELPIS_OK;
+    }
 
     /* ---- access control ---- */
     if (KEY("access-control")) {
