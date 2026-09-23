@@ -90,6 +90,11 @@ static const elpis_zoneroute_t *route_lookup(const elpis_conf_t *c,
     return best;
 }
 
+int elpis_route_covers(const elpis_conf_t *c, const elpis_name_t *name)
+{
+    return c->nroute > 0 && route_lookup(c, name) != NULL;
+}
+
 /* Turn a configured route into a delegation the send path can use. */
 static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
 {
@@ -450,8 +455,14 @@ static int cache_try(elpis_task_t *t)
             continue;
         }
 
-        /* A cached NXDOMAIN above this name covers it too (RFC 8020). */
-        if (c->harden_below_nxdomain) {
+        /*
+         * A cached NXDOMAIN above this name covers it too (RFC 8020) -- but
+         * not inside a configured stub-zone or forward-zone.  The public tree
+         * saying "corp." does not exist is exactly why the operator routed
+         * corp. elsewhere; applying it answered NXDOMAIN for the whole zone
+         * from the second query on.
+         */
+        if (c->harden_below_nxdomain && !elpis_route_covers(c, &t->qname)) {
             elpis_name_t up = t->qname;
             unsigned lvl = 0;
             while (up.len > 1 && lvl < 8u) {

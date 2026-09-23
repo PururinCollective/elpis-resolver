@@ -339,6 +339,8 @@ int  elpis_probe_roots(elpis_ctx_t *ctx);
 int  elpis_selfinfo_start(elpis_worker_t *w);
 
 /* ---- helpers shared between the modules ---- */
+/* Is `name` inside a configured stub-zone or forward-zone? */
+int elpis_route_covers(const elpis_conf_t *c, const elpis_name_t *name);
 uint32_t elpis_clamp_ttl(const elpis_conf_t *c, uint32_t ttl);
 uint32_t elpis_clamp_neg_ttl(const elpis_conf_t *c, uint32_t ttl);
 /* The status of an answer so far (`chain`) once `link` is added to it: the

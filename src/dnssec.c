@@ -1048,7 +1048,17 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
     {
         val_fail_t *slot = fail_slot(v, n, type);
 
-        if (val_cached(t, n, type, out)) {
+        /*
+         * A DS lookup that came back NXDOMAIN is cached under the name's
+         * NXDOMAIN marker, not under DS.  Looking only for DS meant it was
+         * never found: the lookup was repeated, and the validation given up
+         * as unfetchable, for an answer that had arrived and said something
+         * definite.
+         */
+        if (val_cached(t, n, type, out) ||
+            (type == ELPIS_T_DS &&
+             val_cached(t, n, ELPIS_T_NXNAME, out) &&
+             (out->flags & ELPIS_RRF_NXDOMAIN))) {
             slot->tries = 0;            /* this one landed; forget its misses */
             v->pending_tries = 0;
             return 1;
@@ -1394,10 +1404,18 @@ static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone)
     elpis_dcache_put(t->w->ctx->dcache, &d, d.ttl, d.pinned);
 }
 
-static int denial_proves_cut(elpis_task_t *t, val_t *v,
-                             const elpis_name_t *name,
-                             const elpis_rrset_buf_t *b,
-                             const elpis_name_t *zone)
+/*
+ * What a denial kept in the RRset cache proves about `name`, once its NSEC or
+ * NSEC3 records have been verified against the keys of the zone above:
+ * PROVES_CUT that it is a delegation with no DS -- the child is unsigned --
+ * and PROVES_NXDOMAIN that it does not exist at all.
+ */
+#define PROVES_CUT      0
+#define PROVES_NXDOMAIN 1
+static int denial_proves(elpis_task_t *t, val_t *v,
+                         const elpis_name_t *name,
+                         const elpis_rrset_buf_t *b,
+                         const elpis_name_t *zone, int what)
 {
     static ELPIS_TLS elpis_rrset_buf_t set;
     static ELPIS_TLS uint8_t pool[8][768];
@@ -1459,6 +1477,14 @@ static int denial_proves_cut(elpis_task_t *t, val_t *v,
         elpis_name_t qn = *name, zn = *zone;
         elpis_name_lower(&qn);
         elpis_name_lower(&zn);
+        if (what == PROVES_NXDOMAIN) {
+            if (any_nsec3 &&
+                elpis_nsec3_proves_nxdomain(proof, nproof, &qn, &zn))
+                return 1;
+            if (any_nsec && elpis_nsec_proves_nxdomain(proof, nproof, &qn))
+                return 1;
+            return 0;
+        }
         if (any_nsec3 &&
             elpis_nsec3_proves_insecure_deleg(proof, nproof, &qn, &zn))
             return 1;
@@ -1913,13 +1939,34 @@ static void val_run(elpis_task_t *t)
                  * unsigned majority of the internet.
                  */
                 if ((scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) &&
-                    denial_proves_cut(t, v, &next, scratch, &v->cur)) {
+                    denial_proves(t, v, &next, scratch, &v->cur, PROVES_CUT)) {
                     /*
                      * A proven unsigned delegation: NS present, no SOA, no DS,
                      * on an NSEC or NSEC3 verified against the keys of the
                      * zone above.  Everything below is insecure; stop here.
                      */
                     note_unsigned_zone(t, &next);
+                    v->cut[v->si] = 1;
+                    v->stage = VS_VERIFY;
+                    continue;
+                }
+                /*
+                 * The signed tree proves this name does not exist, and the
+                 * data being judged came from a stub-zone or forward-zone
+                 * the operator configured: a private namespace -- corp.,
+                 * home.arpa., a lab TLD -- which by that proof is no part of
+                 * the signed tree, and so can only be insecure.  Before
+                 * this, every name under such a zone was SERVFAIL with DNSSEC
+                 * on, which it is by default.
+                 *
+                 * Only for configured zones, and only on a proof verified
+                 * against the parent's keys.  Anywhere else, data for a name
+                 * the signed tree says does not exist is refused as before.
+                 */
+                if ((scratch->flags & ELPIS_RRF_NXDOMAIN) &&
+                    elpis_route_covers(c, &v->signers[v->si]) &&
+                    denial_proves(t, v, &next, scratch, &v->cur,
+                                  PROVES_NXDOMAIN)) {
                     v->cut[v->si] = 1;
                     v->stage = VS_VERIFY;
                     continue;
