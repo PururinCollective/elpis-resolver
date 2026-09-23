@@ -1596,6 +1596,37 @@ static void test_insecure_delegation(void)
 
 /* ================================================================== */
 /*
+ * An answer assembled from a CNAME chain is as secure as its weakest link.
+ * The chain used to take the status of whatever was cached at its end, so an
+ * unsigned zone's CNAME into a signed CDN name went out with AD.
+ */
+static void test_sec_link(void)
+{
+    const elpis_sec_t U = ELPIS_SEC_UNCHECKED, I = ELPIS_SEC_INDETERMINATE,
+                      N = ELPIS_SEC_INSECURE, S = ELPIS_SEC_SECURE,
+                      B = ELPIS_SEC_BOGUS;
+
+    section("answer status along a CNAME chain");
+
+    CHECK(elpis_sec_link(S, S) == S, "secure all the way is secure");
+    CHECK(elpis_sec_link(N, S) == N,
+          "an unsigned CNAME to a signed name is insecure, not secure");
+    CHECK(elpis_sec_link(S, N) == N, "and the other way round");
+    CHECK(elpis_sec_link(elpis_sec_link(N, N), S) == N,
+          "two unsigned links and a signed end are still insecure");
+    CHECK(elpis_sec_link(I, S) == I && elpis_sec_link(S, I) == I,
+          "an undecided link leaves the answer undecided");
+    CHECK(elpis_sec_link(U, S) == U,
+          "a CNAME nobody checked is not vouched for by its target");
+    CHECK(elpis_sec_link(S, U) == U && elpis_sec_link(N, U) == U,
+          "an unchecked link makes the answer unchecked, to be validated");
+    CHECK(elpis_sec_link(B, S) == B && elpis_sec_link(S, B) == B &&
+          elpis_sec_link(U, B) == B && elpis_sec_link(B, U) == B,
+          "bogus anywhere is bogus");
+}
+
+/* ================================================================== */
+/*
  * The retry budget has to be per lookup.  A chain walk asks for a zone's DS
  * and then its DNSKEY repeatedly, restarting from the top each time one
  * suspends; a single counter for "the last thing asked for" was reset by the
@@ -1689,6 +1720,7 @@ int main(void)
     test_conf();
     test_licence();
     test_insecure_delegation();
+    test_sec_link();
     test_val_retry_budget();
     test_cookies();
 

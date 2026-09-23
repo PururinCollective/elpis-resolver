@@ -325,6 +325,46 @@ static void add_negative_soa(elpis_task_t *t, const elpis_rrset_buf_t *b)
 }
 
 /*
+ * The status of an answer built from more than one RRset is that of its
+ * weakest link.  A secure A record at the end of a CNAME out of an unsigned
+ * zone is not a secure answer: nothing proves the CNAME, so nothing proves the
+ * client was sent to the right place.
+ *
+ * "Unchecked" is weak in its own way.  It is not a verdict to rank but the
+ * absence of one, so it cannot be outranked either: one unchecked link makes
+ * the whole answer unchecked, and the caller has it validated rather than
+ * letting a secure link further on speak for it.  Bogus trumps everything,
+ * though it should never get this far -- bogus data is taken back out of the
+ * cache when it is found.
+ */
+elpis_sec_t elpis_sec_link(elpis_sec_t chain, elpis_sec_t link)
+{
+    if (chain == ELPIS_SEC_BOGUS || link == ELPIS_SEC_BOGUS)
+        return ELPIS_SEC_BOGUS;
+    if (chain == ELPIS_SEC_UNCHECKED || link == ELPIS_SEC_UNCHECKED)
+        return ELPIS_SEC_UNCHECKED;
+    return link < chain ? link : chain;
+}
+
+/*
+ * Fold one cached RRset's status into the answer being assembled.
+ *
+ * The first RRset simply is the answer's status.  After a restart -- a CNAME
+ * or DNAME followed, from this cache or off the wire -- the chain so far has a
+ * status of its own, and this used to be overwritten by whatever the last link
+ * said.  An unsigned zone's CNAME to a signed CDN name was answered with AD:
+ * distro-gateway-prod.ol.epicgames.com, into cdn.cloudflare.net, and every
+ * Epic Games Launcher name behind it.  And a CNAME that had come off the wire
+ * a moment before, never validated at all, was vouched for by a secure record
+ * that happened to be cached at its target.
+ */
+static void chain_sec(elpis_task_t *t, uint8_t link)
+{
+    t->sec = t->restarts == 0 ? (elpis_sec_t)link
+                              : elpis_sec_link(t->sec, (elpis_sec_t)link);
+}
+
+/*
  * Returns 1 when the caches could answer outright.  CNAME chains are followed
  * here too, so a fully cached chain costs no network traffic at all.
  */
@@ -345,26 +385,36 @@ static int cache_try(elpis_task_t *t)
         if (elpis_rcache_get(w->ctx->rcache, &t->qname, t->qtype, t->qclass,
                              now, c->serve_stale, b) == ELPIS_OK &&
             !(b->flags & ELPIS_RRF_REFERRAL)) {
+            /*
+             * A negative entry is never anything but unchecked -- its proof is
+             * kept for the validator's own use, not replayed into answers --
+             * so after a CNAME this leaves the answer unchecked too, and so
+             * without AD.  It is not sent for revalidation: with no proof in
+             * the answer there is nothing to check but the SOA, and the
+             * validator would only guess at which zone served it.
+             */
             if (b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) {
                 t->rcode = (b->flags & ELPIS_RRF_NXDOMAIN)
                          ? ELPIS_RC_NXDOMAIN : ELPIS_RC_NOERROR;
                 add_negative_soa(t, b);
-                t->sec = (elpis_sec_t)b->sec;
+                chain_sec(t, b->sec);
                 t->from_cache = 1;
                 return 1;
             }
             if (b->count > 0) {
                 add_rrset(t, ELPIS_SEC_ANSWER, b);
                 t->rcode = ELPIS_RC_NOERROR;
-                t->sec = (elpis_sec_t)b->sec;
+                chain_sec(t, b->sec);
                 t->from_cache = 1;
                 /*
                  * RRsets are cached as they arrive, before the chain of trust
                  * has been walked, so their status is "unchecked".  Validate
                  * now; the result is written back so this only happens once
-                 * per RRset rather than once per query.
+                 * per RRset rather than once per query.  After a CNAME it is
+                 * the whole chain that is checked -- the validator walks every
+                 * RRset in the answer -- whichever link was the unchecked one.
                  */
-                if (c->dnssec && b->sec == ELPIS_SEC_UNCHECKED)
+                if (c->dnssec && t->sec == ELPIS_SEC_UNCHECKED)
                     t->revalidate = 1;
                 return 1;
             }
@@ -380,10 +430,7 @@ static int cache_try(elpis_task_t *t)
                                    b->len[0], &target) != ELPIS_OK)
                 return 0;
             add_rrset(t, ELPIS_SEC_ANSWER, b);
-            if (t->sec == ELPIS_SEC_UNCHECKED)
-                t->sec = (elpis_sec_t)b->sec;
-            else if ((elpis_sec_t)b->sec < t->sec)
-                t->sec = (elpis_sec_t)b->sec;
+            chain_sec(t, b->sec);
             elpis_name_lower(&target);
             if (elpis_name_eq(&target, &t->qname))
                 return 0;                  /* self-referential CNAME */
@@ -409,7 +456,7 @@ static int cache_try(elpis_task_t *t)
                     (b->flags & ELPIS_RRF_NXDOMAIN)) {
                     t->rcode = ELPIS_RC_NXDOMAIN;
                     add_negative_soa(t, b);
-                    t->sec = (elpis_sec_t)b->sec;
+                    chain_sec(t, b->sec);
                     t->from_cache = 1;
                     return 1;
                 }

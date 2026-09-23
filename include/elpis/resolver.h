@@ -340,5 +340,8 @@ int  elpis_selfinfo_start(elpis_worker_t *w);
 /* ---- helpers shared between the modules ---- */
 uint32_t elpis_clamp_ttl(const elpis_conf_t *c, uint32_t ttl);
 uint32_t elpis_clamp_neg_ttl(const elpis_conf_t *c, uint32_t ttl);
+/* The status of an answer so far (`chain`) once `link` is added to it: the
+ * weakest of the two, where unchecked outranks nothing and bogus everything. */
+elpis_sec_t elpis_sec_link(elpis_sec_t chain, elpis_sec_t link);
 
 #endif /* ELPIS_RESOLVER_H */
