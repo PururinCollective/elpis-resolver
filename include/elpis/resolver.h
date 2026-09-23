@@ -64,6 +64,9 @@ struct elpis_outq {
      * cache when it lands or times out, and is then freed.
      */
     unsigned       probe       : 1;
+    /* Timed out, and kept a while longer in case the answer is only late. */
+    unsigned       late        : 1;
+    uint32_t       timeout_ms;
 
     elpis_timer_t  timer;
 
@@ -147,6 +150,7 @@ struct elpis_task {
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;
+    unsigned        rounds;     /* times every server here has been tried */
 
     /* ---- QNAME minimisation (RFC 9156) ---- */
     unsigned        qmin_labels;

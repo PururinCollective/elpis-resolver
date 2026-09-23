@@ -410,6 +410,15 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
         timeout = c->query_timeout_ms * 4u;
     if (timeout > 5000u)
         timeout = 5000u;
+    /*
+     * Past the first round through a delegation, hold each attempt to
+     * query-timeout.  Every timeout doubles the server's estimate, and left
+     * to that a zone whose servers are all down took sixteen seconds to
+     * fail instead of a few.
+     */
+    if (t->rounds > 0 && timeout > c->query_timeout_ms)
+        timeout = c->query_timeout_ms;
+    q->timeout_ms = timeout;
     elpis_timer_add(w->loop, &q->timer, timeout, out_timeout, q);
 
     return q;
@@ -654,25 +663,51 @@ static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
     elpis_outq_t *q = (elpis_outq_t *)tm->data;
     elpis_worker_t *w = q->w;
     elpis_task_t *t = q->task;
+    int others;
 
     if (t == NULL && !q->probe)
         return;
+    if (q->late) {                      /* it really was not coming */
+        elpis_out_free(w, q);
+        return;
+    }
 
     elpis_infra_timeout(w->ctx->infra, &q->server);
     elpis_stat_inc(&w->stats.timeouts, 1);
+
+    others = (t != NULL && out_unhook(t, q) != NULL);
+
+    /*
+     * Keep listening for one more timeout's worth.  A server slower than its
+     * timer -- one never measured is given 376 ms, and intel.com's answered
+     * this host in 250 to 410 when it answered at all -- used to have its
+     * reply thrown away as unmatched, so it was never measured and every
+     * lookup timed out on it again.  Kept as a probe, the late answer is
+     * measured, and the next query waits for it properly.  TCP is closed as
+     * before: a connection with nobody reading it would only wake the loop.
+     */
+    if (!q->over_tcp) {
+        out_to_probe(q);
+        q->late = 1;
+        elpis_timer_add(w->loop, &q->timer,
+                        q->timeout_ms > 2000u ? 2000u : q->timeout_ms,
+                        out_timeout, q);
+    }
 
     /*
      * A silent probe, or one of two racing queries while the other is still
      * out: the server is marked, and nothing else changes.  Moving on to the
      * next server is for when nobody is left to answer.
      */
-    if (t == NULL || out_unhook(t, q) != NULL) {
+    if (t == NULL || others) {
         elpis_tm_timeout(&w->tm, &q->server);
-        elpis_out_free(w, q);
+        if (q->over_tcp)
+            elpis_out_free(w, q);
         return;
     }
     elpis_resolver_on_timeout(t, q);
-    elpis_out_free(w, q);
+    if (q->over_tcp)
+        elpis_out_free(w, q);
     (void)lp;
 }
 

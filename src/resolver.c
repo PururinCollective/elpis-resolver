@@ -608,6 +608,16 @@ static int send_query(elpis_task_t *t, const elpis_addr_t *server,
     if (n > 0 && elpis_out_race(t, &cand[0]) == ELPIS_OK) {
         mark_tried(t, &cand[0]);
         i = 1;
+    } else if (sinf->timeouts > 0) {
+        /*
+         * Nothing new to try, and the best of what is known has just let us
+         * down.  Ask the next best as well rather than wait out a second
+         * timeout to find out it was needed.
+         */
+        elpis_addr_t alt;
+        elpis_infra_info_t ainf;
+        if (choose_server(t, &alt, &ainf) && elpis_out_race(t, &alt) == ELPIS_OK)
+            mark_tried(t, &alt);
     }
     if (known && sinf->srtt >= SWEEP_ABOVE_MS)
         for (; i < n && i <= SWEEP_MAX; i++)
@@ -954,6 +964,7 @@ static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
     t->deleg = nd;
     t->have_deleg = 1;
     t->ntried = 0;
+    t->rounds = 0;
     *newzone = nd.zone;
     return 1;
 }
@@ -1426,6 +1437,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
             t->qmin_labels++;
         }
         t->ntried = 0;
+        t->rounds = 0;
         t->state = ELPIS_TS_SEND;
         elpis_task_step(t);
         return;
@@ -1530,6 +1542,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
         t->qname       = newname;
         t->have_deleg  = 0;
         t->ntried      = 0;
+        t->rounds      = 0;
         t->referrals   = 0;
         t->qmin_active = w->ctx->conf.qname_minimisation ? 1u : 0u;
         t->qmin_labels = 0;
@@ -1593,6 +1606,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
         t->qname = target;
         t->have_deleg = 0;
         t->ntried = 0;
+        t->rounds = 0;
         t->referrals = 0;
         t->qmin_active = w->ctx->conf.qname_minimisation ? 1u : 0u;
         t->qmin_labels = 0;
@@ -1753,6 +1767,7 @@ void elpis_task_step(elpis_task_t *t)
                     t->deleg_from_route = 1;
                     t->have_deleg = 1;
                     t->ntried = 0;
+                    t->rounds = 0;
                     t->qmin_active = 0;   /* never minimise to a forwarder */
                     t->qmin_labels = t->deleg.zone.labels;
                     t->state = ELPIS_TS_SEND;
@@ -1767,6 +1782,7 @@ void elpis_task_step(elpis_task_t *t)
             t->deleg_from_route = 0;
             t->have_deleg = 1;
             t->ntried = 0;
+            t->rounds = 0;
             /*
              * Start minimising from the delegation we already have rather
              * than from the root: with a warm TLD cache that usually means a
@@ -1797,6 +1813,21 @@ void elpis_task_step(elpis_task_t *t)
             if (!choose_server(t, &server, &sinf)) {
                 if (choose_nameless(t) != NULL) {
                     t->state = ELPIS_TS_NSADDR;
+                    continue;
+                }
+                /*
+                 * Every address has been asked once and none gave a usable
+                 * answer.  That used to be the end: SERVFAIL about a second
+                 * in, with most of query-total-timeout unspent, and
+                 * max-retries read from the config and never used.  A zone
+                 * whose servers drop most queries -- intel.com's, from here,
+                 * for a while -- failed more often than not.  Go round again;
+                 * every timeout has doubled that server's estimate, so each
+                 * round waits longer than the last, up to query-timeout.
+                 */
+                if (t->ntried > 0 && t->rounds < c->max_retries) {
+                    t->rounds++;
+                    t->ntried = 0;
                     continue;
                 }
                 elpis_task_fail(t, ELPIS_RC_SERVFAIL, ELPIS_EDE_NO_REACHABLE_AUTH);
