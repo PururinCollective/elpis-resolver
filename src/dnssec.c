@@ -1448,15 +1448,38 @@ static int denial_proves_cut(elpis_task_t *t, val_t *v,
     return 0;
 }
 
-/* Is this zone already known to be unsigned? */
-static int zone_known_unsigned(elpis_task_t *t, const elpis_name_t *zone)
+/*
+ * Is this name at or below a delegation already proven unsigned?
+ *
+ * Everything under an unsigned cut is insecure, however deep, so the proof
+ * only has to be found once per zone.  Asking about the name itself -- as this
+ * used to -- found it only for a record at the zone apex: a lookup of
+ * test-4f2a.null-addr.com missed, walked from the root, and verified com's
+ * NSEC3 proof that null-addr.com has no DS all over again.  That is two P-256
+ * signatures, five milliseconds, on every new name under every unsigned zone
+ * in com and net -- which is most of the web.
+ *
+ * Only names below the closest trust anchor count: a zone configured as an
+ * anchor of its own is secure whatever its parent says.  ELPIS_DS_ABSENT is
+ * set in one place, note_unsigned_zone(), and only on a denial verified
+ * against the parent's keys.
+ */
+static int below_unsigned_cut(elpis_task_t *t, const elpis_name_t *name)
 {
-    elpis_deleg_t d;
+    const elpis_name_t *anchor = elpis_ta_closest(t->w->ctx->ta, name);
+    elpis_name_t cur = *name;
+    uint32_t now = elpis_cached_now_s();
 
-    if (elpis_dcache_get(t->w->ctx->dcache, zone, elpis_cached_now_s(),
-                         &d) != ELPIS_OK)
+    if (anchor == NULL)
         return 0;
-    return d.ds_state == ELPIS_DS_ABSENT;
+    while (cur.labels > anchor->labels) {
+        if (elpis_dcache_ds_state(t->w->ctx->dcache, &cur, now) ==
+            ELPIS_DS_ABSENT)
+            return 1;
+        if (elpis_name_parent(&cur, &cur) != 0)
+            break;
+    }
+    return 0;
 }
 
 /*
@@ -1493,10 +1516,18 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
          * If the zone is already known to have no DS there is nothing to
          * prove: it is insecure, and so is this RRset.  Settling it here saves
          * an entire chain walk from the trust anchor, which is what made
-         * unsigned answers the most expensive kind to validate.
+         * unsigned answers the most expensive kind to validate.  The verdict
+         * is written back as classify_unsigned_for_current() does, so a later
+         * hit on the RRset cache does not come back here.
          */
-        if (zone_known_unsigned(t, &zone)) {
+        if (below_unsigned_cut(t, &zone)) {
+            elpis_rrset_buf_t *set = t->w->rrbuf;
             v->status[i] = SS_INSECURE;
+            if (build_set(t, i, set)) {
+                set->sec = (uint8_t)ELPIS_SEC_INSECURE;
+                elpis_rcache_put_buf(t->w->ctx->rcache, set,
+                                     t->w->ctx->conf.serve_stale, 0);
+            }
             continue;
         }
 
@@ -1636,6 +1667,21 @@ static void mark_insecure_for_current(elpis_task_t *t, val_t *v)
     }
 }
 
+/* At least one RRset needs a verdict, and every one of them has it. */
+static int all_settled(elpis_task_t *t, val_t *v)
+{
+    unsigned i, n = 0;
+
+    for (i = 0; i < t->ans.n && i < VAL_MAX_SETS; i++) {
+        if (!set_must_be_signed(t, &t->ans.rr[i]) || !set_leader(t, i))
+            continue;
+        if (v->status[i] == SS_UNKNOWN)
+            return 0;
+        n++;
+    }
+    return n > 0;
+}
+
 static void tally(elpis_task_t *t, val_t *v)
 {
     unsigned i;
@@ -1722,6 +1768,16 @@ static void val_run(elpis_task_t *t)
 
             collect_signers(t, v);
             collect_unsigned_zones(t, v);
+            /*
+             * Every RRset already has its verdict -- in practice, an unsigned
+             * answer from a zone proven unsigned earlier.  The fallback walk
+             * below would only re-derive what below_unsigned_cut() just
+             * found, public-key work included.
+             */
+            if (v->nsigners == 0 && all_settled(t, v)) {
+                v->stage = VS_TALLY;
+                continue;
+            }
             if (v->nsigners == 0) {
                 /*
                  * Nothing is signed.  Decide between "the zone is unsigned"
@@ -1759,7 +1815,24 @@ static void val_run(elpis_task_t *t)
                 val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
                 return;
             }
-            rc = elpis_dnskey_validate_ta(c, w->ctx->ta, &v->keys, now, &ede);
+            /*
+             * Checked against the anchor once per copy of the key set, not
+             * once per validation: the descent below already records its DS
+             * and DNSKEY verdicts this way, and the anchor's own keys were
+             * the one link still re-verified every time.  The stamp can only
+             * come from here -- records are cached unchecked.
+             */
+            if (v->keys.sec == (uint8_t)ELPIS_SEC_SECURE) {
+                rc = ELPIS_OK;
+            } else {
+                rc = elpis_dnskey_validate_ta(c, w->ctx->ta, &v->keys, now,
+                                              &ede);
+                if (rc == ELPIS_OK) {
+                    v->keys.sec = (uint8_t)ELPIS_SEC_SECURE;
+                    elpis_rcache_put_buf(w->ctx->rcache, &v->keys,
+                                         c->serve_stale, 0);
+                }
+            }
             if (rc == ELPIS_ENOTFOUND) {
                 mark_insecure_for_current(t, v);
                 v->stage = VS_VERIFY;

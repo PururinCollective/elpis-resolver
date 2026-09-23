@@ -1551,6 +1551,47 @@ static void test_insecure_delegation(void)
     CHECK(elpis_nsec_proves_insecure_deleg(&rr, 1, &q) == 0,
           "an NSEC for a different name proves nothing about this one");
 #undef MKNSEC
+
+    /*
+     * Once proven, the verdict is looked up for every unsigned answer below
+     * the cut -- a new name each time -- so the lookup has to find it by zone
+     * and stop finding it when the delegation expires.
+     */
+    {
+        elpis_cache_t *dc = elpis_dcache_new(1024 * 1024, 2);
+        elpis_deleg_t *d = (elpis_deleg_t *)elpis_calloc(1, sizeof *d);
+        elpis_name_t ns, up;
+        const uint8_t ip[4] = { 192, 0, 2, 53 };
+        uint32_t now = elpis_cached_now_s();
+
+        CHECK(dc != NULL && d != NULL, "delegation cache created");
+        if (dc == NULL || d == NULL) {
+            elpis_free(d);
+            elpis_cache_free(dc);
+            return;
+        }
+        elpis_name_from_text(&d->zone, "null-addr.example.");
+        elpis_name_from_text(&ns, "ns.example.net.");
+        elpis_deleg_add_addr(d, &ns, ip, AF_INET, ELPIS_NSF_GLUE);
+
+        CHECK(elpis_dcache_ds_state(dc, &d->zone, now) == -1,
+              "no DS state for a zone that is not cached");
+        d->ds_state = ELPIS_DS_ABSENT;
+        elpis_dcache_put(dc, d, 300, 0);
+        CHECK(elpis_dcache_ds_state(dc, &d->zone, now) == ELPIS_DS_ABSENT,
+              "a proven-unsigned cut reads back as absent");
+        elpis_name_from_text(&up, "NULL-ADDR.Example.");
+        CHECK(elpis_dcache_ds_state(dc, &up, now) == ELPIS_DS_ABSENT,
+              "whatever the case of the name asked about");
+        CHECK(elpis_dcache_ds_state(dc, &d->zone, now + 300) == -1,
+              "and not once the delegation has expired");
+        elpis_name_from_text(&up, "test-4f2a.null-addr.example.");
+        CHECK(elpis_dcache_ds_state(dc, &up, now) == -1,
+              "a name below the cut is not a cut itself");
+
+        elpis_free(d);
+        elpis_cache_free(dc);
+    }
 }
 
 /* ================================================================== */

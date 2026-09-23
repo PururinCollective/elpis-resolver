@@ -62,6 +62,13 @@ int  elpis_dcache_get(elpis_cache_t *c, const elpis_name_t *zone,
                       uint32_t now, elpis_deleg_t *out);
 int  elpis_dcache_put(elpis_cache_t *c, const elpis_deleg_t *d,
                       uint32_t ttl, int pinned);
+/*
+ * Just the DS state of a cached zone cut, or -1 when there is none.  The
+ * validator asks this once per label of every unsigned answer, and a full
+ * elpis_dcache_get() unpacks every nameserver to answer it.
+ */
+int  elpis_dcache_ds_state(elpis_cache_t *c, const elpis_name_t *zone,
+                           uint32_t now);
 
 /*
  * Deepest cached delegation at or above `name`.  This is the hot path for

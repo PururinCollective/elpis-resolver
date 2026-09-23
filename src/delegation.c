@@ -288,6 +288,24 @@ out:
     return rc;
 }
 
+int elpis_dcache_ds_state(elpis_cache_t *c, const elpis_name_t *zone,
+                          uint32_t now)
+{
+    dkey_t k;
+    unsigned shard;
+    dent_t *e;
+    int rc = -1;
+
+    dkey_init(&k, zone);
+    e = (dent_t *)elpis_cache_read_begin(c, k.hash, &k, &shard);
+    if (e == NULL)
+        return -1;
+    if (e->hdr.pinned || now - e->stored < e->ttl)
+        rc = e->ds_state;
+    elpis_cache_read_end(c, shard);
+    return rc;
+}
+
 int elpis_dcache_closest(elpis_cache_t *c, const elpis_name_t *name,
                          uint32_t now, elpis_deleg_t *out)
 {
