@@ -190,7 +190,8 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
         return 0;
 
     if (inf->edns_state != ELPIS_EDNS_NO) {
-        uint16_t bufsize = c->edns_buffer;
+        uint16_t bufsize = elpis_addr_family(&q->server) == AF_INET6
+                               ? c->edns_buffer6 : c->edns_buffer4;
         if (inf->edns_state == ELPIS_EDNS_FALLBACK && inf->edns_max)
             bufsize = inf->edns_max;
         if (q->over_tcp)

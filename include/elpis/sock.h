@@ -27,6 +27,14 @@ int elpis_sock_udp_client(int family, const elpis_addr_t *src_hint,
 int elpis_sock_tcp_connect(const elpis_addr_t *dst, const elpis_addr_t *src_hint,
                            int *fd_out);
 
+/*
+ * MTU of the route this host would take to `dst` (leaving from `src` when
+ * given), and the name of the interface it leaves by when that can be found.
+ * Sends nothing.  ELPIS_ERR when there is no route or no MTU to be had.
+ */
+int elpis_sock_route_mtu(const elpis_addr_t *dst, const elpis_addr_t *src,
+                         unsigned *mtu, char *ifname, size_t ifsz);
+
 /* Datagram I/O that carries the local address when the kernel supports it. */
 ssize_t elpis_sock_recv(int fd, void *buf, size_t n,
                         elpis_addr_t *from, elpis_addr_t *to);

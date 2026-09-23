@@ -109,7 +109,16 @@ typedef struct {
     unsigned     n_dns64_ignore;
 
     /* --- resolution ----------------------------------------------- */
+    /*
+     * What authoritative servers are offered, per family, and the one figure
+     * advertised back to clients.  All three are the same number unless
+     * edns-buffer-size is "auto", when each family is sized at startup from
+     * the MTU of the route this host would use (see resolve_edns_auto()).
+     */
     uint16_t     edns_buffer;
+    uint16_t     edns_buffer4;
+    uint16_t     edns_buffer6;
+    uint8_t      edns_auto;
     uint16_t     port_lo, port_hi;
     unsigned     out_sockets;
     uint32_t     query_timeout_ms;

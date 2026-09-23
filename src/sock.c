@@ -16,8 +16,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 
@@ -258,6 +261,119 @@ int elpis_sock_tcp_connect(const elpis_addr_t *dst, const elpis_addr_t *src_hint
         return ELPIS_ERR;
     }
     *fd_out = fd;
+    return ELPIS_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Route MTU                                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Name the interface that owns `local`, and read its MTU when asked to.  The
+ * name is only for the log; the MTU is the fallback where the kernel will not
+ * report a route's MTU directly.
+ */
+static int iface_of(const elpis_addr_t *local, char *name, size_t namesz,
+                    unsigned *mtu)
+{
+    struct ifaddrs *all, *p;
+    int family = elpis_addr_family(local);
+    int found = 0;
+
+    if (getifaddrs(&all) != 0)
+        return 0;
+    for (p = all; p != NULL && !found; p = p->ifa_next) {
+        if (p->ifa_addr == NULL || p->ifa_addr->sa_family != family ||
+            p->ifa_name == NULL)
+            continue;
+        if (family == AF_INET) {
+            struct sockaddr_in a;
+            memcpy(&a, p->ifa_addr, sizeof a);
+            found = memcmp(&a.sin_addr, &local->u.v4.sin_addr,
+                           sizeof a.sin_addr) == 0;
+        } else {
+            struct sockaddr_in6 a;
+            memcpy(&a, p->ifa_addr, sizeof a);
+            found = memcmp(&a.sin6_addr, &local->u.v6.sin6_addr,
+                           sizeof a.sin6_addr) == 0;
+        }
+        if (found && name != NULL && namesz > 0)
+            elpis_strlcpy(name, p->ifa_name, namesz);
+    }
+#if defined(SIOCGIFMTU)
+    if (found && mtu != NULL && name != NULL && name[0] != '\0') {
+        struct ifreq ifr;
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            memset(&ifr, 0, sizeof ifr);
+            elpis_strlcpy(ifr.ifr_name, name, sizeof ifr.ifr_name);
+            if (ioctl(s, SIOCGIFMTU, &ifr) == 0 && ifr.ifr_mtu > 0)
+                *mtu = (unsigned)ifr.ifr_mtu;
+            close(s);
+        }
+    }
+#endif
+    freeifaddrs(all);
+    return found;
+}
+
+int elpis_sock_route_mtu(const elpis_addr_t *dst, const elpis_addr_t *src,
+                         unsigned *mtu, char *ifname, size_t ifsz)
+{
+    int family = elpis_addr_family(dst);
+    int fd;
+    unsigned got = 0;
+    elpis_addr_t local;
+    socklen_t sl = (socklen_t)sizeof local.u.ss;
+
+    *mtu = 0;
+    if (ifname != NULL && ifsz > 0)
+        ifname[0] = '\0';
+
+    fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0)
+        return ELPIS_ERR;
+    elpis_sock_cloexec(fd);
+    if (src != NULL && elpis_addr_family(src) == family) {
+        elpis_addr_t b = *src;
+        if (family == AF_INET)
+            b.u.v4.sin_port = 0;
+        else
+            b.u.v6.sin6_port = 0;
+        (void)bind(fd, &b.u.sa, b.len);
+    }
+    /* No I/O: a UDP connect() only runs the route lookup. */
+    if (connect(fd, &dst->u.sa, dst->len) != 0) {
+        close(fd);
+        return ELPIS_ERR;
+    }
+
+#if defined(__linux__) && defined(IP_MTU) && defined(IPV6_MTU)
+    /*
+     * The route's own MTU, which also knows about a path MTU the kernel has
+     * already learned -- better than the interface figure when they differ.
+     */
+    {
+        int v = 0;
+        socklen_t vl = (socklen_t)sizeof v;
+        int rc = (family == AF_INET)
+                     ? getsockopt(fd, IPPROTO_IP, IP_MTU, &v, &vl)
+                     : getsockopt(fd, IPPROTO_IPV6, IPV6_MTU, &v, &vl);
+        if (rc == 0 && v > 0)
+            got = (unsigned)v;
+    }
+#endif
+
+    memset(&local, 0, sizeof local);
+    if (getsockname(fd, &local.u.sa, &sl) == 0) {
+        local.len = sl;
+        (void)iface_of(&local, ifname, ifsz, got ? NULL : &got);
+    }
+    close(fd);
+
+    if (got == 0)
+        return ELPIS_ERR;
+    *mtu = got;
     return ELPIS_OK;
 }
 

@@ -18,7 +18,22 @@
 #define ELPIS_MAX_UDP_LEGACY   512
 #define ELPIS_MAX_UDP          4096
 #define ELPIS_MAX_MSG          65535
-#define ELPIS_EDNS_DEFAULT     1232    /* RFC 9715 / DNS Flag Day 2020 */
+/*
+ * Two sizes for two paths.  1232 is the largest DNS payload that fits IPv6's
+ * minimum MTU of 1280 on any path at all (DNS Flag Day 2020), which is what
+ * replies to clients are held to: their networks are anyone's guess.  1400 is
+ * the most RFC 9715 recommends, and what is offered to authoritative servers:
+ * it fits a 1500-byte link less PPPoE or a typical tunnel.
+ *
+ * Offering more only helps where the server agrees.  The size of a reply is
+ * the smaller of the two sides' limits, and many authorities cap their own at
+ * 1232 whatever they are offered -- org., info., io., me. and asia. among
+ * them, whose key sets at 1317-1321 bytes are exactly the ones that just miss.
+ * The root's is 1414 and does not fit either way.  What 1400 buys is the
+ * answers between the two figures from servers that allow them.
+ */
+#define ELPIS_EDNS_SAFE        1232
+#define ELPIS_EDNS_DEFAULT     1400
 #define ELPIS_MAX_CNAME_CHAIN  12
 #define ELPIS_MAX_REFERRALS    32
 #define ELPIS_MAX_RESTARTS     16

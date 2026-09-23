@@ -12,6 +12,19 @@ void elpis_edns_init(elpis_edns_t *e, uint16_t bufsize, int do_bit)
     e->ede_code = -1;
 }
 
+uint16_t elpis_edns_for_mtu(unsigned mtu, int family)
+{
+    unsigned hdr = (family == AF_INET6) ? 48u : 28u;   /* IP + UDP */
+    unsigned v;
+
+    if (mtu <= hdr + ELPIS_MAX_UDP_LEGACY)
+        return ELPIS_MAX_UDP_LEGACY;
+    v = mtu - hdr;
+    if (v > ELPIS_EDNS_DEFAULT)
+        v = ELPIS_EDNS_DEFAULT;
+    return (uint16_t)v;
+}
+
 int elpis_edns_write(elpis_bld_t *b, const elpis_edns_t *e, unsigned rcode)
 {
     size_t rdlen_pos;

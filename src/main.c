@@ -8,6 +8,7 @@
 #include "elpis/ctx.h"
 #include "elpis/resolver.h"
 #include "elpis/sock.h"
+#include "elpis/edns.h"
 #include "elpis/crypto.h"
 #include "elpis/dnssec.h"
 #include "elpis/conflict.h"
@@ -31,6 +32,56 @@ elpis_ctx_t *elpis_g;
 /* ================================================================== */
 /* Context                                                             */
 /* ================================================================== */
+
+/*
+ * edns-buffer-size: auto.  Offer each family the largest payload one packet
+ * carries on the route this host would take to the roots, capped at 1400.
+ *
+ * Only the host's own route is visible from here.  A narrower link further
+ * along -- a router's PPPoE uplink, a tunnel on another box -- cannot be seen
+ * until something is too big for it, which is what the cap is for: 1400 fits
+ * a 1500-byte link less PPPoE or a typical tunnel header.  Where the route
+ * cannot be read at all, the family gets the size that fits any path.
+ */
+static void resolve_edns_auto(elpis_conf_t *c)
+{
+    static const struct { int family; const char *name, *dst; } fam[2] = {
+        { AF_INET,  "IPv4", "198.41.0.4@53" },
+        { AF_INET6, "IPv6", "[2001:503:ba3e::2:30]@53" },
+    };
+    char say[2][96];
+    unsigned i, lowest = 0;
+
+    for (i = 0; i < 2; i++) {
+        int v6 = (fam[i].family == AF_INET6);
+        uint16_t *slot = v6 ? &c->edns_buffer6 : &c->edns_buffer4;
+        const elpis_addr_t *src = v6 ? (c->have_src6 ? &c->out_src6[0] : NULL)
+                                     : (c->have_src4 ? &c->out_src4[0] : NULL);
+        elpis_addr_t dst;
+        unsigned mtu = 0;
+        char ifn[64];
+
+        *slot = ELPIS_EDNS_SAFE;
+        if (v6 ? !c->do_ipv6 : !c->do_ipv4) {
+            snprintf(say[i], sizeof say[i], "%s off", fam[i].name);
+            continue;
+        }
+        if (elpis_addr_parse(&dst, fam[i].dst, 53) != 0 ||
+            elpis_sock_route_mtu(&dst, src, &mtu, ifn, sizeof ifn) != ELPIS_OK) {
+            snprintf(say[i], sizeof say[i], "%s %u (no route MTU to read)",
+                     fam[i].name, (unsigned)*slot);
+            continue;
+        }
+        *slot = elpis_edns_for_mtu(mtu, fam[i].family);
+        if (lowest == 0 || *slot < lowest)
+            lowest = *slot;
+        snprintf(say[i], sizeof say[i], "%s %u (MTU %u%s%s)", fam[i].name,
+                 (unsigned)*slot, mtu, ifn[0] ? " on " : "", ifn);
+    }
+    /* What clients are told: one figure, good for whichever family they use. */
+    c->edns_buffer = (uint16_t)(lowest ? lowest : ELPIS_EDNS_SAFE);
+    elpis_info("edns-buffer-size auto: %s, %s", say[0], say[1]);
+}
 
 int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
 {
@@ -114,6 +165,9 @@ int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
             c->dnssec = 0;
         }
     }
+
+    if (c->edns_auto)
+        resolve_edns_auto(c);
 
     elpis_cookie_init();
     elpis_conf_dump(c);

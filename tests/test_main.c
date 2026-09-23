@@ -1166,7 +1166,38 @@ static void test_conf(void)
 
     elpis_conf_defaults(&c);
     CHECK(c.dnssec == 1, "dnssec on by default");
-    CHECK(c.edns_buffer == 1232, "EDNS buffer defaults to 1232");
+    CHECK(c.edns_buffer == 1400 && c.edns_buffer4 == 1400 &&
+          c.edns_buffer6 == 1400 && !c.edns_auto,
+          "servers are offered 1400 by default");
+    CHECK(c.max_udp_size_reply == 1232,
+          "replies to clients stay within 1232 by default");
+
+    elpis_strlcpy(line, "edns-buffer-size: auto", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && c.edns_auto,
+          "edns-buffer-size: auto parses");
+    elpis_strlcpy(line, "edns-buffer-size: 1300", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && !c.edns_auto &&
+          c.edns_buffer == 1300 && c.edns_buffer4 == 1300 &&
+          c.edns_buffer6 == 1300,
+          "a number sets both families and turns auto off");
+    elpis_strlcpy(line, "edns-buffer-size: 100", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.edns_buffer4 == 512, "a number below 512 is raised to 512");
+
+    CHECK(elpis_edns_for_mtu(1500, AF_INET) == 1400 &&
+          elpis_edns_for_mtu(1500, AF_INET6) == 1400,
+          "auto: a 1500-byte route is capped at 1400");
+    CHECK(elpis_edns_for_mtu(1442, AF_INET) == 1400 &&
+          elpis_edns_for_mtu(1442, AF_INET6) == 1394,
+          "auto: PPPoE inside EoIP inside PPPoE, 1442");
+    CHECK(elpis_edns_for_mtu(1420, AF_INET6) == 1372,
+          "auto: a WireGuard route, 1420");
+    CHECK(elpis_edns_for_mtu(1280, AF_INET6) == 1232,
+          "auto: IPv6's minimum MTU gives the Flag Day figure");
+    CHECK(elpis_edns_for_mtu(576, AF_INET) == 548 &&
+          elpis_edns_for_mtu(300, AF_INET) == 512,
+          "auto: never below 512");
+    elpis_conf_defaults(&c);
     CHECK(c.nlisten == 2, "loopback listeners by default");
 
     c.nacl = 0;

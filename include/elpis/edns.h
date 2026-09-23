@@ -24,6 +24,13 @@ typedef struct {
 
 void elpis_edns_init(elpis_edns_t *e, uint16_t bufsize, int do_bit);
 
+/*
+ * The EDNS buffer to offer over a route with this MTU: the largest DNS
+ * payload one packet can carry (the MTU less 28 bytes of IPv4 and UDP header,
+ * or 48 for IPv6), never above ELPIS_EDNS_DEFAULT and never below 512.
+ */
+uint16_t elpis_edns_for_mtu(unsigned mtu, int family);
+
 /* Append the OPT pseudo-record to a message under construction. */
 int  elpis_edns_write(elpis_bld_t *b, const elpis_edns_t *e, unsigned rcode);
 

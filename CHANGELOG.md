@@ -10,6 +10,59 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.13 — 2026-09-24
+
+### Changed
+
+**A server that has never answered is waited for 376 ms, not 1128.** With no
+round trip measured yet, the timer's formula turned the 376 ms starting guess
+into more than a second. Every cold lookup meets servers like that, and on a
+path that loses one packet in twenty, each loss cost the client over a second
+before the next server was tried — two such gaps in a single cold lookup of
+an Epic Games name. The timer now waits the guess itself, as Unbound does, and
+twice that over TCP for the handshake. A server genuinely further away loses
+its first answer and is waited for properly from then on. Which server gets
+picked is unchanged.
+
+**Servers are offered 1400 bytes; clients still get at most 1232.** The two
+limits used to share one default. They are separate now, because they cover
+different paths:
+
+- `edns-buffer-size` is what authoritative servers are offered, over this
+  host's own uplink. 1400 is the most RFC 9715 recommends and fits a
+  1500-byte link less PPPoE or a typical tunnel.
+- `max-udp-reply-size` caps replies to clients, whose networks elpis cannot
+  see. A reply too big for a client's path is not truncated, it is lost, and
+  the client waits a second or more to ask again. It stays at 1232.
+
+Expect little from the first. A reply is held to the smaller of the two sides'
+limits, and many authorities cap their own at 1232 whatever they are offered.
+Of 42 zones surveyed, the root and 41 TLDs, 36 have key sets under 1232
+anyway. The five that just miss — `org`, `info`, `io`, `me`, `asia`, at
+1317–1321 bytes — all cap at 1232 on their side. The root's key set is 1414
+bytes and does not fit either way.
+
+**Existing configs keep their old value.** The shipped `elpis.conf` used to say
+`edns-buffer-size: 1232` explicitly, and a config seeded from it still does.
+Change it to `1400` or `auto` to pick this up.
+
+### Added
+
+**`edns-buffer-size: auto`.** Sizes IPv4 and IPv6 separately at startup, from
+the MTU of the route this host would take to the roots: the MTU less 28 bytes
+of header for IPv4 or 48 for IPv6, never above 1400. It sends nothing, since
+a UDP `connect()` only runs the route lookup, and falls back to 1232 for a
+family whose route MTU cannot be read.
+
+```
+edns-buffer-size auto: IPv4 1400 (MTU 1500 on enp0s3), IPv6 1400 (MTU 1500 on enp0s3)
+```
+
+Use it when the resolver itself sits behind PPPoE or a tunnel: a 1442-byte
+route gives IPv6 1394, a 1420-byte WireGuard route 1372. It can only see this
+host's own route. A narrower link on a router further along is invisible from
+here, so set a number yourself if you know of one.
+
 ## 1.1.12 — 2026-09-23
 
 ### Fixed

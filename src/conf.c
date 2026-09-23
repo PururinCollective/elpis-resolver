@@ -82,6 +82,9 @@ void elpis_conf_defaults(elpis_conf_t *c)
     elpis_prefix_parse(&c->dns64_prefix, "64:ff9b::/96");
 
     c->edns_buffer      = ELPIS_EDNS_DEFAULT;
+    c->edns_buffer4     = ELPIS_EDNS_DEFAULT;
+    c->edns_buffer6     = ELPIS_EDNS_DEFAULT;
+    c->edns_auto        = 0;
     c->port_lo          = 1024;
     c->port_hi          = 65535;
     c->out_sockets      = 32;
@@ -107,7 +110,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
 
     c->client_qps       = 0;
     c->nxdomain_qps     = 0;
-    c->max_udp_size_reply = ELPIS_EDNS_DEFAULT;
+    c->max_udp_size_reply = ELPIS_EDNS_SAFE;
 
     c->block_private_reverse = 1;
     c->refuse_any            = 1;
@@ -408,8 +411,15 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     /* ---- resolution ---- */
     if (KEY("edns-buffer-size")) {
         uint32_t v;
+        if (!elpis_strcasecmp_ascii(val, "auto")) {
+            c->edns_auto = 1;        /* sized per family at startup */
+            return ELPIS_OK;
+        }
         if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
-        c->edns_buffer = (uint16_t)ELPIS_CLAMP(v, 512u, 4096u);
+        c->edns_auto    = 0;
+        c->edns_buffer  = (uint16_t)ELPIS_CLAMP(v, 512u, 4096u);
+        c->edns_buffer4 = c->edns_buffer;
+        c->edns_buffer6 = c->edns_buffer;
         return ELPIS_OK;
     }
     if (KEY("outgoing-port-range")) {
@@ -707,6 +717,13 @@ void elpis_conf_dump(const elpis_conf_t *c)
     elpis_info("  dnssec=%d qname-min=%d cookies=%d 0x20=%d dns64=%d",
                (int)c->dnssec, (int)c->qname_minimisation, (int)c->use_cookies,
                (int)c->use_0x20, (int)c->dns64);
+    if (c->edns_auto)
+        elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "
+                   "max-udp-reply-size=%u", (unsigned)c->edns_buffer4,
+                   (unsigned)c->edns_buffer6, (unsigned)c->max_udp_size_reply);
+    else
+        elpis_info("  edns-buffer-size=%u max-udp-reply-size=%u",
+                   (unsigned)c->edns_buffer, (unsigned)c->max_udp_size_reply);
     for (i = 0; i < c->nroute; i++) {
         char list[256];
         unsigned j;
