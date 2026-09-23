@@ -448,7 +448,8 @@ static void mark_tried(elpis_task_t *t, const elpis_addr_t *a)
  * machine instead of spreading.
  */
 #define UNKNOWN_JITTER_MS 64u
-static int choose_server(elpis_task_t *t, elpis_addr_t *out)
+static int choose_server(elpis_task_t *t, elpis_addr_t *out,
+                         elpis_infra_info_t *out_inf)
 {
     elpis_worker_t *w = t->w;
     const elpis_conf_t *c = &w->ctx->conf;
@@ -456,8 +457,10 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
     int found = 0;
     unsigned i, j;
     elpis_addr_t best;
+    elpis_infra_info_t best_inf;
 
     memset(&best, 0, sizeof best);
+    memset(&best_inf, 0, sizeof best_inf);
 
     for (i = 0; i < t->deleg.nns; i++) {
         const elpis_nsrec_t *r = &t->deleg.ns[i];
@@ -477,7 +480,9 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (!c->prefer_ipv6)
                 cost += 20;      /* mild bias: v4 paths are still more reliable */
-            if (cost < best_cost) { best_cost = cost; best = a; found = 1; }
+            if (cost < best_cost) {
+                best_cost = cost; best = a; best_inf = inf; found = 1;
+            }
         }
         for (j = 0; j < r->n4 && c->do_ipv4; j++) {
             elpis_addr_t a;
@@ -492,7 +497,9 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (c->prefer_ipv6)
                 cost += 20;
-            if (cost < best_cost) { best_cost = cost; best = a; found = 1; }
+            if (cost < best_cost) {
+                best_cost = cost; best = a; best_inf = inf; found = 1;
+            }
         }
     }
 
@@ -503,7 +510,107 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out)
      * anyway rather than give up: a ban is a heuristic, not a fact.
      */
     *out = best;
+    *out_inf = best_inf;
     return 1;
+}
+
+/*
+ * A second server to ask the same question of, at the same time.
+ *
+ * choose_server() can only rank what it has measured, and a server it has
+ * never used is ranked on a 376 ms guess -- so a zone whose one measured
+ * server is slow keeps using it, and the others are never tried.  com and net
+ * showed it plainly: k.gtld-servers.net at 158 ms took every query while
+ * b.gtld-servers.net answered this host over IPv6 in 11, unasked.  Every cold
+ * name under com paid the difference at least once, twice with DNSSEC.
+ *
+ * So when the best known server is not fast, the same question also goes to
+ * one never-measured address in the delegation, chosen at random.  Whichever
+ * answers first is used; the other is measured anyway.  Nothing waits on the
+ * unknown server, so exploring costs this query nothing.
+ *
+ * One at a time is slow to cover a delegation the size of com's -- 26
+ * addresses, and the fast one is found after a dozen queries on average.  So
+ * while nothing fast is known at all, a few more are probed as well: asked
+ * the same question purely to be measured.  com converges in three queries.
+ *
+ * Both are bounded by the addresses themselves.  Once each is measured -- or
+ * has timed out, which counts -- there is nothing left to try until its infra
+ * entry expires an hour after last use.  Forwarders and stub zones are left
+ * alone: they are configuration, listed in the order the operator meant.
+ * TLD warming is left alone too; nobody is waiting on it.
+ */
+#define RACE_ABOVE_MS  10u
+#define SWEEP_ABOVE_MS 40u
+#define SWEEP_MAX       8u
+#define EXPLORE_MAX    (ELPIS_DELEG_MAX_NS * (ELPIS_NS_MAX_A4 + ELPIS_NS_MAX_A6))
+
+/* Untried, never-measured addresses in the delegation, in random order. */
+static unsigned unmeasured(elpis_task_t *t, elpis_addr_t *out, unsigned max)
+{
+    elpis_worker_t *w = t->w;
+    const elpis_conf_t *c = &w->ctx->conf;
+    unsigned i, j, n = 0;
+
+    for (i = 0; i < t->deleg.nns; i++) {
+        const elpis_nsrec_t *r = &t->deleg.ns[i];
+        if (r->flags & ELPIS_NSF_LAME)
+            continue;
+        for (j = 0; j < (unsigned)r->n4 + r->n6 && n < max; j++) {
+            elpis_addr_t a;
+            elpis_infra_info_t inf;
+            unsigned k;
+
+            if (j < r->n4) {
+                if (!c->do_ipv4)
+                    continue;
+                elpis_addr_from4(&a, r->a4[j], r->port ? r->port : 53);
+            } else {
+                if (!c->do_ipv6)
+                    continue;
+                elpis_addr_from6(&a, r->a6[j - r->n4], r->port ? r->port : 53);
+            }
+            if (already_tried(t, &a))
+                continue;
+            elpis_infra_get(w->ctx->infra, &a, &inf);
+            if (inf.queries != 0 ||
+                (inf.flags & (ELPIS_INF_LAME | ELPIS_INF_TCP_ONLY)))
+                continue;
+            /* Inside-out Fisher-Yates: a uniform shuffle as it fills. */
+            k = elpis_random_below(n + 1u);
+            if (k != n)
+                out[n] = out[k];
+            out[k] = a;
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Put the question on the wire: to `server`, and to whoever explores. */
+static int send_query(elpis_task_t *t, const elpis_addr_t *server,
+                      const elpis_infra_info_t *sinf)
+{
+    elpis_addr_t cand[EXPLORE_MAX];
+    unsigned n, i = 0;
+    int known = sinf->queries != 0 && sinf->timeouts == 0;
+
+    if (elpis_out_send(t, server, 0) != ELPIS_OK)
+        return ELPIS_ERR;
+    if (t->forwarding || t->deleg_from_route || t->warming)
+        return ELPIS_OK;
+    if (known && sinf->srtt < RACE_ABOVE_MS)
+        return ELPIS_OK;
+
+    n = unmeasured(t, cand, EXPLORE_MAX);
+    if (n > 0 && elpis_out_race(t, &cand[0]) == ELPIS_OK) {
+        mark_tried(t, &cand[0]);
+        i = 1;
+    }
+    if (known && sinf->srtt >= SWEEP_ABOVE_MS)
+        for (; i < n && i <= SWEEP_MAX; i++)
+            (void)elpis_out_probe(t, &cand[i]);
+    return ELPIS_OK;
 }
 
 /* Pick a nameserver with no known address, for a child lookup. */
@@ -1503,6 +1610,7 @@ void elpis_task_step(elpis_task_t *t)
 
         case ELPIS_TS_SEND: {
             elpis_addr_t server;
+            elpis_infra_info_t sinf;
             elpis_name_t probe;
 
             if (elpis_cached_now_ms() - t->start_ms > c->query_total_ms) {
@@ -1513,7 +1621,7 @@ void elpis_task_step(elpis_task_t *t)
                 t->state = ELPIS_TS_DELEG;
                 continue;
             }
-            if (!choose_server(t, &server)) {
+            if (!choose_server(t, &server, &sinf)) {
                 if (choose_nameless(t) != NULL) {
                     t->state = ELPIS_TS_NSADDR;
                     continue;
@@ -1539,7 +1647,7 @@ void elpis_task_step(elpis_task_t *t)
                     t->qtype = ELPIS_T_A;
                     t->qmin_probe = 1;
                     t->sends++;
-                    if (elpis_out_send(t, &server, 0) != ELPIS_OK) {
+                    if (send_query(t, &server, &sinf) != ELPIS_OK) {
                         t->qname = real;
                         t->qtype = realtype;
                         t->qmin_probe = 0;
@@ -1554,7 +1662,7 @@ void elpis_task_step(elpis_task_t *t)
             }
 
             t->sends++;
-            if (elpis_out_send(t, &server, 0) != ELPIS_OK)
+            if (send_query(t, &server, &sinf) != ELPIS_OK)
                 continue;               /* try the next server */
             t->state = ELPIS_TS_WAIT;
             return;

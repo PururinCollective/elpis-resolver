@@ -29,6 +29,13 @@ typedef struct {
      * take, in a way that counting SIMD helpers over forty-byte names is not.
      */
     uint64_t dnssec_verifies;
+    /*
+     * Queries sent only to measure a server we have never used: raced beside
+     * the real one, or probing the rest of a slow delegation.  Bounded by the
+     * number of such servers, so a rate that stays high means addresses keep
+     * expiring out of the infra cache.
+     */
+    uint64_t races;
 } elpis_stats_t;
 
 /*

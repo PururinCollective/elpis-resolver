@@ -266,11 +266,42 @@ void elpis_out_free(elpis_worker_t *w, elpis_outq_t *q)
     elpis_free(q->rxbuf);
     if (q->task != NULL && q->task->out == q)
         q->task->out = NULL;
+    if (q->task != NULL && q->task->race == q)
+        q->task->race = NULL;
     elpis_free(q);
+}
+
+/*
+ * Take q off its task.  Whatever else the task still has out becomes its one
+ * outstanding query, and is returned.
+ */
+static elpis_outq_t *out_unhook(elpis_task_t *t, elpis_outq_t *q)
+{
+    elpis_outq_t *other = NULL;
+
+    if (t->out == q)
+        other = t->race;
+    else if (t->race == q)
+        other = t->out;
+    t->out  = other;
+    t->race = NULL;
+    q->task = NULL;
+    return other;
+}
+
+/* Nobody wants the answer now, but its round trip is still worth measuring. */
+static void out_to_probe(elpis_outq_t *q)
+{
+    q->task  = NULL;
+    q->probe = 1;
 }
 
 void elpis_out_cancel(elpis_task_t *t)
 {
+    if (t->race != NULL) {
+        out_to_probe(t->race);
+        t->race = NULL;
+    }
     if (t->out != NULL) {
         t->out->task = NULL;
         elpis_out_free(t->w, t->out);
@@ -281,7 +312,13 @@ void elpis_out_cancel(elpis_task_t *t)
 static int start_tcp(elpis_task_t *t, elpis_outq_t *q, const uint8_t *msg,
                      size_t msglen);
 
-int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
+/*
+ * Build and send t's current question to one server, with its own ID, port,
+ * 0x20 pattern and timer.  The caller decides what the query is to the task.
+ * With udp_only set, a server that needs TCP is refused rather than dialled.
+ */
+static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
+                               int force_tcp, int udp_only)
 {
     elpis_worker_t *w = t->w;
     const elpis_conf_t *c = &w->ctx->conf;
@@ -292,20 +329,21 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
     ssize_t sent;
     uint32_t timeout;
 
-    elpis_out_cancel(t);
+    elpis_infra_get(w->ctx->infra, server, &inf);
+    if (udp_only && (force_tcp || (inf.flags & ELPIS_INF_TCP_ONLY)))
+        return NULL;
 
     q = (elpis_outq_t *)elpis_calloc(1, sizeof *q);
     if (q == NULL)
-        return ELPIS_ENOMEM;
+        return NULL;
     q->tcpfd = -1;
     q->task   = t;
+    q->w      = w;
     q->server = *server;
     q->qtype  = t->qtype;
     q->qclass = t->qclass;
     q->over_tcp = force_tcp ? 1u : 0u;
     q->id = (uint16_t)elpis_random_u32();
-
-    elpis_infra_get(w->ctx->infra, server, &inf);
 
     if (force_tcp || (inf.flags & ELPIS_INF_TCP_ONLY))
         q->over_tcp = 1;
@@ -313,25 +351,23 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
     sockidx = pick_socket(w, elpis_addr_family(server));
     if (sockidx < 0) {
         elpis_free(q);
-        return ELPIS_ERR;
+        return NULL;
     }
     q->sockidx = sockidx;
 
     len = build_query(w, q, t, w->txbuf, ELPIS_MAX_MSG, &inf);
     if (len == 0) {
         elpis_free(q);
-        return ELPIS_ERR;
+        return NULL;
     }
 
     q->sent_ms = elpis_cached_now_ms();
     q->attempt = t->sends;
-    t->out = q;
 
     if (q->over_tcp) {
         if (start_tcp(t, q, w->txbuf, len) != ELPIS_OK) {
-            t->out = NULL;
             elpis_free(q);
-            return ELPIS_ERR;
+            return NULL;
         }
         out_register(w, q);
     } else {
@@ -340,9 +376,8 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
             char ab[80];
             elpis_debug("send to %s failed: %s",
                         elpis_addr_str(server, ab, sizeof ab), strerror(errno));
-            t->out = NULL;
             elpis_free(q);
-            return ELPIS_ERR;
+            return NULL;
         }
         out_register(w, q);
     }
@@ -377,6 +412,44 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
         timeout = 5000u;
     elpis_timer_add(w->loop, &q->timer, timeout, out_timeout, q);
 
+    return q;
+}
+
+int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
+{
+    elpis_outq_t *q;
+
+    elpis_out_cancel(t);
+    q = out_start(t, server, force_tcp, 0);
+    if (q == NULL)
+        return ELPIS_ERR;
+    t->out = q;
+    return ELPIS_OK;
+}
+
+int elpis_out_race(elpis_task_t *t, const elpis_addr_t *server)
+{
+    elpis_outq_t *q;
+
+    /* Only beside a UDP query: TCP has its own handshake to wait for. */
+    if (t->out == NULL || t->out->over_tcp || t->race != NULL)
+        return ELPIS_ERR;
+    q = out_start(t, server, 0, 1);
+    if (q == NULL)
+        return ELPIS_ERR;
+    t->race = q;
+    elpis_stat_inc(&t->w->stats.races, 1);
+    return ELPIS_OK;
+}
+
+int elpis_out_probe(elpis_task_t *t, const elpis_addr_t *server)
+{
+    elpis_outq_t *q = out_start(t, server, 0, 1);
+
+    if (q == NULL)
+        return ELPIS_ERR;
+    out_to_probe(q);
+    elpis_stat_inc(&t->w->stats.races, 1);
     return ELPIS_OK;
 }
 
@@ -427,9 +500,11 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
                            const elpis_msg_t *m)
 {
     elpis_task_t *t = q->task;
+    elpis_outq_t *other;
+    unsigned rcode = elpis_msg_rcode(m);
     uint32_t rtt;
 
-    if (t == NULL) {
+    if (t == NULL && !q->probe) {
         elpis_out_free(w, q);
         return;
     }
@@ -449,15 +524,39 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         }
     }
 
+    /* A probe was sent to be measured, and now it has been. */
+    if (t == NULL) {
+        elpis_out_free(w, q);
+        return;
+    }
+
+    /*
+     * Two servers were asked.  The first usable answer is the one the task
+     * gets, and the other query stays out as a probe so its server is still
+     * measured.  A server with nothing to give -- SERVFAIL, REFUSED, a
+     * complaint about the query -- is not a reason to stop waiting for the
+     * other one.
+     */
+    other = out_unhook(t, q);
+    if (other != NULL) {
+        if (rcode != ELPIS_RC_NOERROR && rcode != ELPIS_RC_NXDOMAIN &&
+            rcode != ELPIS_RC_BADCOOKIE && !(m->hdr.flags & ELPIS_FLAG_TC)) {
+            if (rcode == ELPIS_RC_REFUSED)
+                elpis_infra_set_flag(w->ctx->infra, &q->server,
+                                     ELPIS_INF_LAME, 1);
+            elpis_out_free(w, q);
+            return;
+        }
+        out_to_probe(other);
+        t->out = NULL;
+    }
+
     /*
      * BADCOOKIE means "resend with the cookie I just gave you"; we have
      * already stored it, so a single retry to the same server is correct.
      */
-    if (elpis_msg_rcode(m) == ELPIS_RC_BADCOOKIE && q->used_cookie &&
-        q->attempt < 2) {
+    if (rcode == ELPIS_RC_BADCOOKIE && q->used_cookie && q->attempt < 2) {
         elpis_addr_t server = q->server;
-        t->out = NULL;
-        q->task = NULL;
         elpis_out_free(w, q);
         t->sends++;
         if (elpis_out_send(t, &server, 0) != ELPIS_OK)
@@ -469,8 +568,6 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     if ((m->hdr.flags & ELPIS_FLAG_TC) && !q->over_tcp &&
         w->ctx->conf.tcp_upstream) {
         elpis_addr_t server = q->server;
-        t->out = NULL;
-        q->task = NULL;
         elpis_out_free(w, q);
         elpis_stat_inc(&w->stats.truncated, 1);
         if (elpis_out_send(t, &server, 1) != ELPIS_OK)
@@ -478,8 +575,6 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         return;
     }
 
-    t->out = NULL;
-    q->task = NULL;
     elpis_resolver_on_response(t, q, m);
     elpis_out_free(w, q);
 }
@@ -557,18 +652,25 @@ static void out_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
 static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_outq_t *q = (elpis_outq_t *)tm->data;
-    elpis_worker_t *w;
+    elpis_worker_t *w = q->w;
     elpis_task_t *t = q->task;
 
-    if (t == NULL)
+    if (t == NULL && !q->probe)
         return;
-    w = t->w;
 
     elpis_infra_timeout(w->ctx->infra, &q->server);
     elpis_stat_inc(&w->stats.timeouts, 1);
 
-    t->out = NULL;
-    q->task = NULL;
+    /*
+     * A silent probe, or one of two racing queries while the other is still
+     * out: the server is marked, and nothing else changes.  Moving on to the
+     * next server is for when nobody is left to answer.
+     */
+    if (t == NULL || out_unhook(t, q) != NULL) {
+        elpis_tm_timeout(&w->tm, &q->server);
+        elpis_out_free(w, q);
+        return;
+    }
     elpis_resolver_on_timeout(t, q);
     elpis_out_free(w, q);
     (void)lp;

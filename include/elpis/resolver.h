@@ -40,6 +40,7 @@ typedef struct {
 struct elpis_outq {
     elpis_outq_t  *hnext;
     elpis_task_t  *task;
+    elpis_worker_t *w;
 
     elpis_addr_t   server;
     uint16_t       id;
@@ -56,6 +57,13 @@ struct elpis_outq {
     unsigned       used_cookie : 1;
     unsigned       over_tcp    : 1;
     unsigned       dead        : 1;
+    /*
+     * Nobody is waiting for the answer any more -- it lost a race, or its
+     * task went away -- but the round trip is still worth having: it is how
+     * a server we have never used gets measured.  A probe updates the infra
+     * cache when it lands or times out, and is then freed.
+     */
+    unsigned       probe       : 1;
 
     elpis_timer_t  timer;
 
@@ -172,6 +180,7 @@ struct elpis_task {
     elpis_timer_t   deadline;
     elpis_timer_t   kick;       /* defers the first step out of the caller */
     elpis_outq_t   *out;
+    elpis_outq_t   *race;       /* the same question, to a second server */
     elpis_tstate_t  state;
 };
 
@@ -272,6 +281,11 @@ elpis_task_t *elpis_task_child(elpis_task_t *parent, const elpis_name_t *qname,
 int  elpis_out_init(elpis_worker_t *w);
 void elpis_out_fini(elpis_worker_t *w);
 int  elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp);
+/* Ask the question just sent by elpis_out_send() of a second server too; the
+ * first usable answer is the one the task gets.  UDP only. */
+int  elpis_out_race(elpis_task_t *t, const elpis_addr_t *server);
+/* The same question again, only to measure the server: nobody waits on it. */
+int  elpis_out_probe(elpis_task_t *t, const elpis_addr_t *server);
 void elpis_out_cancel(elpis_task_t *t);
 void elpis_out_free(elpis_worker_t *w, elpis_outq_t *q);
 

@@ -43,13 +43,14 @@ void elpis_stats_report(elpis_ctx_t *ctx)
 
     elpis_info("statistics after %llus:", (unsigned long long)up);
     elpis_info("  queries=%llu hits=%llu (%.1f%%) stale=%llu recursions=%llu "
-               "upstream=%llu",
+               "upstream=%llu raced=%llu",
                (unsigned long long)served,
                (unsigned long long)s->cache_hits,
                served ? (double)s->cache_hits * 100.0 / (double)served : 0.0,
                (unsigned long long)s->cache_stale,
                (unsigned long long)s->recursions,
-               (unsigned long long)s->upstream_queries);
+               (unsigned long long)s->upstream_queries,
+               (unsigned long long)s->races);
     elpis_info("  tasks=%llu", (unsigned long long)s->tasks);
     elpis_info("  loop: turns/s=%llu idle=%llu nosleep=%llu timers=%u "
                "slowest-turn=%ums",
