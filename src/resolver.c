@@ -291,10 +291,14 @@ static int rrlist_add_stamped(elpis_task_t *t, elpis_section_t sec,
                               uint16_t klass, uint32_t ttl,
                               const uint8_t *rd, uint16_t rdlen)
 {
+    elpis_name_t owner = *n;
+
+    /* Folded for the same reason accept_rr() folds: see there. */
+    elpis_name_lower(&owner);
     t->ans.zone_labels =
-        (t->have_deleg && elpis_name_covers(&t->deleg.zone, n))
+        (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
             ? t->deleg.zone.labels : 0;
-    return elpis_rrlist_add(&t->ans, sec, n, type, klass, ttl, rd, rdlen);
+    return elpis_rrlist_add(&t->ans, sec, &owner, type, klass, ttl, rd, rdlen);
 }
 
 /*
@@ -716,6 +720,14 @@ static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
  * back as "a.gtld-servers.Net." purely because of our own randomisation.  The
  * signer signed the lowercase form, so anything that reaches the validator or
  * the cache has to be folded exactly as RFC 4034 section 6.2 specifies.
+ *
+ * The owner name needs the same treatment, for the client's sake rather than
+ * the validator's.  An authority answers with the question as we sent it, so
+ * the A records at the end of a CNAME chain came back owned by
+ * "DIsTrO-gatEWAy-pROd.OL.EPicGAMEs.CoM.cdN.CLOudflaRE.nEt." -- a casing no
+ * zone ever had, chosen by us, and then handed to the client beneath a CNAME
+ * that points at the lowercase name.  The same chain served from the RRset
+ * cache came out folded, so which one a client saw depended on timing.
  */
 static int accept_rr(elpis_task_t *t, elpis_section_t sec,
                      const elpis_msg_t *m, const elpis_rr_t *rr)
@@ -723,6 +735,9 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
     uint8_t *rd = t->w->rd1;
     size_t rdlen;
     int drop = 0;
+    elpis_name_t owner = rr->name;
+
+    elpis_name_lower(&owner);
 
     if (elpis_rdata_validate(rr->type, m->wire, m->len, rr->rdoff, rr->rdlen,
                              &drop) != ELPIS_OK)
@@ -732,7 +747,7 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
         return ELPIS_EFORMAT;
     if (rdlen > 0xFFFFu)
         return ELPIS_EFORMAT;
-    if (elpis_rrlist_has(&t->ans, &rr->name, rr->type, rd, (uint16_t)rdlen))
+    if (elpis_rrlist_has(&t->ans, &owner, rr->type, rd, (uint16_t)rdlen))
         return ELPIS_OK;
     /*
      * Record which zone this came from while we still know: the delegation we
@@ -742,9 +757,9 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
      * without it an unsigned RRset cannot be told apart from a stripped one.
      */
     t->ans.zone_labels =
-        (t->have_deleg && elpis_name_covers(&t->deleg.zone, &rr->name))
+        (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
             ? t->deleg.zone.labels : 0;
-    return elpis_rrlist_add(&t->ans, sec, &rr->name, rr->type, rr->klass,
+    return elpis_rrlist_add(&t->ans, sec, &owner, rr->type, rr->klass,
                             elpis_clamp_ttl(&t->w->ctx->conf, rr->ttl),
                             rd, (uint16_t)rdlen);
 }
@@ -1590,6 +1605,21 @@ void elpis_task_step(elpis_task_t *t)
 /* Completion                                                          */
 /* ================================================================== */
 
+/*
+ * RFC 4035 section 3.2.1: RRSIG, NSEC and NSEC3 records go to a client that
+ * set DO, or to one that asked for that type by name, and to nobody else.
+ */
+static int hidden_from_client(const elpis_task_t *t, const elpis_trr_t *rr)
+{
+    if (t->client_do)
+        return 0;
+    if (rr->type != ELPIS_T_RRSIG && rr->type != ELPIS_T_NSEC &&
+        rr->type != ELPIS_T_NSEC3)
+        return 0;
+    return !(rr->section == (uint8_t)ELPIS_SEC_ANSWER &&
+             rr->type == t->orig_qtype);
+}
+
 static void task_finish(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
@@ -1695,13 +1725,13 @@ static void task_finish(elpis_task_t *t)
     /*
      * RRSIGs are requested from upstream whenever validation is on, but a
      * client that did not set DO never asked for them and some stub resolvers
-     * choke on the extra records.
+     * choke on the extra records.  cache_store_answer() applies the same
+     * test, so the reply that is cached is the reply that was sent.
      */
     if ((t->has_client || t->prefetch) && !t->client_do && t->ans.n > 0) {
         unsigned i, out = 0;
         for (i = 0; i < t->ans.n; i++) {
-            uint16_t ty = t->ans.rr[i].type;
-            if (ty == ELPIS_T_RRSIG || ty == ELPIS_T_NSEC || ty == ELPIS_T_NSEC3)
+            if (hidden_from_client(t, &t->ans.rr[i]))
                 continue;
             t->ans.rr[out++] = t->ans.rr[i];
         }
@@ -1771,6 +1801,13 @@ static void note_refresh_outcome(elpis_task_t *t)
 /*
  * Build the response once and hand the bytes to the message cache, so a
  * repeat of this exact question becomes a header write plus one memcpy.
+ *
+ * The entry is keyed on the client's DO bit, and it has to be built for that
+ * client.  The answer list still holds the signatures here -- the validator
+ * needed them, and task_finish() strips them only afterwards, from the reply
+ * it is about to send.  Built from the list as it stood, every non-DO entry
+ * carried RRSIGs, so the first such client got a clean answer and everyone
+ * after it was served signatures it had not asked for, out of the cache.
  */
 static void cache_store_answer(elpis_task_t *t)
 {
@@ -1810,7 +1847,7 @@ static void cache_store_answer(elpis_task_t *t)
         elpis_name_t on;
         size_t rdpos;
 
-        if (rr->section != (uint8_t)ELPIS_SEC_ANSWER)
+        if (rr->section != (uint8_t)ELPIS_SEC_ANSWER || hidden_from_client(t, rr))
             continue;
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;
@@ -1829,7 +1866,7 @@ static void cache_store_answer(elpis_task_t *t)
         elpis_name_t on;
         size_t rdpos;
 
-        if (rr->section != (uint8_t)ELPIS_SEC_AUTHORITY)
+        if (rr->section != (uint8_t)ELPIS_SEC_AUTHORITY || hidden_from_client(t, rr))
             continue;
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;
@@ -1848,7 +1885,7 @@ static void cache_store_answer(elpis_task_t *t)
         elpis_name_t on;
         size_t rdpos;
 
-        if (rr->section != (uint8_t)ELPIS_SEC_ADDITIONAL)
+        if (rr->section != (uint8_t)ELPIS_SEC_ADDITIONAL || hidden_from_client(t, rr))
             continue;
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;

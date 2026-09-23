@@ -348,8 +348,15 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
 
     elpis_stat_inc(&w->stats.upstream_queries, 1);
 
-    /* Wait a little longer than this server's measured round trip. */
+    /*
+     * Wait a little longer than this server's measured round trip -- and over
+     * TCP, one round trip more, for the handshake that has to finish before
+     * the query is even sent.  Without it a server more than about 100 ms
+     * away could not answer over TCP inside its own UDP allowance.
+     */
     timeout = inf.srtt + 4u * inf.rttvar;
+    if (q->over_tcp)
+        timeout += inf.srtt;
     if (timeout < 250u)
         timeout = 250u;
     if (timeout > c->query_timeout_ms * 4u)
@@ -621,7 +628,7 @@ static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
     w = t->w;
 
     if (events & (ELPIS_EV_ERROR | ELPIS_EV_HUP)) {
-        if (q->rxwant == 0 || q->rxlen < q->rxwant) {
+        if (q->rxwant == 0 || q->rxlen < q->rxwant + 2u) {
             tcp_fail(w, q, ELPIS_EDE_NETWORK_ERROR);
             return;
         }
@@ -684,6 +691,17 @@ static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
         }
         q->rxlen += (size_t)n;
 
+        /*
+         * No `continue` once the length is known: the check below has to see
+         * this same read.  An authority normally writes the prefix and the
+         * message together, so the first read usually returns the whole
+         * answer -- and going round for another read got EAGAIN, left the
+         * complete answer sitting in the buffer, and waited for bytes that
+         * were never coming until the timer gave up on the server.  Only a
+         * reply split across segments ever got through, which made TCP look
+         * flaky rather than broken: a truncated org. DNSKEY walked every org
+         * server in turn, 250 ms apiece.
+         */
         if (q->rxwant == 0 && q->rxlen >= 2) {
             q->rxwant = elpis_get16(q->rxbuf);
             if (q->rxwant < ELPIS_HDR_LEN) {
@@ -692,7 +710,6 @@ static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
                 tcp_fail(w, q, ELPIS_EDE_INVALID_DATA);
                 return;
             }
-            continue;
         }
         if (q->rxwant != 0 && q->rxlen >= q->rxwant + 2u) {
             elpis_msg_t m;

@@ -10,6 +10,71 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.12 — 2026-09-23
+
+### Fixed
+
+**An answer that came back over TCP in one piece was never read.** Every reply
+truncated over UDP is repeated over TCP, and the reader took the length prefix,
+then went round for another read before checking whether the message it
+announced had already arrived. An authority normally sends the prefix and the
+message together, so it usually had: the second read found nothing, the
+complete answer sat in the buffer, and the query waited for bytes that were
+never coming until its timer gave up on the server. Only replies split across
+segments got through.
+
+That made TCP look flaky rather than broken, and it has been this way since the
+first release. The replies most likely to need TCP are the ones just over the
+1232-byte EDNS limit, and those fit in a single segment — `org. DNSKEY` among
+them. Anything served from Amazon's Route 53, whose nameservers live under
+`awsdns-NN.org`, needed that key set to be trusted, so a cold lookup walked
+every `org` server in turn, a quarter of a second apiece:
+
+```
+oRg. DNSKEY  199.249.120.1  TC -> TCP: 1324 bytes read, never parsed, 250 ms
+oRG. DNSKEY  199.249.112.1  TC -> TCP: 1324 bytes read, never parsed, 250 ms
+org. DNSKEY  199.19.56.1    TC -> ...
+```
+
+This is the likeliest reason the Epic Games Launcher would not start: its
+dozens of service names all sit behind Route 53, and every one of them waited
+on the same key set.
+
+| cold, 23 Epic names × A/AAAA at once | median | slowest | over 2 s |
+|---|---|---|---|
+| 1.1.11 | 2727 ms | 4.0 s | 28 of 46 |
+| 1.1.12 | 646 ms | 2.7 s | 3 of 46 |
+
+With `edns-buffer-size: 512`, which pushes almost every signed answer onto
+TCP, 1.1.11 answered `cloudflare.com`, `isc.org`, `ietf.org`, `nlnetlabs.nl`
+and `www.gov.uk` with SERVFAIL after 18–20 seconds each. 1.1.12 answers all
+five, signed ones with AD set.
+
+A TCP attempt now also gets one round trip more than a UDP one before it is
+abandoned, for the handshake. Without it a server much more than 100 ms away
+could not answer over TCP inside its own UDP allowance.
+
+**Clients that did not ask for DNSSEC records no longer get them from the
+cache.** RRSIGs are fetched whenever validation is on, and were stripped from
+the reply for a client without the DO bit — after the reply had been stored.
+The first such client got a clean answer and every one after it was served the
+signatures out of the cache. The cache entry is now built the same way as the
+reply that was sent. A client that asks for RRSIG, NSEC or NSEC3 by type still
+gets them.
+
+**Answers no longer carry the random case of our own queries.** An authority
+answers with the question as it was sent, which with 0x20 on meant the records
+at the end of a CNAME chain came back as
+
+```
+DIsTrO-gatEWAy-pROd.OL.EPicGAMEs.CoM.cdN.CLOudflaRE.nEt. 202 IN A 104.18.13.27
+```
+
+beneath a CNAME pointing at the lowercase name — a casing no zone ever had.
+Owner names are now folded as they come off the wire, as the RRset cache
+already did, so the same chain reads the same whether it was just fetched or
+served from cache. A client's own casing of its question is still echoed.
+
 ## 1.1.11 — 2026-09-23
 
 ### Fixed
