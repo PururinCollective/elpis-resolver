@@ -799,8 +799,15 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
             continue;
 
         ttl = elpis_clamp_ttl(c, rr.ttl);
+        /*
+         * Always unchecked.  Nothing off the wire has been validated yet, and
+         * t->sec is not a verdict on it: following a cached CNAME copies that
+         * CNAME's status into the task, so after a secure one every record
+         * fetched from the target zone was filed as proven -- and a DS or
+         * DNSKEY marked secure is one the validator takes without looking.
+         * Verdicts go back into this cache from the validator, per RRset.
+         */
         elpis_rrset_buf_init(b, &rr.name, rr.type, rr.klass, ttl);
-        b->sec   = (uint8_t)t->sec;
         b->flags = ELPIS_RRF_AUTH;
 
         /*
@@ -947,10 +954,10 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
         rdp = blob;
         rdl = (uint16_t)(1u + rr.name.len + rdlen);
 
+        /* Unchecked, for the reason cache_message_rrsets() gives. */
         elpis_rrset_buf_init(b, &t->qname,
                              nxdomain ? (uint16_t)ELPIS_T_NXNAME : t->qtype,
                              t->qclass, ttl);
-        b->sec   = (uint8_t)t->sec;
         b->flags = nxdomain ? ELPIS_RRF_NXDOMAIN : ELPIS_RRF_NODATA;
         elpis_rrset_buf_add(b, rdp, rdl);
         /*
