@@ -96,6 +96,20 @@ int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
     elpis_log_init(c->log_dst, c->log_file, c->log_level);
 
     elpis_cache_plan(&ctx->plan, c->cache_size, elpis_cpu_count());
+
+    /*
+     * How many resolutions a worker may have in flight: one per MiB of the
+     * memory this process may use, between 512 and 4096.  A resolution costs
+     * about 11 KB, and 26 KB more while it is being validated; with no limit,
+     * 30,000 queries to a zone whose servers were slow to answer took the
+     * process from 5 MB to 326, and nothing stopped it going further.  4096 a
+     * worker is 170-600 MB at the very worst on a machine with the RAM for it,
+     * and more than a home or office network ever has outstanding.
+     */
+    if (c->max_pending_auto) {
+        uint64_t mib = ctx->plan.ram_total / (1024u * 1024u);
+        c->max_pending = (unsigned)ELPIS_CLAMP(mib, 512u, 4096u);
+    }
     {
         const elpis_cpu_t *cpu = elpis_cpu();
         char feat[96];

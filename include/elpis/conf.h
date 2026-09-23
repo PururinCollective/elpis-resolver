@@ -124,6 +124,13 @@ typedef struct {
     uint32_t     query_timeout_ms;
     uint32_t     query_total_ms;
     unsigned     max_retries;
+    /*
+     * Resolutions one worker may have in flight.  0 in the file means auto,
+     * resolved at startup from the memory detected -- see main.c -- so by
+     * the time a worker reads it, it is a number.
+     */
+    unsigned     max_pending;
+    uint8_t      max_pending_auto;
     unsigned     max_referrals;
     uint8_t      qname_minimisation;
     uint8_t      qname_min_strict;

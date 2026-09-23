@@ -36,6 +36,8 @@ typedef struct {
      * expiring out of the infra cache.
      */
     uint64_t races;
+    /* Queries answered SERVFAIL at once because max-pending was reached. */
+    uint64_t overload;
 } elpis_stats_t;
 
 /*

@@ -25,8 +25,9 @@ static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
 {
     elpis_task_t *t;
 
-    /* Never let refresh work crowd out real resolutions. */
-    if (w->n_tasks > 4096)
+    /* Never let refresh work crowd out real resolutions: refreshes stop at
+     * half of max-pending, leaving the rest for clients. */
+    if (w->n_tasks >= w->ctx->conf.max_pending / 2u)
         return;
 
     t = elpis_task_new(w);
@@ -573,6 +574,25 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
             tcp_queue(conn, w->txbuf, outlen);
         else
             send_udp(w, fd, w->txbuf, outlen, from, to);
+        return;
+    }
+
+    /*
+     * Over max-pending: answer SERVFAIL now rather than take on another
+     * resolution.  Memory is what this protects -- every task is kilobytes,
+     * and a flood of names that miss the cache would otherwise grow the
+     * process until the kernel kills it.  A fast SERVFAIL is also what makes
+     * a forwarder in front, AdGuard or dnsdist, try one of its other
+     * upstreams straight away instead of waiting out a timeout.  Cache hits
+     * never get here, so an overloaded resolver keeps serving what it knows.
+     */
+    if (w->n_tasks >= w->ctx->conf.max_pending) {
+        elpis_stat_inc(&w->stats.overload, 1);
+        elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP_RESOURCE, __FILE__, __LINE__,
+                      "worker %u has %u resolutions in flight (max-pending); "
+                      "answering SERVFAIL until some finish", w->index,
+                      w->n_tasks);
+        reply_error(w, fd, &m, ELPIS_RC_SERVFAIL, from, to, conn);
         return;
     }
 

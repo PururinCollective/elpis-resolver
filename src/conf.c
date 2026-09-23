@@ -97,6 +97,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
      */
     c->query_total_ms   = 20000;
     c->max_retries      = 3;
+    c->max_pending_auto = 1;
     c->max_referrals    = ELPIS_MAX_REFERRALS;
     c->qname_minimisation = 1;
     c->qname_min_strict   = 0;
@@ -441,6 +442,17 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("query-timeout"))      return want_u32(&p, key, val, &c->query_timeout_ms);
     if (KEY("query-total-timeout")) return want_u32(&p, key, val, &c->query_total_ms);
     if (KEY("max-retries"))        return want_u32(&p, key, val, &c->max_retries);
+    if (KEY("max-pending")) {
+        uint32_t v;
+        if (!elpis_strcasecmp_ascii(val, "auto")) {
+            c->max_pending_auto = 1;
+            return ELPIS_OK;
+        }
+        if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
+        c->max_pending_auto = 0;
+        c->max_pending      = ELPIS_CLAMP(v, 64u, 1000000u);
+        return ELPIS_OK;
+    }
     if (KEY("max-referrals"))      return want_u32(&p, key, val, &c->max_referrals);
     if (KEY("qname-minimisation") || KEY("qname-minimization"))
         return want_bool(&p, key, val, &c->qname_minimisation);
@@ -717,6 +729,8 @@ void elpis_conf_dump(const elpis_conf_t *c)
     elpis_info("  dnssec=%d qname-min=%d cookies=%d 0x20=%d dns64=%d",
                (int)c->dnssec, (int)c->qname_minimisation, (int)c->use_cookies,
                (int)c->use_0x20, (int)c->dns64);
+    elpis_info("  max-pending=%u per worker%s", c->max_pending,
+               c->max_pending_auto ? " (auto)" : "");
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "
                    "max-udp-reply-size=%u", (unsigned)c->edns_buffer4,
