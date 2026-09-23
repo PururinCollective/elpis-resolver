@@ -10,6 +10,29 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.11 — 2026-09-23
+
+### Fixed
+
+**A reply whose OPT record sits on the wrong owner name is no longer thrown
+away.** `dnsleaktest.com` would not resolve at all: its nameservers put the
+question's name in the OPT owner field instead of the root, and the whole
+reply was dropped for it.
+
+```
+WARN  drop reason=edns from=23.239.16.110:53 detail=upstream response
+```
+
+RFC 6891 section 6.1.2 does say the owner must be root, but that field carries
+nothing — the payload size is in CLASS, the version and flags in TTL, the
+options in the rdata. A server that fills it in wrongly has produced something
+ugly, not something ambiguous, and refusing it made the zone unresolvable
+through this resolver and no other.
+
+Replies like this are now accepted and noted once in the log. Queries are
+unchanged: there the resolver is the server, and a client sending a malformed
+OPT still gets nothing back.
+
 ## 1.1.10 — 2026-09-23
 
 ### Added

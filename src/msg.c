@@ -81,14 +81,34 @@ static int skip_rr(const uint8_t *w, size_t len, size_t off, size_t *end, int *d
     return ELPIS_OK;
 }
 
-static int parse_opt(elpis_msg_t *m, const elpis_rr_t *rr, int *drop)
+static int parse_opt(elpis_msg_t *m, const elpis_rr_t *rr, unsigned flags,
+                     int *drop)
 {
     size_t p = rr->rdoff;
     size_t stop = rr->rdoff + rr->rdlen;
 
     if (m->have_opt) { *drop = ELPIS_DROP_MULTI_OPT; return ELPIS_EFORMAT; }
-    /* The OPT owner name must be the root (RFC 6891 section 6.1.2). */
-    if (rr->name.len != 1) { *drop = ELPIS_DROP_EDNS; return ELPIS_EFORMAT; }
+    /*
+     * The OPT owner name must be the root (RFC 6891 section 6.1.2), and in a
+     * query we are the server, so a malformed one is worth refusing.
+     *
+     * In a reply it is not.  The owner name of an OPT carries nothing -- the
+     * payload size is in CLASS, the version and flags in TTL, the options in
+     * the rdata -- so a server that puts the question's name there instead of
+     * the root has produced something ugly rather than something ambiguous.
+     * Refusing it makes the zone unresolvable through this resolver and
+     * through no other, which is a poor trade for a field nobody reads.
+     * ns1.dnsleaktest.com does exactly this.
+     */
+    if (rr->name.len != 1) {
+        if (flags & ELPIS_PARSE_QUERY) {
+            *drop = ELPIS_DROP_EDNS;
+            return ELPIS_EFORMAT;
+        }
+        elpis_logf_rl(ELPIS_LOG_INFO, ELPIS_DROP_EDNS, __FILE__, __LINE__,
+                      "edns: reply carries an OPT owned by a name instead of "
+                      "the root; accepted anyway");
+    }
 
     m->have_opt      = 1;
     m->opt_off       = rr->rroff;
@@ -228,7 +248,7 @@ int elpis_msg_parse(elpis_msg_t *m, const uint8_t *wire, size_t len,
         elpis_rr_iter(&it, m, ELPIS_SEC_ADDITIONAL);
         while ((rc = elpis_rr_next(&it, &rr, &d)) == ELPIS_OK) {
             if (rr.type == ELPIS_T_OPT) {
-                if (parse_opt(m, &rr, &d) != ELPIS_OK) {
+                if (parse_opt(m, &rr, flags, &d) != ELPIS_OK) {
                     *drop = d;
                     return ELPIS_EFORMAT;
                 }
