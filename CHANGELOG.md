@@ -30,6 +30,35 @@ compiler's own predefined macros, so it is what the binary is. The CPU is
 
 ### Fixed
 
+**A stripped answer asked for twice could be served the second time.** An
+answer whose signatures had been removed was refused when first asked for — and
+served, as an ordinary unsigned answer, to a second question arriving while the
+first was still being validated:
+
+```
+<id>-nosig.test-alg13.dnscheck.tools A, twice, 200 ms apart
+  first:  SERVFAIL  323 ms
+  second: NOERROR   166 ms   the unsigned address
+```
+
+Records are cached as they arrive, before the chain of trust is walked. The
+copy off the wire knows which zone served it, which is how an unsigned record
+in a signed zone is recognised as forged; the cached copy did not, and a record
+the validator cannot place counts as insecure. Bad and expired signatures were
+not affected — those are checked whatever the zone. The cache now keeps the
+zone with the record.
+
+It surfaced as dnscheck.tools failing "Missing" behind a MikroTik forwarding to
+AdGuard Home over plain DNS: the MikroTik asks again after a failure or a
+dropped reply, AdGuard sends every question to every Elpis upstream, and the
+repeat lands inside the window. Any two clients asking for the same name within
+a quarter of a second would have done the same.
+
+**No OPT record in replies to queries that had none.** RFC 6891 says a client
+that sends no OPT record does not speak EDNS and must not be sent one. Answers
+from the cache already obeyed; every answer that had to be resolved carried
+one anyway.
+
 **Changing `OPT` over an existing build now rebuilds it.** make watched files,
 not flags, so a build switched to `-march=znver3` without `make clean` kept
 every object compiled the old way, and the 1.1.14 version bump produced a
