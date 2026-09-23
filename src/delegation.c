@@ -4,6 +4,7 @@
 #include "elpis/deleg.h"
 #include "elpis/simd.h"
 #include "elpis/log.h"
+#include "elpis/atomic.h"
 
 /*
  * Packed on-disk-ish layout, because the pinned TLD set lives here forever:
@@ -28,6 +29,7 @@ typedef struct {
     uint32_t stored;
     uint32_t ttl;
     uint32_t datalen;
+    uint32_t due;           /* pinned: refresh claimed, retry at; atomic only */
 } dent_t;
 
 typedef struct {
@@ -234,8 +236,8 @@ int elpis_dcache_put(elpis_cache_t *c, const elpis_deleg_t *d,
     e->hdr.size   = (uint32_t)(sz + 64u);
     e->hdr.ref    = 1;
     e->hdr.pinned = pinned ? 1u : 0u;
-    /* Pinned delegations never expire out of the table; the refresh task
-     * replaces them in place instead. */
+    /* Pinned delegations never expire out of the table; a refresh replaces
+     * them in place instead (elpis_dcache_refresh_due). */
     e->hdr.expiry = pinned ? 0u : (elpis_cached_now_s() + ttl);
 
     e->zonelen  = d->zone.len;
@@ -302,6 +304,41 @@ int elpis_dcache_ds_state(elpis_cache_t *c, const elpis_name_t *zone,
         return -1;
     if (e->hdr.pinned || now - e->stored < e->ttl)
         rc = e->ds_state;
+    elpis_cache_read_end(c, shard);
+    return rc;
+}
+
+/*
+ * A claimed refresh that did not replace the entry -- the root did not answer,
+ * say -- comes due again this much later, and no interval is shorter.
+ */
+#define REFRESH_RETRY 300u
+
+int elpis_dcache_refresh_due(elpis_cache_t *c, const elpis_name_t *zone,
+                             uint32_t now, uint32_t every)
+{
+    dkey_t k;
+    unsigned shard;
+    dent_t *e;
+    int rc = 0;
+
+    dkey_init(&k, zone);
+    e = (dent_t *)elpis_cache_read_begin(c, k.hash, &k, &shard);
+    if (e == NULL)
+        return 0;
+    if (e->hdr.pinned) {
+        uint32_t seen = elpis_atomic_load32(&e->due), due;
+
+        if (every == 0 || e->ttl < every)
+            every = e->ttl;
+        if (every < REFRESH_RETRY)
+            every = REFRESH_RETRY;
+        due = seen != 0 ? seen : e->stored + every;
+        /* Of every worker that notices, the one whose swap lands sends it. */
+        if ((int32_t)(now - due) >= 0 &&
+            elpis_atomic_cas32(&e->due, &seen, now + REFRESH_RETRY))
+            rc = 1;
+    }
     elpis_cache_read_end(c, shard);
     return rc;
 }

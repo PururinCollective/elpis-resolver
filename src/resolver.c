@@ -704,6 +704,41 @@ static elpis_nsrec_t *choose_nameless(elpis_task_t *t)
     return NULL;
 }
 
+/*
+ * The pinned root or TLD delegation a query is about to start from, if it is
+ * due to be asked about again (see elpis_dcache_refresh_due).  The query that
+ * noticed carries on with what it has; the refresh goes out beside it, and
+ * the root's referral replaces the entry in place.
+ */
+static void deleg_refresh(elpis_task_t *t)
+{
+    elpis_worker_t *w = t->w;
+    const elpis_conf_t *c = &w->ctx->conf;
+    const elpis_name_t *z = &t->deleg.zone;
+    elpis_task_t *r;
+
+    if (!t->deleg.pinned || z->labels > 1 || w->ctx->shutdown ||
+        w->n_tasks >= c->max_pending / 2u)
+        return;
+    if (!elpis_dcache_refresh_due(w->ctx->dcache, z, elpis_cached_now_s(),
+                                  z->labels == 0 ? c->root_refresh
+                                                 : c->tld_refresh))
+        return;
+    if (z->labels == 0) {
+        (void)elpis_prime_start(w);
+        return;
+    }
+    r = elpis_task_new(w);
+    if (r == NULL)
+        return;
+    r->qname    = *z;
+    r->qtype    = ELPIS_T_NS;
+    r->qclass   = ELPIS_CLASS_IN;
+    r->prefetch = 1;
+    r->warming  = 1;
+    elpis_task_start(r);
+}
+
 /* ================================================================== */
 /* Child tasks                                                         */
 /* ================================================================== */
@@ -1827,6 +1862,14 @@ void elpis_task_step(elpis_task_t *t)
              */
             if (t->qtype == ELPIS_T_DS && t->qname.len > 1)
                 (void)elpis_name_parent(&t->qname, &start);
+            /*
+             * Warming or refreshing a TLD is asking the root about it.  From
+             * the TLD's own pinned delegation, a refresh would only ever
+             * hear from the servers it was sent to check.
+             */
+            else if (t->warming && t->qtype == ELPIS_T_NS &&
+                     t->qname.labels == 1)
+                elpis_name_init_root(&start);
 
             t->forwarding = 0;
             {
@@ -1845,9 +1888,10 @@ void elpis_task_step(elpis_task_t *t)
             }
 
             if (elpis_dcache_closest(w->ctx->dcache, &start,
-                                     elpis_cached_now_s(), &t->deleg) != ELPIS_OK) {
+                                     elpis_cached_now_s(), &t->deleg) != ELPIS_OK)
                 t->deleg = w->ctx->root_hints;
-            }
+            else
+                deleg_refresh(t);
             t->deleg_from_route = 0;
             t->have_deleg = 1;
             t->ntried = 0;

@@ -71,6 +71,18 @@ int  elpis_dcache_ds_state(elpis_cache_t *c, const elpis_name_t *zone,
                            uint32_t now);
 
 /*
+ * Pinned delegations -- the root and the TLDs -- never expire, and once one
+ * is pinned no query goes above it again, so nothing would ever replace it: a
+ * TLD that renumbered its servers would be followed to the old addresses for
+ * as long as the process ran.  Returns 1 when the pinned delegation for
+ * `zone` has gone `every` seconds (or its own TTL, if shorter) unrefreshed,
+ * and claims it, so that of all the workers that notice, exactly one sends
+ * the refresh.  0 for an entry that is not due, not pinned, or not there.
+ */
+int  elpis_dcache_refresh_due(elpis_cache_t *c, const elpis_name_t *zone,
+                              uint32_t now, uint32_t every);
+
+/*
  * Deepest cached delegation at or above `name`.  This is the hot path for
  * every recursion: a hit on "com." means the query goes straight to a .com
  * server instead of starting at the root.
