@@ -10,6 +10,33 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**The CPU a binary was built for, beside the compiler.** The startup line, the
+About window and the CPU pane of the Task Manager now say what the build was
+aimed at as well as what built it:
+
+```
+elpis 1.1.14 starting: ..., epoll, gcc 13.3.0, x86_64 znver3 (native), ...
+```
+
+The instruction set — `x86_64`, `arm64`, `riscv64` and so on — comes from the
+compiler's own predefined macros, so it is what the binary is. The CPU is
+`-march` and `-mtune` as the compiler resolved them, which is how
+`-march=native` becomes `znver3 (native)`. A build that set neither says
+`generic`; one that tunes for something else says `haswell tuned for znver3`.
+
+### Fixed
+
+**Changing `OPT` over an existing build now rebuilds it.** make watched files,
+not flags, so a build switched to `-march=znver3` without `make clean` kept
+every object compiled the old way, and the 1.1.14 version bump produced a
+binary that still called itself 1.1.13. The flags are kept in a stamp that
+everything compiled with them depends on: changing them recompiles all 51
+objects, and repeating a build with the same flags compiles none.
+
 ## 1.1.14 — 2026-09-24
 
 Mostly speed: new names under unsigned zones, and cold lookups anywhere. Along
