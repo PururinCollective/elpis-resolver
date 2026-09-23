@@ -27,6 +27,7 @@
 #include "vectors.h"
 
 #include <stdio.h>
+#include <unistd.h>
 
 static int g_pass, g_fail;
 
@@ -1645,6 +1646,87 @@ static void test_sec_link(void)
           "bogus anywhere is bogus");
 }
 
+/*
+ * A trust-anchor-file is what an operator edits in the middle of a key
+ * rollover, in whatever form they have to hand: root.key as unbound-anchor
+ * writes it, or a saved dig.  Both put a TTL before the class, and dig splits
+ * a key into chunks.  Neither was read: the TTL was taken for the type and the
+ * file loaded nothing, and past eight tokens a key was cut short.  Here the
+ * root's two KSKs, exactly as dig prints them, must come out as the very DS
+ * records compiled in -- a byte astray in the key and they would not.
+ */
+static void test_ta_file(void)
+{
+    static const char text[] =
+        "; saved from: dig . DNSKEY\n"
+        ". 172800 IN DNSKEY 257 3 8"
+        " AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3"
+        " +/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kv"
+        " ArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF"
+        " 0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+e"
+        " oZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfd"
+        " RUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwN"
+        " R1AkUTV74bU=\n"
+        ". 172800 IN DNSKEY 257 3 8"
+        " AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/c"
+        " idltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHb"
+        " GiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+s"
+        " iFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqp"
+        " dVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ"
+        " 1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUe"
+        " ayffKC73PYc=\n"
+        /* class before TTL; the REVOKE bit set, so never an anchor */
+        ". IN 172800 DNSKEY 385 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTO\n"
+        /* more tokens than fit: refused, not loaded cut short */
+        "example. 3600 IN DS 1 8 2 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15"
+        " 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31\n"
+        /* not an anchor at all */
+        ". 172800 IN RRSIG DNSKEY 8 0 172800 20260101000000 20251201000000 1 . AA\n";
+    char path[] = "/tmp/elpis-ta-XXXXXX";
+    elpis_ta_store_t *want = elpis_ta_new(), *got = elpis_ta_new();
+    const elpis_ta_t *w[8], *g[8];
+    elpis_name_t root, ex;
+    unsigned nw, ng, i, j, same = 0;
+    FILE *fp;
+    int fd;
+
+    section("trust-anchor-file");
+    fd = mkstemp(path);
+    CHECK(fd >= 0 && want != NULL && got != NULL, "set up");
+    if (fd < 0 || want == NULL || got == NULL)
+        goto out;
+    fp = fdopen(fd, "w");
+    fputs(text, fp);
+    fclose(fp);
+
+    elpis_log_init(ELPIS_LOG_DST_NONE, NULL, ELPIS_LOG_FATAL);
+    elpis_ta_add_builtin(want);
+    CHECK(elpis_ta_load_file(got, path) == ELPIS_OK, "the file loads");
+    unlink(path);
+
+    elpis_name_init_root(&root);
+    nw = elpis_ta_for(want, &root, w, 8);
+    ng = elpis_ta_for(got, &root, g, 8);
+    CHECK(nw == 2 && ng == 2, "two root anchors, as compiled in (%u of %u)",
+          ng, nw);
+    for (i = 0; i < nw; i++)
+        for (j = 0; j < ng; j++)
+            if (w[i]->keytag == g[j]->keytag && w[i]->alg == g[j]->alg &&
+                w[i]->digest_type == g[j]->digest_type &&
+                w[i]->digest_len == g[j]->digest_len &&
+                memcmp(w[i]->digest, g[j]->digest, w[i]->digest_len) == 0)
+                same++;
+    CHECK(same == 2, "each is byte for byte the built-in DS (%u of 2)", same);
+
+    elpis_name_from_text(&ex, "example.");
+    CHECK(elpis_ta_for(got, &ex, g, 8) == 0,
+          "an over-long line is refused, not cut short");
+
+out:
+    if (want != NULL) elpis_ta_free(want);
+    if (got != NULL)  elpis_ta_free(got);
+}
+
 /* ================================================================== */
 /*
  * The retry budget has to be per lookup.  A chain walk asks for a zone's DS
@@ -1741,6 +1823,7 @@ int main(void)
     test_licence();
     test_insecure_delegation();
     test_sec_link();
+    test_ta_file();
     test_val_retry_budget();
     test_cookies();
 

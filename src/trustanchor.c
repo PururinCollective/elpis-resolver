@@ -160,6 +160,10 @@ static int b64dec(const char *s, uint8_t *out, size_t cap, size_t *outlen)
     return ELPIS_OK;
 }
 
+/* NAME TTL CLASS TYPE and three fields, then a key dig has split into
+ * 56-character chunks: a 4096-bit RSA key is thirteen of them. */
+#define TA_MAX_TOK 32
+
 int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
 {
     FILE *fp;
@@ -177,8 +181,10 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
 
     while (fgets(line, sizeof line, fp) != NULL) {
         char *p = line;
-        char *tok[8];
+        char *tok[TA_MAX_TOK];
         unsigned nt = 0;
+        int overflow = 0;
+        const char *what = NULL;     /* the record type, once it is known */
         elpis_ta_t t;
 
         lineno++;
@@ -186,13 +192,17 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
             char *semi = strchr(p, ';');
             if (semi) *semi = '\0';
         }
-        while (*p != '\0' && nt < 8) {
+        while (*p != '\0') {
             char *e;
             while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
                    *p == '{' || *p == '}')
                 p++;
             if (*p == '\0')
                 break;
+            if (nt == TA_MAX_TOK) {
+                overflow = 1;
+                break;
+            }
             tok[nt++] = p;
             e = p;
             while (*e != '\0' && *e != ' ' && *e != '\t' && *e != '\r' &&
@@ -205,27 +215,50 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
             continue;
 
         memset(&t, 0, sizeof t);
-        if (elpis_name_from_text(&t.name, tok[0]) != ELPIS_OK)
-            continue;
-        elpis_name_lower(&t.name);
-
         {
             unsigned ti = 1;
-            if (!elpis_strcasecmp_ascii(tok[ti], "IN") ||
-                !elpis_strcasecmp_ascii(tok[ti], "CH"))
+            uint32_t ttl;
+            /*
+             * NAME [TTL] [CLASS] TYPE, the TTL and class in either order
+             * (RFC 1035 section 5.1).  Skipping only a class meant the TTL
+             * that root.key, a saved dig and a zone file all carry was taken
+             * for the type, and a file in any of those forms loaded nothing.
+             */
+            while (ti < 3 && ti + 1 < nt &&
+                   (!elpis_strcasecmp_ascii(tok[ti], "IN") ||
+                    !elpis_strcasecmp_ascii(tok[ti], "CH") ||
+                    elpis_parse_u32(tok[ti], &ttl) == 0))
                 ti++;
             if (ti + 1 >= nt)
                 continue;
+            /*
+             * Lines that are not anchors -- RRSIGs in a saved dig, $TTL --
+             * pass in silence.  One that is an anchor and cannot be read is
+             * named: an anchor dropped quietly shows only as a smaller count
+             * on the startup line, and a mistyped digest in the middle of a
+             * key rollover is exactly when nobody is counting.
+             */
+            if (!elpis_strcasecmp_ascii(tok[ti], "DS") ||
+                !elpis_strcasecmp_ascii(tok[ti], "DNSKEY") ||
+                !elpis_strcasecmp_ascii(tok[ti], "KEY"))
+                what = tok[ti];
+            else
+                continue;
+            /* More tokens than fit: a key cut short would load as garbage. */
+            if (overflow ||
+                elpis_name_from_text(&t.name, tok[0]) != ELPIS_OK)
+                goto bad;
+            elpis_name_lower(&t.name);
 
             if (!elpis_strcasecmp_ascii(tok[ti], "DS")) {
                 uint32_t tag, alg, dt;
                 size_t dl;
                 if (ti + 4 >= nt)
-                    continue;
+                    goto bad;
                 if (elpis_parse_u32(tok[ti + 1], &tag) != 0 ||
                     elpis_parse_u32(tok[ti + 2], &alg) != 0 ||
                     elpis_parse_u32(tok[ti + 3], &dt) != 0)
-                    continue;
+                    goto bad;
                 /* The digest may be split across the remaining tokens. */
                 {
                     char hex[512];
@@ -234,7 +267,7 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
                     for (k = ti + 4; k < nt; k++)
                         elpis_strlcat(hex, tok[k], sizeof hex);
                     if (hexdec(hex, t.digest, sizeof t.digest, &dl) != ELPIS_OK)
-                        continue;
+                        goto bad;
                 }
                 t.keytag      = (uint16_t)tag;
                 t.alg         = (uint8_t)alg;
@@ -252,11 +285,18 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
                 unsigned k;
 
                 if (ti + 4 >= nt)
-                    continue;
+                    goto bad;
                 if (elpis_parse_u32(tok[ti + 1], &flags) != 0 ||
                     elpis_parse_u32(tok[ti + 2], &proto) != 0 ||
                     elpis_parse_u32(tok[ti + 3], &alg) != 0)
+                    goto bad;
+                /* A key its own zone has revoked is never an anchor again
+                 * (RFC 5011 section 2.1). */
+                if (flags & 0x0080u) {
+                    elpis_warn("trust-anchor-file '%s' line %u: key for %s is "
+                               "revoked, skipped", path, lineno, tok[0]);
                     continue;
+                }
                 b64[0] = '\0';
                 for (k = ti + 4; k < nt; k++)
                     elpis_strlcat(b64, tok[k], sizeof b64);
@@ -264,7 +304,7 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
                 rd[2] = (uint8_t)proto;
                 rd[3] = (uint8_t)alg;
                 if (b64dec(b64, rd + 4, sizeof rd - 4, &kl) != ELPIS_OK)
-                    continue;
+                    goto bad;
                 kl += 4;
 
                 /* Store the key as its SHA-256 DS so one code path validates. */
@@ -285,6 +325,10 @@ int elpis_ta_load_file(elpis_ta_store_t *s, const char *path)
                     added++;
             }
         }
+        continue;
+bad:
+        elpis_warn("trust-anchor-file '%s' line %u: unreadable %s record, "
+                   "skipped", path, lineno, what);
     }
     fclose(fp);
     elpis_info("trust anchors: %u loaded from %s (%u total)", added, path, s->n);
