@@ -28,7 +28,112 @@ compiler's own predefined macros, so it is what the binary is. The CPU is
 `-march=native` becomes `znver3 (native)`. A build that set neither says
 `generic`; one that tunes for something else says `haswell tuned for znver3`.
 
+**`max-pending`, a ceiling on the resolutions a worker has open.** Nothing
+limited them before. Each takes about 11 KB, 26 KB more while it is being
+validated, and lives as long as `query-total-timeout`: 30,000 queries to a zone
+whose servers answered slowly took the process from 5 MB to 326 MB, and a flood
+of names that miss the cache carried on until the kernel stepped in. Past the
+ceiling, a query that misses the cache is answered SERVFAIL at once, which a
+forwarder in front takes as its cue to try another upstream. It is counted as
+`overload=` in the statistics and logged with a rate-limited warning. Cache hits
+and local answers are never refused. The same flood now peaks at 50 MB.
+
+```
+max-pending: auto        # one per MiB this process may use, 512 to 4096
+```
+
+Background refreshes, which had a fixed limit of 4096, now stop at half of it.
+
+**`make fuzz`.** A libFuzzer harness for everything a DNS message passes
+through before it is trusted: the parser, every record type's rdata, and the
+NSEC and NSEC3 denial proofs. It needs clang and builds with ASan and UBSan
+into `bin/`, apart from the normal build. The first run went through 13.4
+million inputs without a finding.
+
 ### Fixed
+
+**TCP answered only what was already cached.** `tcp-idle-timeout` is written
+in seconds and was used as milliseconds, so the shipped `10s` closed every
+client TCP connection ten milliseconds after its query arrived. Anything
+answered from the cache took microseconds and got through; anything that had
+to be resolved lost its connection first, and the client waited out its own
+timeout. 1.1.14 answered none of 12 fresh names over TCP, and all of them now.
+Everything that falls back to TCP was affected: a forwarder retrying a
+truncated reply, clients set to use TCP, large answers.
+
+**Stub zones and forward zones for private names failed with DNSSEC on**, which
+is the default. The first query for a name under a stub-zone or forward-zone
+for, say, `corp.` or `home.arpa.` was SERVFAIL, logged as
+`dnssec: no DS for corp. after 2 attempts`. From the second query on it was
+NXDOMAIN.
+
+The validator's lookup of the DS for `corp.` came back NXDOMAIN, which is cached
+under a different key from a DS answer, so the validator never found it and
+kept asking. A configured zone that the signed tree proves does not exist is
+now answered as insecure, without AD. The proof must verify against the
+parent's keys. Anywhere else, data for a name the signed tree says does not
+exist is still refused. The NXDOMAIN from the second query on came from the
+RFC 8020 rule that nothing exists below a nonexistent name. The rule is sound
+for the public tree, but inside a zone the operator routed elsewhere it
+answered for names that zone actually serves. It no longer applies there.
+
+**`trust-anchor-file` loaded nothing from an ordinary anchor file.** The parser
+read `NAME [CLASS] TYPE`, and every usual source of an anchor file puts a TTL
+in that line: root.key as unbound-anchor writes it, a saved dig, a zone file.
+The TTL was read as the type, every line was skipped, and the startup line said
+`0 loaded` without a warning. The built-in root keys hid this. Past eight
+fields a line was also cut short, and dig splits a key into chunks, so a root
+KSK in dig's format would have loaded truncated, as an anchor that matches
+nothing.
+
+The TTL and class are now accepted in either order, and up to 32 fields are
+read. A line with more is refused rather than cut. An anchor line that cannot
+be read is reported with its line number, and a key with the REVOKE bit set is
+refused (RFC 5011).
+
+```
+WARN  trust-anchor-file '/etc/elpis/root.key' line 7: unreadable DS record, skipped
+```
+
+**The root and TLD delegations were never refreshed.** A TLD's delegation is
+pinned the first time the root refers to it, and pinned entries do not expire.
+Every lookup under the TLD starts from that entry, so nothing asked the root
+about it again: a TLD's nameservers and their addresses stayed as first learned
+for as long as the process ran. A TLD that renumbered would be followed to its
+old addresses until a restart. `tld-refresh` and `root-refresh` were meant to
+prevent this but were read and never used. When a pinned delegation is older
+than its interval, or its TTL if that is shorter, the next query under it now
+sends one refresh in the background and carries on with what is pinned.
+
+**A TCP client that hung up mid-query made its worker spin.** The closed socket
+stayed registered until the answer was ready, and a closed socket is always
+readable. Four such clients held 2.8 cores; the same four now cost nothing. The
+idle timer also no longer closes a connection that is waiting on an answer.
+A client that pipelines queries and never reads the answers is no longer read
+from once 64 KB of answers are waiting. Before, its buffer grew to 4 MB, or
+2 GB for a worker with 512 such connections. Its queries are served again once
+it catches up.
+
+**The status page could be held by one slow client.** It serves one
+connection at a time with a five-second timeout on each read, so a client
+sending a byte every few seconds held it indefinitely. That locked everyone
+else out and stopped the traffic history, which is sampled on the same thread.
+A whole request now has three seconds. A login whose body arrived in a TCP
+segment of its own, as a browser may send it, failed with the right password;
+the body is now read to its `Content-Length`.
+
+**Failed logins on the status page are logged safely.** The warning was
+unthrottled and printed the user name as sent, URL-decoded, so `%0A` started a
+new line of its own in the log. It is rate limited now, and every log line has
+its control characters replaced. A POST with no `user` field logged whatever
+the stack held, since that buffer was only filled when the field was present.
+It is logged as `(none)` now.
+
+**Nothing left behind at exit.** The validator's per-thread memory, a 512 KiB
+signing buffer and a pool of validation states, was never freed, so every
+shutdown reported about 2 MB as leaked and buried anything really lost. Under
+ASan and valgrind across the full workload, the leak report is empty.
+
 
 **A stripped answer asked for twice could be served the second time.** An
 answer whose signatures had been removed was refused when first asked for — and
