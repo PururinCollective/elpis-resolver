@@ -340,9 +340,11 @@ static int cache_try(elpis_task_t *t)
         if (++guard > ELPIS_MAX_CNAME_CHAIN)
             return 0;
 
-        /* Exact type hit. */
+        /* Exact type hit -- but not a referral's DS denial, which has no
+         * SOA to answer with. */
         if (elpis_rcache_get(w->ctx->rcache, &t->qname, t->qtype, t->qclass,
-                             now, c->serve_stale, b) == ELPIS_OK) {
+                             now, c->serve_stale, b) == ELPIS_OK &&
+            !(b->flags & ELPIS_RRF_REFERRAL)) {
             if (b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) {
                 t->rcode = (b->flags & ELPIS_RRF_NXDOMAIN)
                          ? ELPIS_RC_NXDOMAIN : ELPIS_RC_NOERROR;
@@ -732,6 +734,135 @@ typedef enum {
     RESP_NXDOMAIN, RESP_UNUSABLE, RESP_LAME
 } resp_kind_t;
 
+/*
+ * Keep what a signed referral says about the child's DS.
+ *
+ * A referral from a signed parent carries the child's DS set, or the NSEC or
+ * NSEC3 proving there is none, because RFC 4035 section 3.1.4 says it must.
+ * That is the same data a DS query returns -- and the validator used to ask
+ * for it anyway, one zone at a time, a full round trip to the parent after
+ * the answer was already in hand.  www.baidu.com crosses three unsigned com
+ * zones, and waited on three sequential DS queries to com for proofs it had
+ * been given on the way down.
+ *
+ * Nothing here is trusted yet.  The DS set is cached unchecked and verified
+ * against the parent's keys when the chain is walked, exactly as a fetched
+ * one is; the denial is kept in the layout cache_negative() uses, and
+ * denial_proves_cut() verifies it before believing it.
+ */
+static void cache_referral_ds(elpis_task_t *t, const elpis_msg_t *m,
+                              const elpis_name_t *child)
+{
+    elpis_worker_t *w = t->w;
+    const elpis_conf_t *c = &w->ctx->conf;
+    elpis_rrset_buf_t *b = w->rrbuf;
+    elpis_rr_iter_t it;
+    elpis_rr_t rr;
+    int drop = 0;
+    uint32_t ds_ttl = 0xFFFFFFFFu, deny_ttl = 0xFFFFFFFFu;
+    size_t rdlen;
+    int signed_denial = 0;
+
+    if (!c->dnssec)
+        return;
+
+    elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
+    while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+        if (rr.klass != t->qclass)
+            continue;
+        if (rr.type == ELPIS_T_DS && elpis_name_eq(&rr.name, child)) {
+            if (rr.ttl < ds_ttl)
+                ds_ttl = rr.ttl;
+        } else if (rr.type == ELPIS_T_NSEC || rr.type == ELPIS_T_NSEC3) {
+            if (rr.ttl < deny_ttl)
+                deny_ttl = rr.ttl;
+        }
+    }
+
+    if (ds_ttl != 0xFFFFFFFFu) {
+        unsigned pass;
+        elpis_rrset_buf_init(b, child, ELPIS_T_DS, t->qclass,
+                             elpis_clamp_ttl(c, ds_ttl));
+        b->flags = ELPIS_RRF_AUTH;
+        for (pass = 0; pass < 2; pass++) {
+            elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
+            while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+                if (rr.klass != t->qclass || !elpis_name_eq(&rr.name, child))
+                    continue;
+                if (pass == 0 ? rr.type != ELPIS_T_DS
+                              : (rr.type != ELPIS_T_RRSIG || rr.rdlen <= 18 ||
+                                 elpis_get16(m->wire + rr.rdoff) != ELPIS_T_DS))
+                    continue;
+                if (elpis_rdata_canonical(rr.type, m->wire, m->len, rr.rdoff,
+                                          rr.rdlen, w->rd2, ELPIS_MAX_MSG,
+                                          &rdlen, 1) != ELPIS_OK ||
+                    rdlen > 0xFFFFu)
+                    continue;
+                if (pass == 0)
+                    elpis_rrset_buf_add(b, w->rd2, (uint16_t)rdlen);
+                else
+                    elpis_rrset_buf_add_sig(b, w->rd2, (uint16_t)rdlen);
+            }
+        }
+        /* Unsigned, it could only fail verification: let the DS query
+         * fetch the signatures instead. */
+        if (b->count > 0 && b->sigcount > 0)
+            elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
+        return;
+    }
+
+    if (deny_ttl == 0xFFFFFFFFu)
+        return;                         /* an unsigned parent: nothing to keep */
+    deny_ttl = elpis_clamp_neg_ttl(c, deny_ttl);
+    if (deny_ttl == 0)
+        return;
+
+    elpis_rrset_buf_init(b, child, ELPIS_T_DS, t->qclass, deny_ttl);
+    b->flags = ELPIS_RRF_NODATA | ELPIS_RRF_REFERRAL;
+    {
+        static const uint8_t no_soa = 0;
+        elpis_rrset_buf_add(b, &no_soa, 1);
+    }
+    elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
+    while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+        uint8_t item[ELPIS_MAX_NAME + 1024];
+        uint8_t crd[1024];
+        size_t need;
+        elpis_name_t owner;
+
+        if (rr.klass != t->qclass)
+            continue;
+        if (rr.type != ELPIS_T_NSEC && rr.type != ELPIS_T_NSEC3 &&
+            rr.type != ELPIS_T_RRSIG)
+            continue;
+        if (rr.type == ELPIS_T_RRSIG) {
+            uint16_t covered;
+            if (rr.rdlen <= 18)
+                continue;
+            covered = elpis_get16(m->wire + rr.rdoff);
+            if (covered != ELPIS_T_NSEC && covered != ELPIS_T_NSEC3)
+                continue;
+            signed_denial = 1;
+        }
+        if (elpis_rdata_canonical(rr.type, m->wire, m->len, rr.rdoff,
+                                  rr.rdlen, crd, sizeof crd, &rdlen,
+                                  0) != ELPIS_OK)
+            continue;
+        owner = rr.name;
+        elpis_name_lower(&owner);
+        need = 3u + owner.len + rdlen;
+        if (need > sizeof item)
+            continue;
+        elpis_put16(item, rr.type);
+        item[2] = owner.len;
+        memcpy(item + 3, owner.d, owner.len);
+        memcpy(item + 3 + owner.len, crd, rdlen);
+        elpis_rrset_buf_add(b, item, (uint16_t)need);
+    }
+    if (b->count > 1 && signed_denial)
+        elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
+}
+
 /* Harvest a referral: NS records in the authority section plus their glue. */
 static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
                            const elpis_name_t *zone, elpis_name_t *newzone)
@@ -809,6 +940,7 @@ static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
         if (elpis_deleg_addr_count(&nd) > 0)
             elpis_dcache_put(t->w->ctx->dcache, &nd, nd.ttl, pin);
     }
+    cache_referral_ds(t, m, &nd.zone);
 
     t->deleg = nd;
     t->have_deleg = 1;

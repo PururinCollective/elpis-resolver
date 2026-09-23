@@ -132,6 +132,13 @@ typedef struct {
  */
 #define ELPIS_RRF_NXDOMAIN 0x08u
 #define ELPIS_RRF_NODATA   0x10u
+/*
+ * A DS denial taken from a signed referral instead of asked for.  The proof
+ * is the NSEC or NSEC3 a DS query would have returned, but a referral carries
+ * no SOA, so slot 0 is a one-byte placeholder: the validator may use it, and
+ * a client is never answered from it.
+ */
+#define ELPIS_RRF_REFERRAL 0x20u
 
 elpis_cache_t *elpis_rcache_new(uint64_t bytes, unsigned shards);
 

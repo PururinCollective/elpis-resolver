@@ -1904,6 +1904,19 @@ static void val_run(elpis_task_t *t)
                     v->stage = VS_VERIFY;
                     continue;
                 }
+                /*
+                 * A denial kept from a referral that proves nothing here --
+                 * a server that trimmed it, a proof that does not verify.
+                 * Walking on would take a real cut for an ordinary name and
+                 * call the unsigned child forged.  Drop it and ask the parent
+                 * directly, which is what happened before referrals were
+                 * kept at all.
+                 */
+                if (scratch->flags & ELPIS_RRF_REFERRAL) {
+                    elpis_rcache_del(w->ctx->rcache, &next, ELPIS_T_DS,
+                                     ELPIS_CLASS_IN);
+                    continue;
+                }
                 v->walk = next;
                 continue;
             }
