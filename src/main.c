@@ -1242,6 +1242,10 @@ int main(int argc, char **argv)
 
     for (i = 0; i < nthreads; i++)
         elpis_worker_fini(&g_workers[i].w);
+    /* Worker 0 ran on this thread, not through elpis_worker_run; its
+     * validator memory -- and whatever the finis above handed back -- is
+     * given back here. */
+    elpis_dnssec_thread_done();
     elpis_free(g_workers);
 
     if (ctx.conf.pidfile[0] != '\0')
