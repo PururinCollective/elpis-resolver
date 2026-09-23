@@ -294,6 +294,9 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
                                 const elpis_msg_t *m);
 void elpis_resolver_on_timeout(elpis_task_t *t, elpis_outq_t *q);
 void elpis_resolver_on_error(elpis_task_t *t, elpis_outq_t *q, int ede);
+/* The question in flight, again, to the same server (BADCOOKIE, TC). */
+int  elpis_task_resend(elpis_task_t *t, const elpis_addr_t *server,
+                       int force_tcp);
 
 /* ---- DNSSEC (dnssec.c) ---- */
 /* Returns non-zero when the validator suspended on a child lookup. */

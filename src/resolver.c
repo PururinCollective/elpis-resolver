@@ -890,6 +890,15 @@ static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
         /* And it must be strictly below it, or it is not a referral at all. */
         if (elpis_name_eq(&rr.name, zone))
             continue;
+        /*
+         * And it must be a cut above the name being resolved.  An answer can
+         * carry NS records for some other zone -- nic.uk answers www.gov.uk
+         * with a CNAME into service.gov.uk and that zone's NS set alongside --
+         * and taking those as a referral sent www.gov.uk to servers that
+         * refuse it, every one of them, and the lookup ended in SERVFAIL.
+         */
+        if (!elpis_name_is_subdomain(&t->qname, &rr.name))
+            continue;
         if (elpis_rdata_canonical(ELPIS_T_NS, m->wire, m->len, rr.rdoff,
                                   rr.rdlen, rd, sizeof rd, &rdlen, 1) != ELPIS_OK)
             continue;
@@ -1658,6 +1667,38 @@ void elpis_resolver_on_error(elpis_task_t *t, elpis_outq_t *q, int ede)
     if (t->state == ELPIS_TS_DEAD)
         return;
     next_server(t, ede);
+}
+
+/*
+ * Put the question in flight on the wire again, to the same server: after
+ * BADCOOKIE, or over TCP after a truncated reply.
+ *
+ * For a QNAME-minimisation probe that is the shortened name, which exists only
+ * while the probe is being sent -- t->qname holds the real one.  Resending
+ * t->qname asked the full question while the task still expected an answer
+ * to the probe, and whatever came back was read as one.
+ */
+int elpis_task_resend(elpis_task_t *t, const elpis_addr_t *server,
+                      int force_tcp)
+{
+    elpis_name_t real, probe;
+    uint16_t realtype;
+    int rc;
+
+    if (t->qmin_probe &&
+        elpis_name_suffix(&t->qname, t->qmin_labels + 1u, &probe) != 0)
+        t->qmin_probe = 0;              /* as ELPIS_TS_SEND would have done */
+    if (!t->qmin_probe)
+        return elpis_out_send(t, server, force_tcp);
+
+    real = t->qname;
+    realtype = t->qtype;
+    t->qname = probe;
+    t->qtype = ELPIS_T_A;
+    rc = elpis_out_send(t, server, force_tcp);
+    t->qname = real;
+    t->qtype = realtype;
+    return rc;
 }
 
 /* ================================================================== */

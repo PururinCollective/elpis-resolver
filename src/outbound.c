@@ -559,7 +559,7 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         elpis_addr_t server = q->server;
         elpis_out_free(w, q);
         t->sends++;
-        if (elpis_out_send(t, &server, 0) != ELPIS_OK)
+        if (elpis_task_resend(t, &server, 0) != ELPIS_OK)
             elpis_resolver_on_error(t, NULL, ELPIS_EDE_NETWORK_ERROR);
         return;
     }
@@ -570,7 +570,7 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         elpis_addr_t server = q->server;
         elpis_out_free(w, q);
         elpis_stat_inc(&w->stats.truncated, 1);
-        if (elpis_out_send(t, &server, 1) != ELPIS_OK)
+        if (elpis_task_resend(t, &server, 1) != ELPIS_OK)
             elpis_resolver_on_error(t, NULL, ELPIS_EDE_NETWORK_ERROR);
         return;
     }
