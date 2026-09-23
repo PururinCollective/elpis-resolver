@@ -32,6 +32,7 @@ static struct {
     uint64_t queries, servfail, bogus, cache_hits, upstream;
     uint64_t rx_bytes, tx_bytes, rtt_sum_us, rtt_count;
     uint64_t rec_sum_us, rec_count;
+    uint64_t verifies;
     uint64_t cpu_jiffies;
     uint64_t at_ms;
     int      have;
@@ -42,6 +43,7 @@ static uint64_t g_rss_bytes;
 
 /* Merged from every worker's counters, which only ever grow. */
 static uint64_t g_rx_total, g_tx_total, g_rtt_sum_us, g_rtt_count;
+static uint64_t g_verify_total;
 static uint64_t g_rec_sum_us, g_rec_count;
 
 int elpis_tm_enabled = 0;
@@ -174,6 +176,14 @@ static void addr_only(const elpis_addr_t *a, char *out, size_t outsz)
 /* Worker side                                                         */
 /* ------------------------------------------------------------------ */
 
+void elpis_tm_verified(elpis_wtm_t *w, uint64_t n)
+{
+    if (!elpis_tm_enabled || w == NULL || n == 0)
+        return;
+    w->verifies += n;
+    w->dirty = 1;
+}
+
 void elpis_tm_observe(elpis_wtm_t *w, uint64_t service_us, int recursed)
 {
     if (!elpis_tm_enabled || w == NULL)
@@ -287,6 +297,7 @@ void elpis_tm_publish(elpis_wtm_t *w)
     pthread_mutex_lock(&g_lock);
     g_rx_total   += w->rx_bytes;
     g_tx_total   += w->tx_bytes;
+    g_verify_total += w->verifies;
     g_rtt_sum_us += w->rtt_sum_us;
     g_rtt_count  += w->rtt_count;
     g_rec_sum_us += w->rec_sum_us;
@@ -304,6 +315,7 @@ void elpis_tm_publish(elpis_wtm_t *w)
 
     memset(w->tab, 0, sizeof w->tab);
     w->rx_bytes = w->tx_bytes = 0;
+    w->verifies = 0;
     w->rtt_sum_us = w->rtt_count = 0;
     w->rec_sum_us = w->rec_count = 0;
     w->dirty = 0;
@@ -424,6 +436,7 @@ void elpis_tm_tick(const void *ctxv)
         smp.rtt_us     = dc ? (uint32_t)((g_rtt_sum_us - g_prev.rtt_sum_us) / dc) : 0u;
         smp.rec_us     = dr ? (uint32_t)((g_rec_sum_us - g_prev.rec_sum_us) / dr) : 0u;
         smp.rtt_n      = dc;
+        smp.verifies   = g_verify_total - g_prev.verifies;
         smp.rec_n      = dr;
 
         hz = sysconf(_SC_CLK_TCK);
@@ -451,6 +464,7 @@ void elpis_tm_tick(const void *ctxv)
     g_prev.upstream    = s->upstream_queries;
     g_prev.rx_bytes    = g_rx_total;
     g_prev.tx_bytes    = g_tx_total;
+    g_prev.verifies    = g_verify_total;
     g_prev.rtt_sum_us  = g_rtt_sum_us;
     g_prev.rtt_count   = g_rtt_count;
     g_prev.rec_sum_us  = g_rec_sum_us;

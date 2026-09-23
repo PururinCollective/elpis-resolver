@@ -265,6 +265,14 @@ void elpis_worker_fini(elpis_worker_t *w)
 /* Fold this worker's counters into the shared totals. */
 static void publish_stats(elpis_worker_t *w)
 {
+    /* Runs on this worker's own loop, so the thread-local count is this
+     * worker's own. */
+    {
+        uint64_t nv = elpis_dnssec_take_verifies();
+        w->stats.dnssec_verifies += nv;
+        elpis_tm_verified(&w->tm, nv);
+    }
+
     elpis_stats_t *g = &w->ctx->stats;
     const uint64_t *src = (const uint64_t *)&w->stats;
     uint64_t *dst = (uint64_t *)g;

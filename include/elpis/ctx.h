@@ -23,6 +23,12 @@ typedef struct {
     uint64_t dnssec_bogus, dns64_synth, prefetches, dropped;
     uint64_t cookie_ok, cookie_bad;
     uint64_t tasks;            /* tasks created, client and internal alike */
+    /*
+     * Public-key signature verifications.  This is the expensive thing the
+     * resolver does -- a rate here is a real measure of what the machine can
+     * take, in a way that counting SIMD helpers over forty-byte names is not.
+     */
+    uint64_t dnssec_verifies;
 } elpis_stats_t;
 
 /*

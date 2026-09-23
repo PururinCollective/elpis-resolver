@@ -633,6 +633,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, ",\"recursions\":"); bputu(b, s->recursions);
     bputs(b, ",\"upstream\":");  bputu(b, s->upstream_queries);
     bputs(b, ",\"nxdomain\":");  bputu(b, s->nxdomain);
+    bputs(b, ",\"verifies\":"); bputu(b, s->dnssec_verifies);
     bputs(b, ",\"servfail\":");  bputu(b, s->servfail);
     bputs(b, ",\"refused\":");   bputu(b, s->refused);
     bputs(b, ",\"timeouts\":");  bputu(b, s->timeouts);
@@ -681,6 +682,8 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     for (i = 0; i < n; i++) { if (i) bputs(b, ","); bputu(b, hist[i].rec_us); }
     bputs(b, "],\"recn\":[");
     for (i = 0; i < n; i++) { if (i) bputs(b, ","); bputu(b, hist[i].rec_n); }
+    bputs(b, "],\"verify\":[");
+    for (i = 0; i < n; i++) { if (i) bputs(b, ","); bputu(b, hist[i].verifies); }
     bputs(b, "]},");
 
     bputs(b, "\"top\":{");

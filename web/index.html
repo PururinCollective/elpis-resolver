@@ -710,6 +710,7 @@ var VIEWS = [
         "<b>secure</b><span>" + num(st.secure) + "</span>" +
         "<b>insecure</b><span>" + num(st.insecure) + "</span>" +
         "<b>bogus</b><span>" + num(st.bogus) + "</span>" +
+        "<b>signatures verified</b><span>" + num(st.verifies) + "</span>" +
         "<b>validating</b><span>" + (d.server.dnssec ? 'yes' : 'no') + "</span>" +
       "</div></div>" +
       "<div><h4>Transport</h4><div class='kv'>" +
@@ -795,6 +796,8 @@ var VIEWS = [
         num(last(d.history.servfail)) + ' / ' + num(last(d.history.bogus)));
     h += gpanel('Cache hits vs upstream per second',
         num(last(d.history.hits)) + ' / ' + num(last(d.history.upstream)));
+    h += gpanel('DNSSEC signatures verified per second',
+        num(last(d.history.verify)) + '/s');
     b.innerHTML = h;
     var cv = b.querySelectorAll('canvas');
     graph(cv[0], [{ data: d.history.qps, color: '#2f9ee0' }], { h: 84 });
@@ -802,6 +805,7 @@ var VIEWS = [
                   { data: d.history.bogus, color: '#e0a32f', fill: false }], { h: 70 });
     graph(cv[2], [{ data: d.history.hits, color: '#4caf50' },
                   { data: d.history.upstream, color: '#9b59d0', fill: false }], { h: 70 });
+    graph(cv[3], [{ data: d.history.verify, color: '#e0a32f' }], { h: 70 });
   }},
 
 { id:'taskman', title:'Task Manager', w:800, h:500,

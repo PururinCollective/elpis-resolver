@@ -69,6 +69,10 @@ int elpis_rrsig_verify(const elpis_conf_t *conf,
                        int64_t now, int *ede);
 
 /* Verify an RRset against every key in a DNSKEY RRset. */
+/* Signature verifications done on the calling thread since the last call,
+ * which zeroes the count.  The worker folds it into its statistics. */
+uint64_t elpis_dnssec_take_verifies(void);
+
 int elpis_rrset_validate(const elpis_conf_t *conf,
                          const elpis_rrset_buf_t *set,
                          const elpis_rrset_buf_t *keys,

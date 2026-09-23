@@ -297,6 +297,21 @@ static size_t build_signed_data(const elpis_name_t *owner, uint16_t type,
 /* Signature verification                                              */
 /* ================================================================== */
 
+/*
+ * Verifications done on this thread since the worker last collected them.
+ * Counted here rather than passed down because every algorithm funnels
+ * through this one function, and it has neither the worker nor the task --
+ * the crypto layer does not know what a query is, and should not have to.
+ */
+static ELPIS_TLS uint64_t g_verifies;
+
+uint64_t elpis_dnssec_take_verifies(void)
+{
+    uint64_t n = g_verifies;
+    g_verifies = 0;
+    return n;
+}
+
 static int verify_with_key(const elpis_conf_t *c, uint8_t alg,
                            const uint8_t *key, size_t keylen,
                            const uint8_t *data, size_t datalen,
@@ -304,6 +319,8 @@ static int verify_with_key(const elpis_conf_t *c, uint8_t alg,
 {
     int halg = elpis_alg_hash(c, alg);
     uint8_t digest[64];
+
+    g_verifies++;
 
     if (alg == c->alg_mldsa44)
         return elpis_mldsa_verify(ELPIS_MLDSA_44, key, keylen, data, datalen,

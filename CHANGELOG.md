@@ -10,6 +10,27 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 1.1.10 — 2026-09-23
+
+### Added
+
+- **Signature verifications, counted and reported.** The lifetime total and a
+  rate on `SIGUSR1`, a per-second graph in the Queries window, and the total in
+  Overview.
+
+  ```
+  dnssec verifies=34 (3.1/s over 11s of uptime)
+  ```
+
+  Public-key verification is the expensive thing a validating resolver does,
+  so a rate here is the closest the resolver comes to reporting what the
+  machine underneath it can take. Counted in `verify_with_key()`, which every
+  algorithm passes through, and folded into the worker's statistics on that
+  worker's own thread.
+
+  Unlike the rest of the status-page counters this one is kept whether the page
+  is on or not, because the point of it is to be readable from the log.
+
 ## 1.1.9 — 2026-09-23
 
 ### Added

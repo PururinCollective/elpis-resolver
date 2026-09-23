@@ -54,6 +54,7 @@ typedef struct {
     uint64_t      rec_sum_us;      /* ... and for the ones that recursed  */
     uint64_t      rec_count;
     uint64_t      rx_bytes, tx_bytes;
+    uint64_t      verifies;        /* signature verifications this second */
     unsigned      dirty : 1;
 } elpis_wtm_t;
 
@@ -66,6 +67,7 @@ typedef struct {
     uint64_t rtt_n, rec_n;         /* how many each mean was taken over   */
     uint32_t cpu_milli;            /* 1000 = one core fully busy          */
     uint64_t rss_bytes;
+    uint64_t verifies;             /* public-key verifications per second */
 } elpis_tmsample_t;
 
 typedef struct {
@@ -95,6 +97,8 @@ void elpis_tm_init(int enabled);
  * one, touching no formatting at all.
  */
 void elpis_tm_observe(elpis_wtm_t *w, uint64_t service_us, int recursed);
+/* Signature verifications the worker did since the last publish. */
+void elpis_tm_verified(elpis_wtm_t *w, uint64_t n);
 void elpis_tm_answer(elpis_wtm_t *w, const elpis_name_t *qname,
                      const elpis_addr_t *client, unsigned rcode, int bogus);
 /* Record an upstream server that failed to answer. */

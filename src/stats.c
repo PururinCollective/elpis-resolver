@@ -73,6 +73,18 @@ void elpis_stats_report(elpis_ctx_t *ctx)
                (unsigned long long)s->dnssec_secure,
                (unsigned long long)s->dnssec_insecure,
                (unsigned long long)s->dnssec_bogus);
+    /*
+     * Signature verifications, total and per second of uptime.  This is the
+     * costly work, so the rate is the closest thing to "what can this machine
+     * take" that the resolver can report about itself while it is running.
+     */
+    {
+        uint64_t secs = up ? up : 1u;
+        elpis_info("  dnssec verifies=%llu (%.1f/s over %llus of uptime)",
+                   (unsigned long long)s->dnssec_verifies,
+                   (double)s->dnssec_verifies / (double)secs,
+                   (unsigned long long)secs);
+    }
 
     report_cache(ctx->mcache);
     report_cache(ctx->rcache);
