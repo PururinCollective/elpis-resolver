@@ -820,7 +820,6 @@ static int start_tcp(elpis_task_t *t, elpis_outq_t *q, const uint8_t *msg,
 static void tcp_fail(elpis_worker_t *w, elpis_outq_t *q, int ede)
 {
     elpis_task_t *t = q->task;
-    t = q->task;
     if (t != NULL) {
         t->out = NULL;
         q->task = NULL;

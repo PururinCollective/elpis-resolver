@@ -905,7 +905,12 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
     }
 
     if (strncmp(req, "POST /api/login", 15) == 0) {
-        char user[64], pass[256], set[256];
+        /*
+         * Empty until form_field() fills them: a login with no "user" field
+         * went on to log the name anyway, printing whatever the stack held --
+         * up to and past the end of the buffer.
+         */
+        char user[64] = "", pass[256] = "", set[256];
         int ok = 0;
 
         if (form_field(body, "user", user, sizeof user) &&
