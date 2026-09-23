@@ -64,6 +64,8 @@ struct elpis_outq {
      * cache when it lands or times out, and is then freed.
      */
     unsigned       probe       : 1;
+    unsigned       used_0x20   : 1;   /* the name went out case-randomised */
+    unsigned       caps_test   : 1;   /* sent as-is to see if 0x20 is why  */
     /* Timed out, and kept a while longer in case the answer is only late. */
     unsigned       late        : 1;
     uint32_t       timeout_ms;

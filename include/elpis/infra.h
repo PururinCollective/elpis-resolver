@@ -23,6 +23,15 @@
 #define ELPIS_INF_COOKIE_OK  0x02u
 #define ELPIS_INF_TCP_ONLY   0x04u
 #define ELPIS_INF_DNSSEC_NO  0x08u   /* strips DO or drops signed answers */
+/*
+ * Case randomisation (0x20).  Some authorities silently drop any query whose
+ * name is not all lowercase -- intel.com's four did, from here, for a while --
+ * so a server that has timed out without ever answering a randomised name is
+ * asked once as-is.
+ * An answer to that marks it NO_0X20; an answer to a randomised one, 0X20_OK.
+ */
+#define ELPIS_INF_0X20_OK    0x10u
+#define ELPIS_INF_NO_0X20    0x20u
 
 /* Starting estimate for a server we have never talked to. */
 #define ELPIS_RTT_INITIAL    376u

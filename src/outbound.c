@@ -182,8 +182,20 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
 
     memcpy(q->qname_wire, t->qname.d, t->qname.len);
     q->qnamelen = t->qname.len;
-    if (c->use_0x20)
-        apply_0x20(q->qname_wire, q->qnamelen);
+    /*
+     * Not over TCP, where the handshake already shuts out an off-path
+     * attacker and the entropy buys nothing.  Not to a server known to drop
+     * randomised names.  And not, once, to a server that has timed out
+     * without ever answering one -- that is the test for the first case.
+     */
+    if (c->use_0x20 && !q->over_tcp && !(inf->flags & ELPIS_INF_NO_0X20)) {
+        if ((inf->flags & ELPIS_INF_0X20_OK) || inf->timeouts == 0) {
+            apply_0x20(q->qname_wire, q->qnamelen);
+            q->used_0x20 = 1;
+        } else {
+            q->caps_test = 1;
+        }
+    }
 
     if (elpis_bld_question_raw(&b, q->qname_wire, q->qnamelen,
                                q->qtype, q->qclass) != ELPIS_OK)
@@ -505,6 +517,41 @@ static void absorb_cookie(elpis_worker_t *w, elpis_outq_t *q,
                            m->cookie + 8, (size_t)m->cookie_len - 8u);
 }
 
+/*
+ * Settle whether this server takes case-randomised names, from what it has
+ * answered so far -- read now, not as it stood when the query left.  The two
+ * kinds of answer can arrive in either order: a server that is merely slow
+ * lets its randomised query time out, is re-asked as-is, and then answers
+ * both.  One randomised answer is proof enough that 0x20 is not the problem,
+ * and overrides a lowercase one that happened to land first.
+ *
+ * A lossy server can still be misjudged -- a randomised query lost, then a
+ * lowercase one answered -- and keeps its names in lowercase until its infra
+ * entry goes.  That costs it the 0x20 bits and nothing else; the ID, port and
+ * cookie checks are unchanged.
+ */
+static void learn_0x20(elpis_worker_t *w, const elpis_outq_t *q)
+{
+    elpis_infra_info_t inf;
+
+    elpis_infra_get(w->ctx->infra, &q->server, &inf);
+    if (q->used_0x20) {
+        if (!(inf.flags & ELPIS_INF_0X20_OK))
+            elpis_infra_set_flag(w->ctx->infra, &q->server,
+                                 ELPIS_INF_0X20_OK, 1);
+        if (inf.flags & ELPIS_INF_NO_0X20)
+            elpis_infra_set_flag(w->ctx->infra, &q->server,
+                                 ELPIS_INF_NO_0X20, 0);
+    } else if (!(inf.flags & (ELPIS_INF_0X20_OK | ELPIS_INF_NO_0X20))) {
+        char ab[80];
+        elpis_infra_set_flag(w->ctx->infra, &q->server, ELPIS_INF_NO_0X20, 1);
+        elpis_logf_rl(ELPIS_LOG_INFO, ELPIS_DROP__MAX + 1, __FILE__, __LINE__,
+                      "%s answers only names sent in lowercase; "
+                      "case randomisation is off for it",
+                      elpis_addr_str(&q->server, ab, sizeof ab));
+    }
+}
+
 static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
                            const elpis_msg_t *m)
 {
@@ -521,6 +568,8 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     rtt = (uint32_t)(elpis_cached_now_ms() - q->sent_ms);
     elpis_infra_rtt_ok(w->ctx->infra, &q->server, rtt);
     absorb_cookie(w, q, m);
+    if (q->used_0x20 || q->caps_test)
+        learn_0x20(w, q);
 
     if (q->used_edns) {
         if (m->have_opt) {
