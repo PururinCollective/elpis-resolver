@@ -10,7 +10,49 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.0.0 — 2026-09-24
+
+The first release meant to be left running. After the review that made 1.1.15,
+this one went looking for what the review had not reached: forwarding set-ups,
+the shutdown path, and a benchmark across the services people actually use.
+
+It is 2.0 for one reason. Behind `forward-zone: .`, a private zone that the
+upstream serves now has to be routed here as well (see **Changed**), so a
+config that resolved it before will not until that line is added. Apart from
+that, no config that worked stops working.
+
+The benchmark covered 28 groups of popular services, 1,221 lookups: Epic,
+Ubisoft Connect, EA, Steam, Google, YouTube, Telegram Web, WhatsApp, Pixiv,
+Apple, Microsoft and Windows Update, Discord, Lowyat.net, GitHub, ASUS, MSI,
+Acer, Gigabyte and other PC vendors, Taobao, Shopee, Malaysian banks and
+government sites, and more. Every host of a site was asked A, AAAA and HTTPS
+at once, as a browser asks, and each answer was checked against 1.1.1.1:
+
+```
+                         p50       p90       p99
+Elpis, warm cache        0.6 ms    1.1 ms    1.5 ms
+Elpis, cold cache        82 ms     269 ms    709 ms   (real recursion from empty)
+1.1.1.1 from here        4.2 ms    15.5 ms   170 ms
+```
+
+Elpis agreed with 1.1.1.1 on 1,218 of 1,221 answers. In two of the three, a
+CDN answered differently for a different location. In the third,
+`www.pbebank.com` AAAA, Elpis answered and 1.1.1.1 returned SERVFAIL. The
+lookups that failed are the ones the zone itself breaks: `www.cimb.com.my`'s
+nameservers drop HTTPS-type queries unanswered, so 1.1.1.1 cannot answer them
+either.
+
+### Added
+
+**Resolution failures are remembered (RFC 9520).** A question whose resolution
+ends in SERVFAIL is answered SERVFAIL straight away for a while, with EDE 13
+"Cached Error". The first hold is 5 seconds; it doubles while the same
+question keeps failing, up to a minute, and any answer clears it. Before
+this, every retry repeated the whole failed resolution. For `www.cimb.com.my`
+HTTPS that took 5.3 seconds the first time and 9.5 the second, and browsers
+ask that type for every site and retry failures. Every worker thread shares
+the one record, so a retry arriving on a different worker is answered at
+once too. Refusals under `max-pending` are not recorded.
 
 ### Fixed
 
@@ -64,6 +106,39 @@ github.com AAAA, DO and CD    before: synthesised          now: left as it is
 
 Names with real AAAA records, NXDOMAIN answers and answers that fail
 validation are treated as before: kept, not synthesised over, and SERVFAIL.
+
+**AD was set on NXDOMAIN answers that NSEC3 opt-out cannot prove.** Some
+signed zones prove that a name does not exist with an NSEC3 "opt-out" span.
+That shows the name is not among the records the zone signed, but an unsigned
+delegation the zone chose not to sign could still be there. RFC 5155 section
+9.2 forbids AD on such an answer, and Unbound and 1.1.1.1 leave it off. Elpis
+set it, for every nonexistent name under `.com` and `gov.my`, among others. It
+no longer does. Denials from zones that do not use opt-out, such as `isc.org`
+and `nic.cz`, keep AD.
+
+**`www.hasil.gov.my` failed with SERVFAIL.** The site of LHDN, Malaysia's tax
+authority, is a CNAME to a name in an unsigned zone delegated below
+`eservices.hasil.gov.my`, and that name is itself a CNAME, to Microsoft's
+application proxy. Checking the chain of trust down to the answer, Elpis asked
+for `eservices.hasil.gov.my`'s DS and got the CNAME back. It never found a DS
+answer, and gave up with `no DS for eservices.hasil.gov.my after 2 attempts`.
+A name that owns a CNAME cannot be the start of a delegated zone, so the check
+now carries on past it. `www.hasil.gov.my` and `mytax.hasil.gov.my` resolve,
+insecure as they should be, and `hasil.gov.my` itself keeps AD.
+
+**Zones on a DNS provider's nameservers were always asked through the same
+one.** Whether that nameserver was near or far made no difference. When a
+zone's nameservers live in another domain, as on Google Cloud DNS, Route 53
+or Azure DNS, Elpis looked up the address of one of them, used it, and cached
+the zone that way. The others were never looked up while that one answered.
+`telegram.org` was always asked through `ns-cloud-b1`, 80 ms away, never
+through `b2` or `b4`, which are 7 ms away. Each new Telegram name also cost
+a second round trip, a query-minimisation probe for `web.telegram.org` that
+the cache could already answer. The other nameservers are now looked up in
+the background and measured like any other server, and the probe is skipped
+when the cache already has the answer. New Telegram names went from 164 ms to
+7–9 ms. Telegram Web opens a dozen of them (`kws1`–`kws5`, `zws1`–`zws5`,
+`venus`, `pluto` and more) as it loads.
 
 **The private-zone rule from 1.1.15 now applies only to the zone configured.**
 1.1.15 answered a stub-zone or forward-zone as insecure when the signed tree
