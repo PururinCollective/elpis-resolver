@@ -8,7 +8,7 @@ BINDIR    := bin
 BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
-VERSION   := 2.0.0
+VERSION   := 2.0.1
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.
@@ -72,9 +72,17 @@ OBJ      := $(SRC:.c=.o)
 # rebuild every object; the header is rewritten only when the revision really
 # changes, and then only the one file that includes it recompiles.  Outside a
 # git checkout (a release tarball) it comes out empty and the page says so.
-GITREV   := $(shell git rev-parse --short=12 HEAD 2>/dev/null)
-ifneq ($(GITREV),)
-GITREV   := $(GITREV)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+#
+# A build from a release tag says so and nothing else -- "v2.0.1".  Any other
+# build is its branch and commit, "main@bcc97d252fac", or the commit alone on
+# a detached HEAD.  There is no "-dirty": it was on every build made with a
+# change not yet committed, which is most of them while working, and a
+# release carrying it read as a broken one.
+GITREV   := $(shell git describe --tags --exact-match HEAD 2>/dev/null)
+ifeq ($(GITREV),)
+GITHASH  := $(shell git rev-parse --short=12 HEAD 2>/dev/null)
+GITBR    := $(shell git symbolic-ref --short -q HEAD 2>/dev/null)
+GITREV   := $(if $(GITBR),$(if $(GITHASH),$(GITBR)@$(GITHASH)),$(GITHASH))
 endif
 
 # SIMD kernels compiled with elevated ISA + selected at runtime via CPUID.

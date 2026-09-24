@@ -10,7 +10,15 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.0.1 — 2026-09-24
+
+### Changed
+
+**The build string names the release.** A build from a release tag reports
+just the tag, `v2.0.1`. Any other build reports its branch and commit,
+`main@bcc97d252fac`. It appears in the About window, the status JSON and the
+identity TXT record. The `-dirty` suffix is gone. It marked every build made
+with an uncommitted change, and a release showing it looked broken.
 
 ### Added
 
