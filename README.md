@@ -76,6 +76,38 @@ built-in defaults.
 
 ### Building it yourself
 
+A C compiler, make and the C library headers are all it needs. The
+cryptography is its own, and the binary links nothing but libc. On Debian or
+Ubuntu:
+
+```bash
+sudo apt install build-essential git
+```
+
+git is only for the clone and for the commit a binary reports; a tarball
+builds without it and says `no git checkout`. python3, if it is there,
+regenerates the status page after you edit `web/index.html`; without it the
+committed copy is used.
+
+For working on Elpis rather than running it, three more tools come in. None is
+needed to build or run it, so a VM or container that only runs the resolver
+can leave them out:
+
+```bash
+sudo apt install valgrind cppcheck clang
+```
+
+| tool | for |
+|---|---|
+| `clang` | `make fuzz`, and a second compiler's warnings |
+| `valgrind` | memory errors and leaks in a running resolver |
+| `cppcheck` | static analysis |
+
+```bash
+valgrind --leak-check=full bin/elpis -c bin/elpis.conf   # Ctrl-C for the report
+cppcheck --enable=warning,portability -q -Iinclude -Isrc src src/crypto
+```
+
 The release binary is built for portability — a generic `x86-64` baseline that
 runs anywhere. If you want the last few percent, compile for your own CPU:
 
@@ -111,9 +143,10 @@ recompiles everything they apply to.
 ```bash
 make            # ordinary build      -> bin/elpis + bin/elpis.conf
 make static     # one relocatable binary, no shared libraries
-make test       # 360 self tests, no network needed
+make test       # 368 self tests, no network needed
 make debug      # -O0 -g3
 make asan       # address and UB sanitizers
+make fuzz       # libFuzzer over the message parser, needs clang
 make clean      # objects and binaries; keeps your bin/elpis.conf
 make distclean  # bin/ and everything in it
 ```
