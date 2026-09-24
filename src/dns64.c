@@ -74,10 +74,18 @@ int elpis_dns64_needed(elpis_task_t *t)
     if (!c->dns64_synth_all && has_type(&t->ans, ELPIS_T_AAAA))
         return 0;
     /*
-     * A DNSSEC-validating client asked for the data itself; handing it a
-     * synthesised AAAA it cannot verify would look like an attack.
+     * RFC 6147 section 5.5.  DO and CD together are a client validating for
+     * itself, which must get the data as it is and synthesise on its own: an
+     * AAAA made here would fail its validation.  DO alone is not that -- it is
+     * any DNSSEC-aware forwarder in front of us, AdGuard Home with DNSSEC on
+     * among them -- and is synthesised for like anyone else, from answers the
+     * validator has already passed.  This had the two the other way round:
+     * behind such a forwarder an IPv6-only client got no address at all for
+     * an IPv4-only name, and CLAT could not discover the prefix from
+     * ipv4only.arpa, while the one client that must not be synthesised for
+     * was.
      */
-    if (t->client_do && !t->client_cd)
+    if (t->client_do && t->client_cd)
         return 0;
     return 1;
 }

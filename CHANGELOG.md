@@ -10,6 +10,28 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**DNS64 skipped DNSSEC-aware clients and synthesised for the one it must
+not.** RFC 6147 has a client that sets both DO and CD validate for itself and
+do its own synthesis, so it must be given the data untouched. DO alone is
+what any DNSSEC-aware forwarder sends, AdGuard Home with DNSSEC enabled among
+them, and it should be synthesised for like anyone else. Elpis had the two
+the other way round. Behind such a forwarder an IPv6-only client got no
+address at all for an IPv4-only name, and CLAT on Android, Windows and
+Apple devices could not find the NAT64 prefix from `ipv4only.arpa`:
+
+```
+github.com AAAA, DO set       before: NOERROR, no answer   now: 64:ff9b::14cd:f3a6
+ipv4only.arpa AAAA, DO set    before: NOERROR, no answer   now: 64:ff9b::c000:aa ...
+github.com AAAA, DO and CD    before: synthesised          now: left as it is
+```
+
+Names with real AAAA records, NXDOMAIN answers and answers that fail
+validation are treated as before: kept, not synthesised over, and SERVFAIL.
+
 ## 1.1.15 — 2026-09-24
 
 A release review: the faults a resolver meets after weeks of running that a
