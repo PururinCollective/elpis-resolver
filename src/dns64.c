@@ -161,15 +161,62 @@ int elpis_dns64_start(elpis_task_t *t)
 }
 
 /*
+ * dns64-strip-a: try an IPv6-only network without turning IPv4 off.  The
+ * client is given no A records at all -- A and ANY answers lose theirs -- and
+ * AAAA works as DNS64 always does, real where the name has it and
+ * synthesised where it does not, so everything it reaches goes over IPv6 or
+ * through NAT64.  The answer stays NOERROR: the name exists, it only has no
+ * address this client may see.  A client that sets DO and CD is validating
+ * for itself and gets the data as it is, as it does from DNS64.
+ */
+int elpis_dns64_strips(const elpis_conf_t *c, uint16_t qtype, int do_bit,
+                       int cd_bit)
+{
+    return c->dns64 && c->dns64_strip_a &&
+           (qtype == ELPIS_T_A || qtype == ELPIS_T_ANY) &&
+           !(do_bit && cd_bit);
+}
+
+static void strip_a(elpis_task_t *t)
+{
+    unsigned i, out = 0, dropped = 0;
+
+    for (i = 0; i < t->ans.n; i++) {
+        const elpis_trr_t *rr = &t->ans.rr[i];
+        int drop = 0;
+
+        if (rr->section == (uint8_t)ELPIS_SEC_ANSWER) {
+            if (rr->type == ELPIS_T_A)
+                drop = 1;
+            else if (rr->type == ELPIS_T_RRSIG && rr->rdlen >= 2 &&
+                     elpis_get16(elpis_trr_rd(&t->ans, i)) == ELPIS_T_A)
+                drop = 1;               /* a signature over nothing */
+        }
+        if (drop)
+            dropped++;
+        else
+            t->ans.rr[out++] = t->ans.rr[i];
+    }
+    t->ans.n = out;
+    /* What is left is not what the zone signed: no AD on it. */
+    if (dropped > 0 && t->sec == ELPIS_SEC_SECURE)
+        t->sec = ELPIS_SEC_INSECURE;
+}
+
+/*
  * Called on the way out for every answer.  Synthesis itself happens in the
- * child callback; this only strips AAAA records that fall inside an address
- * range the operator has told us to ignore (RFC 6147 section 5.1.4).
+ * child callback; this strips what the client is not to see: A records under
+ * dns64-strip-a, and AAAA records inside a range the operator has told us to
+ * ignore (RFC 6147 section 5.1.4).
  */
 void elpis_dns64_apply(elpis_task_t *t)
 {
     const elpis_conf_t *c = &t->w->ctx->conf;
     unsigned i, out = 0;
 
+    if (t->has_client &&
+        elpis_dns64_strips(c, t->orig_qtype, t->client_do, t->client_cd))
+        strip_a(t);
     if (c->n_dns64_ignore == 0)
         return;
 

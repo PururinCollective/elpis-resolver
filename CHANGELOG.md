@@ -10,6 +10,32 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**`dns64-strip-a`: an IPv6-only network without turning IPv4 off.** With
+`dns64: yes`, A questions are answered with no A records (NOERROR: the name
+still exists), so a client sees only AAAA. That is the real AAAA where a name
+has one and a synthesised address in the DNS64 prefix where it does not, so
+everything it looks up is reached over IPv6 or through NAT64. `ipv4only.arpa`
+keeps working, so CLAT still finds the prefix. A client that sets DO and CD is
+validating for itself and gets the real data, as with DNS64. Every client of
+the resolver loses IPv4 in DNS, so it is meant for an instance or listener of
+its own:
+
+```
+dns64: yes
+dns64-prefix: 2402:4e20:b00b:7fff:64:ff9b::/96
+dns64-strip-a: yes
+```
+
+### Fixed
+
+**DNS64 listed a CNAME chain twice.** Synthesising for a name reached through
+CNAMEs copied the chain from its A lookup into an answer that already held it,
+so `www.baidu.com` AAAA listed every CNAME twice.
+
 ## 2.0.0 — 2026-09-24
 
 The first release meant to be left running. After the review that made 1.1.15,

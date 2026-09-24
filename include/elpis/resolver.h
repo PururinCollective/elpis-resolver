@@ -327,6 +327,9 @@ void elpis_dns64_embed(const elpis_prefix_t *p, const uint8_t v4[4],
 int  elpis_dns64_needed(elpis_task_t *t);
 int  elpis_dns64_start(elpis_task_t *t);
 void elpis_dns64_apply(elpis_task_t *t);
+/* dns64-strip-a: does this client's A question lose its A records? */
+int  elpis_dns64_strips(const elpis_conf_t *c, uint16_t qtype, int do_bit,
+                        int cd_bit);
 
 /* ---- local data (localzone.c) ---- */
 int  elpis_localzone_answer(elpis_task_t *t);

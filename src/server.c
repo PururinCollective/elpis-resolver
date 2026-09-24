@@ -677,7 +677,14 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     kflags = (uint8_t)((m.do_bit ? ELPIS_MK_DO : 0) |
                        ((m.hdr.flags & ELPIS_FLAG_CD) ? ELPIS_MK_CD : 0));
 
-    if (try_cache_fast(w, &m, to, kflags, conn != NULL,
+    /*
+     * The message cache holds A answers as the zone gave them; with
+     * dns64-strip-a they have to be answered the long way round, where the
+     * records are taken out.  That is still the RRset cache, microseconds.
+     */
+    if (!elpis_dns64_strips(&w->ctx->conf, m.qtype, m.do_bit,
+                            (m.hdr.flags & ELPIS_FLAG_CD) != 0) &&
+        try_cache_fast(w, &m, to, kflags, conn != NULL,
                        w->txbuf, ELPIS_MAX_MSG, &outlen)) {
         /*
          * A cache hit never becomes a task, so this is the only place it can

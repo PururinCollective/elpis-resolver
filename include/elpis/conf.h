@@ -104,6 +104,7 @@ typedef struct {
     /* --- DNS64 ---------------------------------------------------- */
     uint8_t      dns64;
     uint8_t      dns64_synth_all;
+    uint8_t      dns64_strip_a;            /* answer A queries with no A */
     elpis_prefix_t dns64_prefix;
     elpis_prefix_t dns64_ignore_aaaa[8];
     unsigned     n_dns64_ignore;

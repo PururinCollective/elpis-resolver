@@ -1290,6 +1290,18 @@ static void test_conf(void)
           "cache-size auto");
     elpis_strlcpy(line, "dns64-prefix: 64:ff9b::/96", sizeof line);
     CHECK(elpis_conf_parse_line(&c, line, "-", 5) == ELPIS_OK, "dns64 prefix");
+    elpis_strlcpy(line, "dns64-strip-a: yes", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 5) == ELPIS_OK &&
+          c.dns64_strip_a == 1, "dns64-strip-a");
+    c.dns64 = 1;
+    CHECK(elpis_dns64_strips(&c, ELPIS_T_A, 0, 0) &&
+          elpis_dns64_strips(&c, ELPIS_T_ANY, 1, 0) &&
+          !elpis_dns64_strips(&c, ELPIS_T_AAAA, 0, 0) &&
+          !elpis_dns64_strips(&c, ELPIS_T_A, 1, 1),
+          "strips A and ANY, not AAAA, not for a validating DO+CD client");
+    c.dns64 = 0;
+    CHECK(!elpis_dns64_strips(&c, ELPIS_T_A, 0, 0), "and nothing with dns64 off");
+    c.dns64_strip_a = 0;
     elpis_strlcpy(line, "dns64-prefix: 64:ff9b::/97", sizeof line);
     elpis_log_set_level(ELPIS_LOG_FATAL);     /* the refusal is the point */
     CHECK(elpis_conf_parse_line(&c, line, "-", 6) != ELPIS_OK,

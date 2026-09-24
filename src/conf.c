@@ -411,6 +411,7 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         return ELPIS_OK;
     }
     if (KEY("dns64-synthesize-all")) return want_bool(&p, key, val, &c->dns64_synth_all);
+    if (KEY("dns64-strip-a")) return want_bool(&p, key, val, &c->dns64_strip_a);
     if (KEY("dns64-ignore-aaaa")) {
         if (c->n_dns64_ignore >= ELPIS_ARRAY_LEN(c->dns64_ignore_aaaa))
             return ELPIS_OK;
@@ -739,9 +740,10 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  listen %s", elpis_addr_str(&c->listen[i], buf, sizeof buf));
     elpis_info("  threads=%s udp=%d tcp=%d",
                c->threads ? "fixed" : "auto", (int)c->listen_udp, (int)c->listen_tcp);
-    elpis_info("  dnssec=%d qname-min=%d cookies=%d 0x20=%d dns64=%d",
+    elpis_info("  dnssec=%d qname-min=%d cookies=%d 0x20=%d dns64=%d%s",
                (int)c->dnssec, (int)c->qname_minimisation, (int)c->use_cookies,
-               (int)c->use_0x20, (int)c->dns64);
+               (int)c->use_0x20, (int)c->dns64,
+               (c->dns64 && c->dns64_strip_a) ? " (A stripped)" : "");
     elpis_info("  max-pending=%u per worker%s", c->max_pending,
                c->max_pending_auto ? " (auto)" : "");
     if (c->edns_auto)
