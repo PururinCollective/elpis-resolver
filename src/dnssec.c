@@ -1058,7 +1058,11 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
         if (val_cached(t, n, type, out) ||
             (type == ELPIS_T_DS &&
              val_cached(t, n, ELPIS_T_NXNAME, out) &&
-             (out->flags & ELPIS_RRF_NXDOMAIN))) {
+             (out->flags & ELPIS_RRF_NXDOMAIN)) ||
+            /* A DS asked of a name that owns a CNAME is answered with the
+             * CNAME, and the chain behind it is cached under other names. */
+            (type == ELPIS_T_DS &&
+             val_cached(t, n, ELPIS_T_CNAME, out) && out->count > 0)) {
             slot->tries = 0;            /* this one landed; forget its misses */
             v->pending_tries = 0;
             return 1;
@@ -1946,6 +1950,24 @@ static void val_run(elpis_task_t *t)
              * lookups start timing out, that turns every signed zone insecure
              * at once.  Unknown must fail closed.
              */
+            /*
+             * A CNAME here, where a DS was asked for: this name is no zone
+             * cut -- the parent side of a delegation holds NS, and a CNAME
+             * shares its name with nothing -- so walk on with the keys we
+             * have.  www.hasil.gov.my is a CNAME to a name delegated below
+             * eservices.hasil.gov.my, itself a CNAME to Microsoft's
+             * application proxy; the DS lookup for eservices came back as
+             * that CNAME, was looked for under DS, never found, and the
+             * answer went out SERVFAIL.  Nothing is lost by walking on:
+             * data below is still judged against these keys, so a forged
+             * CNAME can only turn a signed child's answers bogus, never
+             * insecure.
+             */
+            if (scratch->type == ELPIS_T_CNAME && scratch->count > 0 &&
+                elpis_name_eq(&scratch->name, &next)) {
+                v->walk = next;
+                continue;
+            }
             if (scratch->count == 0 &&
                 !(scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))) {
                 t->val_unavailable = 1;
