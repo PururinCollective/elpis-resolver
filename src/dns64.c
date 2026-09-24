@@ -114,10 +114,14 @@ static void dns64_child_done(elpis_task_t *child, void *ctxp)
                 continue;
 
             if (rr->type == ELPIS_T_CNAME) {
-                /* Keep the chain so the client sees the same shape. */
-                elpis_rrlist_add(&p->ans, ELPIS_SEC_ANSWER, &on, rr->type,
-                                 rr->klass, rr->ttl,
-                                 elpis_trr_rd(&child->ans, i), rr->rdlen);
+                /* Keep the chain so the client sees the same shape -- once:
+                 * the AAAA answer already followed it, and copying it again
+                 * listed every CNAME of www.baidu.com twice. */
+                if (!elpis_rrlist_has(&p->ans, &on, rr->type,
+                                      elpis_trr_rd(&child->ans, i), rr->rdlen))
+                    elpis_rrlist_add(&p->ans, ELPIS_SEC_ANSWER, &on, rr->type,
+                                     rr->klass, rr->ttl,
+                                     elpis_trr_rd(&child->ans, i), rr->rdlen);
                 continue;
             }
             if (rr->type != ELPIS_T_A || rr->rdlen != 4)
