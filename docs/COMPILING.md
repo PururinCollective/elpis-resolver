@@ -43,7 +43,7 @@ Two tools are optional:
   the build says so.
 
 Linux builds with gcc and clang are tested for each release: gcc 13.3 and
-clang 18.1 for 2.0.1. The BSDs (kqueue) and macOS (kqueue) are supported by
+clang 18.1 for 2.0.2. The BSDs (kqueue) and macOS (kqueue) are supported by
 the code, but no build on them was tested for this release.
 
 ## Building
@@ -236,7 +236,7 @@ The startup line names the compiler, the architecture, the CPU the build was
 tuned for, and the SIMD kernel in use:
 
 ```
-elpis 2.0.1 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
+elpis 2.0.2 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
               gcc 13.3.0, x86_64 znver3 (native), ...
 ```
 
@@ -248,7 +248,7 @@ The **build** string shows where the binary came from:
 
 | Built from | Build string |
 |---|---|
-| a release tag | `v2.0.1` |
+| a release tag | `v2.0.2` |
 | any other commit | `main@bcc97d252fac` (branch and commit) |
 | a tarball, no git | empty, and the status page says `no git checkout` |
 

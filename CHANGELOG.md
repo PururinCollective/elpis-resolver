@@ -10,7 +10,7 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.0.2 — 2026-09-25
 
 ### Fixed
 
