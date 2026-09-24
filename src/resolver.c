@@ -771,6 +771,133 @@ static void deleg_refresh(elpis_task_t *t)
     elpis_task_start(r);
 }
 
+/*
+ * Is `p` known to be answered by the zone we are about to ask -- no cut
+ * there?  A QNAME-minimisation probe for it could only say so again: the
+ * first answer that is not a referral ends the minimising and the real
+ * question goes to the same servers.  The cache holds the proof when anything
+ * at `p` was fetched from this zone, stamped with it, and skipping the probe
+ * saves a round trip on every new name below `p`.  Without it each new
+ * kws1.web.telegram.org, zws3.web.telegram.org ... asked about
+ * web.telegram.org first, every time.  RFC 9156 section 2.3 has resolvers
+ * use what they already know.
+ */
+static int qmin_known_inside(elpis_task_t *t, const elpis_name_t *p)
+{
+    static const uint16_t types[3] = { ELPIS_T_A, ELPIS_T_AAAA, ELPIS_T_CNAME };
+    elpis_rrset_buf_t *b = t->w->rrbuf;
+    uint8_t stamp = ELPIS_ZONE_STAMP(&t->deleg.zone);
+    uint32_t now = elpis_cached_now_s();
+    unsigned k;
+
+    for (k = 0; k < 3; k++)
+        if (elpis_rcache_get(t->w->ctx->rcache, p, types[k], t->qclass, now,
+                             0, b) == ELPIS_OK &&
+            b->zone_labels == stamp)
+            return 1;
+    return 0;
+}
+
+/*
+ * A nameserver name's addresses, looked up in the background for
+ * deleg_fill_nameless().  Nobody waits for the answer: it lands in the RRset
+ * cache, and the next query into the zone picks it up from there.  At most
+ * once per NSFILL_HOLD seconds per name and worker, so a busy zone whose
+ * nameserver has no address to find does not send for it on every query.
+ */
+#define NSFILL_SLOTS 64u
+#define NSFILL_HOLD  30u
+
+static void ns_lookup_background(elpis_worker_t *w, const elpis_name_t *ns)
+{
+    static ELPIS_TLS struct { uint64_t hash; uint32_t at; } recent[NSFILL_SLOTS];
+    const elpis_conf_t *c = &w->ctx->conf;
+    uint64_t h = elpis_name_hash(ns);
+    uint32_t now = elpis_cached_now_s();
+    unsigned slot = (unsigned)(h % NSFILL_SLOTS), k;
+    static const uint16_t types[2] = { ELPIS_T_A, ELPIS_T_AAAA };
+
+    if (recent[slot].hash == h && now - recent[slot].at < NSFILL_HOLD)
+        return;
+    recent[slot].hash = h;
+    recent[slot].at   = now;
+
+    for (k = 0; k < 2; k++) {
+        elpis_task_t *r;
+        if (types[k] == ELPIS_T_A ? !c->do_ipv4 : !c->do_ipv6)
+            continue;
+        if (w->ctx->shutdown || w->n_tasks >= c->max_pending / 2u)
+            return;
+        if ((r = elpis_task_new(w)) == NULL)
+            return;
+        r->qname   = *ns;
+        elpis_name_lower(&r->qname);
+        r->qtype   = types[k];
+        r->qclass  = ELPIS_CLASS_IN;
+        r->warming = 1;             /* no client, no validation, no race */
+        elpis_task_start(r);
+    }
+}
+
+/*
+ * The nameservers of a delegation that came without glue, given the addresses
+ * the cache has for them.
+ *
+ * The query that finds such a zone looks up one nameserver's address -- one,
+ * not all of them -- and carries on the moment it has it, and the delegation
+ * is cached with that one address.  Nothing looked up the others while it
+ * kept answering, so every query to the zone went to the first nameserver
+ * however far away it was: telegram.org's ns-cloud-b1 is 80 ms from here,
+ * b2 and b4 are 7, and every new Telegram name cost two trips to b1.  That is
+ * most zones hosted by a DNS provider -- Google Cloud DNS, Route 53, Azure
+ * DNS -- whose nameservers live in the provider's own domain.
+ *
+ * So: fill in what the cache already knows, keep it on the cached delegation,
+ * and send for the rest in the background.  From there the race and the
+ * sweep in choose_server()'s callers measure the new ones, as for any other
+ * server.  A pinned delegation is filled for the query but not written back:
+ * writing it would reset its refresh clock.
+ */
+static void deleg_fill_nameless(elpis_task_t *t)
+{
+    elpis_worker_t *w = t->w;
+    const elpis_conf_t *c = &w->ctx->conf;
+    elpis_rrset_buf_t *b = w->rrbuf;
+    uint32_t now = elpis_cached_now_s();
+    unsigned i, j, added = 0;
+
+    for (i = 0; i < t->deleg.nns; i++) {
+        const elpis_nsrec_t *r = &t->deleg.ns[i];
+        elpis_name_t ns;
+        unsigned k;
+
+        if (r->n4 != 0 || r->n6 != 0 || (r->flags & ELPIS_NSF_NOADDR))
+            continue;
+        ns = r->name;
+        for (k = 0; k < 2; k++) {
+            uint16_t type = k == 0 ? ELPIS_T_A : ELPIS_T_AAAA;
+            uint16_t len  = k == 0 ? 4u : 16u;
+            if (type == ELPIS_T_A ? !c->do_ipv4 : !c->do_ipv6)
+                continue;
+            if (elpis_rcache_get(w->ctx->rcache, &ns, type, ELPIS_CLASS_IN,
+                                 now, 0, b) != ELPIS_OK ||
+                (b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)))
+                continue;
+            for (j = 0; j < b->count; j++)
+                if (b->len[j] == len) {
+                    elpis_deleg_add_addr(&t->deleg, &ns, b->data + b->off[j],
+                                         k == 0 ? AF_INET : AF_INET6,
+                                         ELPIS_NSF_RESOLVED);
+                    added++;
+                }
+        }
+        if (t->deleg.ns[i].n4 == 0 && t->deleg.ns[i].n6 == 0)
+            ns_lookup_background(w, &ns);
+    }
+    if (added > 0 && !t->deleg.pinned)
+        elpis_dcache_put(w->ctx->dcache, &t->deleg, t->deleg.ttl, 0);
+}
+
 /* ================================================================== */
 /* Child tasks                                                         */
 /* ================================================================== */
@@ -1922,8 +2049,10 @@ void elpis_task_step(elpis_task_t *t)
             if (elpis_dcache_closest(w->ctx->dcache, &start,
                                      elpis_cached_now_s(), &t->deleg) != ELPIS_OK)
                 t->deleg = w->ctx->root_hints;
-            else
+            else {
                 deleg_refresh(t);
+                deleg_fill_nameless(t);
+            }
             t->deleg_from_route = 0;
             t->have_deleg = 1;
             t->ntried = 0;
@@ -1985,7 +2114,8 @@ void elpis_task_step(elpis_task_t *t)
             if (t->qmin_active && t->qmin_labels < t->qname.labels) {
                 unsigned keep = t->qmin_labels + 1u;
                 if (keep < t->qname.labels &&
-                    elpis_name_suffix(&t->qname, keep, &probe) == 0) {
+                    elpis_name_suffix(&t->qname, keep, &probe) == 0 &&
+                    !qmin_known_inside(t, &probe)) {
                     elpis_name_t real = t->qname;
                     uint16_t realtype = t->qtype;
                     t->qname = probe;
