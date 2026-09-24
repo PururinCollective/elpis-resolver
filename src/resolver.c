@@ -145,8 +145,20 @@ static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
 
 elpis_task_t *elpis_task_new(elpis_worker_t *w)
 {
-    elpis_task_t *t = (elpis_task_t *)elpis_calloc(1, sizeof *t);
+    elpis_task_t *t;
 
+    /*
+     * The backstop for the client intake guard: children and background
+     * refreshes create tasks it never sees, so cap the whole table here.  See
+     * ELPIS_TASK_CEILING_MULT.  Refused, not queued: every caller already
+     * treats a NULL task as an overload to fail or degrade past.
+     */
+    if (w->n_tasks >= (uint64_t)w->ctx->conf.max_pending * ELPIS_TASK_CEILING_MULT) {
+        elpis_stat_inc(&w->stats.overload, 1);
+        return NULL;
+    }
+
+    t = (elpis_task_t *)elpis_calloc(1, sizeof *t);
     elpis_stat_inc(&w->stats.tasks, 1);
     if (t == NULL)
         return NULL;

@@ -103,6 +103,23 @@ typedef void (*elpis_task_done_fn)(elpis_task_t *child, void *ctx);
 #define ELPIS_MAX_TRIED 24
 #define ELPIS_MAX_DEPTH 8
 
+/*
+ * The absolute ceiling on a worker's live tasks, as a multiple of max-pending.
+ *
+ * handle_query() already turns new client queries away at max-pending, but a
+ * resolution is not one task: it spawns children for a glueless zone's
+ * nameserver addresses and for the DNSSEC chain walk, and background refreshes
+ * make tasks of their own.  None of those were counted against any limit, so a
+ * flood of uncacheable names on glueless, signed zones (a livestream app
+ * cycling through thousands of unique CDN hostnames) fanned the child trees out
+ * to hundreds of thousands of tasks at once -- ~100x max-pending -- and the
+ * heap that grew to hold them was never handed back.  elpis_task_new() refuses
+ * a task past this ceiling; every caller already copes with that, so it bounds
+ * the worst case to the memory the config budgets for without a resolution ever
+ * hanging on a task it could not make.
+ */
+#define ELPIS_TASK_CEILING_MULT 4u
+
 struct elpis_task {
     elpis_worker_t *w;
     elpis_task_t   *parent;

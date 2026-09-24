@@ -10,6 +10,29 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**A glueless-name flood could grow a worker to gigabytes.** `max-pending`
+capped the client queries admitted, but a resolution is more than one task: it
+spawns children for a glueless zone's nameserver addresses and for the DNSSEC
+chain walk, and background refreshes make tasks of their own. None of those
+were counted, so a flood of uncacheable names on glueless, signed zones — a
+livestream app cycling through thousands of unique CDN hostnames — fanned the
+child trees out to hundreds of thousands of tasks at once, roughly 100× the
+limit, and grew the process to several gigabytes. Task creation now stops at a
+ceiling of four times `max-pending`, counting children and refreshes, so the
+table can never grow past the memory the config budgets for; past it a task is
+refused, which every caller already answers with SERVFAIL or a degraded
+lookup.
+
+**Memory a spike used was never handed back.** glibc keeps freed allocations on
+its arenas' free lists rather than returning them to the OS, so once a burst
+drained, the resident size stayed at the peak — 3.9 GiB seen holding 200 MiB of
+live caches — indefinitely. A worker now trims the heap back once a minute when
+the load has passed, so the resident size follows the working set down again.
+
 ## 2.0.1 — 2026-09-24
 
 ### Changed

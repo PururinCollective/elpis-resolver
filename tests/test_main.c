@@ -21,6 +21,7 @@
 #include "elpis/conf.h"
 #include "elpis/edns.h"
 #include "elpis/resolver.h"
+#include "elpis/ctx.h"
 #include "elpis/deleg.h"
 #include "elpis/conflict.h"
 
@@ -1859,6 +1860,55 @@ static void test_cookies(void)
 }
 
 /* ================================================================== */
+/*
+ * handle_query() caps the client queries admitted at max-pending, but a
+ * resolution spawns children (glueless nameserver addresses, the DNSSEC chain
+ * walk) and background refreshes that the intake guard never sees.  Nothing
+ * counted them, and a flood of uncacheable names once fanned the child trees
+ * out to ~100x max-pending -- half a million tasks, a five-gigabyte heap.
+ * elpis_task_new() now refuses past ELPIS_TASK_CEILING_MULT x max-pending, so
+ * the table can never grow past the memory the config budgets for, and a
+ * refused task is a NULL every caller already handles.
+ */
+static void test_task_ceiling(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    unsigned ceiling, i, made = 0;
+
+    section("task ceiling");
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL) {
+        elpis_free(ctx);
+        elpis_free(w);
+        return;
+    }
+
+    ctx->conf.max_pending = 3;
+    w->ctx  = ctx;
+    w->loop = NULL;                 /* no task is started, so no timer fires */
+    ceiling = ctx->conf.max_pending * ELPIS_TASK_CEILING_MULT;
+
+    for (i = 0; i < ceiling + 8u; i++)
+        if (elpis_task_new(w) != NULL)
+            made++;
+
+    CHECK(made == ceiling, "task creation stops at the ceiling (%u of %u)",
+          made, ceiling);
+    CHECK(w->n_tasks == ceiling, "and n_tasks never passes it (%u)", w->n_tasks);
+    CHECK(elpis_task_new(w) == NULL, "a task past the ceiling is refused");
+    CHECK(w->stats.overload >= 8u + 1u,
+          "each refusal counts as overload (%llu)",
+          (unsigned long long)w->stats.overload);
+
+    elpis_resolver_fini(w);         /* frees every task still linked */
+    CHECK(w->n_tasks == 0, "and they all free again");
+
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -1885,6 +1935,7 @@ int main(void)
     test_ta_file();
     test_val_retry_budget();
     test_cookies();
+    test_task_ceiling();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

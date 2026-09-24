@@ -26,6 +26,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <grp.h>
+#if defined(__GLIBC__)
+#include <malloc.h>              /* malloc_trim: hand a drained heap back */
+#endif
 
 elpis_ctx_t *elpis_g;
 
@@ -436,6 +439,38 @@ static void report_spin(elpis_worker_t *w)
     }
 }
 
+/*
+ * Hand back to the OS the heap a task storm leaves behind.
+ *
+ * glibc keeps freed memory on its arenas' free lists rather than returning it,
+ * so after a burst of hundreds of thousands of tasks drains, the resident size
+ * stays at the peak -- 3.9 GiB seen holding 200 MiB of live caches -- until
+ * something trims it.  malloc_trim(0) walks the arenas and gives back the free
+ * top of each.  Worker 0 does it for the whole process, once a minute, and only
+ * once the storm has passed: mid-storm the arenas are in use and walking them
+ * would just add lock contention to no purpose, and the ceiling in
+ * elpis_task_new() is what keeps the peak bounded in the first place.
+ */
+static void maybe_trim_heap(elpis_worker_t *w)
+{
+#if defined(__GLIBC__)
+    static ELPIS_TLS unsigned since_trim;
+    unsigned busy = 0, k;
+
+    if (w->index != 0)
+        return;
+    for (k = 0; k < g_nworkers; k++)
+        if (g_workers[k].w.n_tasks > busy)
+            busy = g_workers[k].w.n_tasks;   /* racy read, health only */
+    if (++since_trim < 60u || busy >= w->ctx->conf.max_pending / 2u)
+        return;
+    since_trim = 0;
+    malloc_trim(0);
+#else
+    (void)w;
+#endif
+}
+
 static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_worker_t *w = (elpis_worker_t *)tm->data;
@@ -450,6 +485,8 @@ static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
     elpis_cache_expire(ctx->mcache, now, 512);
     elpis_cache_expire(ctx->rcache, now, 512);
     elpis_cache_expire(ctx->infra, now, 128);
+
+    maybe_trim_heap(w);
 
     if (ctx->shutdown) {
         elpis_loop_stop(lp);
