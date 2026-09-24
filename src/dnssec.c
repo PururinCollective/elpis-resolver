@@ -1268,6 +1268,9 @@ static int set_signer(elpis_task_t *t, unsigned i, elpis_name_t *out)
  * Signatures only prove the NSEC/NSEC3 records are genuine.  Replaying a
  * genuine record from elsewhere in the zone would otherwise turn any name
  * into an NXDOMAIN, so the proof has to be checked against the question.
+ *
+ * 0 when the denial is not proven, 1 when it is, ELPIS_NSEC3_OPTOUT_PROOF
+ * when it rests on an opt-out span and so may not carry AD.
  */
 static int check_denial(elpis_task_t *t, const elpis_name_t *zone)
 {
@@ -1310,21 +1313,30 @@ static int check_denial(elpis_task_t *t, const elpis_name_t *zone)
     }
 
     if (t->rcode == ELPIS_RC_NXDOMAIN) {
-        if (have_nsec3 && elpis_nsec3_proves_nxdomain(rrs, n, &t->qname, zone))
-            return 1;
+        int r;
+        if (have_nsec3 &&
+            (r = elpis_nsec3_proves_nxdomain(rrs, n, &t->qname, zone)) != 0)
+            return r;
         if (have_nsec && elpis_nsec_proves_nxdomain(rrs, n, &t->qname))
             return 1;
         return 0;
     }
     if (t->qtype == ELPIS_T_DS) {
-        if (have_nsec3 && elpis_nsec3_proves_no_ds(rrs, n, &t->qname, zone))
-            return 1;
+        int r;
+        if (have_nsec3 &&
+            (r = elpis_nsec3_proves_no_ds(rrs, n, &t->qname, zone)) != 0)
+            return r;
         if (have_nsec && elpis_nsec_proves_no_ds(rrs, n, &t->qname))
             return 1;
         return 0;
     }
-    if (have_nsec3 && elpis_nsec3_proves_nodata(rrs, n, &t->qname, t->qtype, zone))
-        return 1;
+    {
+        int r;
+        if (have_nsec3 &&
+            (r = elpis_nsec3_proves_nodata(rrs, n, &t->qname, t->qtype,
+                                           zone)) != 0)
+            return r;
+    }
     if (have_nsec && elpis_nsec_proves_nodata(rrs, n, &t->qname, t->qtype))
         return 1;
     return 0;
@@ -1803,11 +1815,16 @@ static void tally(elpis_task_t *t, val_t *v)
         return;
     }
 
-    if (!check_denial(t, v->nsigners ? &v->signers[0] : &t->qname)) {
+    switch (check_denial(t, v->nsigners ? &v->signers[0] : &t->qname)) {
+    case 0:
         val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_NSEC_MISSING);
         return;
+    case ELPIS_NSEC3_OPTOUT_PROOF:
+        val_done(t, ELPIS_SEC_INSECURE, -1);    /* RFC 5155 section 9.2 */
+        return;
+    default:
+        val_done(t, ELPIS_SEC_SECURE, -1);
     }
-    val_done(t, ELPIS_SEC_SECURE, -1);
 }
 
 static void val_run(elpis_task_t *t)

@@ -323,7 +323,7 @@ int elpis_nsec3_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
 {
     n3_t params;
     elpis_name_t ce, nc, wc;
-    int ce_labels;
+    int ce_labels, opt_out = 0;
 
     if (n == 0 || !pick_params(rrs, n, zone, &params))
         return 0;
@@ -339,7 +339,7 @@ int elpis_nsec3_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
     /* The "next closer" name is one label below the closest encloser. */
     if (elpis_name_suffix(qname, (unsigned)ce_labels + 1u, &nc) != 0)
         return 0;
-    if (!covered_by_any(rrs, n, zone, &params, &nc, NULL))
+    if (!covered_by_any(rrs, n, zone, &params, &nc, &opt_out))
         return 0;
 
     /* And the wildcard at the closest encloser must be denied too. */
@@ -347,7 +347,14 @@ int elpis_nsec3_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
         return 0;
     if (matched_by_any(rrs, n, zone, &params, &wc, NULL))
         return 0;
-    return covered_by_any(rrs, n, zone, &params, &wc, NULL);
+    if (!covered_by_any(rrs, n, zone, &params, &wc, NULL))
+        return 0;
+    /*
+     * An opt-out span over the next closer name shows it absent from what the
+     * zone signed, and nothing more: an unsigned delegation may sit there.
+     * gov.my answers www.mysejahtera.gov.my this way, and this carried AD.
+     */
+    return opt_out ? ELPIS_NSEC3_OPTOUT_PROOF : 1;
 }
 
 int elpis_nsec3_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
@@ -430,6 +437,6 @@ int elpis_nsec3_proves_no_ds(const elpis_denial_rr_t *rrs, unsigned n,
      * exactly what "no DS" means.
      */
     if (covered_by_any(rrs, n, zone, &params, qname, &opt_out) && opt_out)
-        return 1;
+        return ELPIS_NSEC3_OPTOUT_PROOF;
     return 0;
 }

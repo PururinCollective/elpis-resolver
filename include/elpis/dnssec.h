@@ -123,6 +123,15 @@ int elpis_nsec_proves_no_ds(const elpis_denial_rr_t *rrs, unsigned n,
 int elpis_nsec3_hash(const elpis_name_t *name, const uint8_t *salt,
                      uint8_t saltlen, uint16_t iterations, uint8_t alg,
                      uint8_t *out, size_t *outlen);
+/*
+ * The NSEC3 proofs return 0 when nothing is proven, 1 when it is, and
+ * ELPIS_NSEC3_OPTOUT_PROOF when it is proven only through an opt-out span:
+ * the name is shown absent from the signed part of the zone, but an unsigned
+ * delegation the zone chose not to sign over may be there all the same.
+ * RFC 5155 section 9.2: an answer resting on such a proof MUST NOT carry AD.
+ * Both are true, so callers asking only "proven?" need not care.
+ */
+#define ELPIS_NSEC3_OPTOUT_PROOF 2
 int elpis_nsec3_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
                                 const elpis_name_t *qname,
                                 const elpis_name_t *zone);
