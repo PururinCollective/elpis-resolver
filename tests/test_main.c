@@ -510,6 +510,53 @@ static void test_cache(void)
               buf->zone_labels == 2, "the serving zone comes back out");
     }
 
+    /*
+     * The root is a zone like any other.  As a bare label count it was 0,
+     * which is also "unknown", and everything under "forward-zone: ." -- where
+     * the root is the zone we asked -- went out unjudged, stripped or not.
+     */
+    {
+        elpis_name_t root, zn;
+        elpis_name_init_root(&root);
+        elpis_name_from_text(&zn, "via-forwarder.example.");
+        CHECK(ELPIS_ZONE_STAMP(&root) != 0, "the root has a stamp of its own");
+        elpis_rrset_buf_init(buf, &zn, ELPIS_T_A, ELPIS_CLASS_IN, 300);
+        buf->zone_labels = ELPIS_ZONE_STAMP(&root);
+        elpis_rrset_buf_add(buf, rd, 4);
+        elpis_rcache_put_buf(rc, buf, 0, 0);
+        CHECK(elpis_rcache_get(rc, &zn, ELPIS_T_A, ELPIS_CLASS_IN,
+                               elpis_now_s(), 0, buf) == ELPIS_OK &&
+              buf->zone_labels == ELPIS_ZONE_STAMP(&root),
+              "and it survives the cache");
+    }
+
+    /*
+     * The verdict on a DS denial, read without copying the proof out: under
+     * a forward-zone it is the only record that a zone was proven unsigned.
+     */
+    {
+        elpis_name_t zn;
+        uint8_t sec = 0xFF, flags = 0;
+        const uint8_t soa = 0;
+        elpis_name_from_text(&zn, "unsigned-child.example.");
+        elpis_rrset_buf_init(buf, &zn, ELPIS_T_DS, ELPIS_CLASS_IN, 300);
+        buf->flags = ELPIS_RRF_NODATA;
+        buf->sec = (uint8_t)ELPIS_SEC_INSECURE;
+        elpis_rrset_buf_add(buf, &soa, 1);
+        elpis_rcache_put_buf(rc, buf, 0, 0);
+        CHECK(elpis_rcache_state(rc, &zn, ELPIS_T_DS, ELPIS_CLASS_IN,
+                                 elpis_now_s(), &sec, &flags) == ELPIS_OK &&
+              sec == ELPIS_SEC_INSECURE && (flags & ELPIS_RRF_NODATA),
+              "state reads the verdict and flags of a live entry");
+        CHECK(elpis_rcache_state(rc, &zn, ELPIS_T_A, ELPIS_CLASS_IN,
+                                 elpis_now_s(), &sec, &flags) == ELPIS_ENOTFOUND,
+              "state misses a type that is not there");
+        CHECK(elpis_rcache_state(rc, &zn, ELPIS_T_DS, ELPIS_CLASS_IN,
+                                 elpis_now_s() + 301u, &sec, &flags) ==
+                  ELPIS_ENOTFOUND,
+              "and one that has expired, stale or not");
+    }
+
     /* Lookups fold case. */
     {
         elpis_name_t up;

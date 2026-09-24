@@ -1367,19 +1367,26 @@ static void collect_signers(elpis_task_t *t, val_t *v)
  * signed grandparent, and a legitimate answer gets called forged.  So the
  * resolver stamps each record with the zone that produced it, and a record
  * that carries no stamp is one we decline to judge.
+ *
+ * Data from a forwarder is stamped with the configured zone -- the root, for
+ * "forward-zone: ." -- since that is the delegation it was asked under, though
+ * the forwarder may have found it anywhere below.  The stamp only admits the
+ * set to judgement: the walk that decides it goes to the record's own name
+ * (collect_unsigned_zones), proving each cut on the way through the same
+ * forwarder, as a forwarding validator has to.
  */
 static int serving_zone(elpis_task_t *t, unsigned i, elpis_name_t *out)
 {
     elpis_name_t owner;
-    unsigned labels = t->ans.rr[i].zone_labels;
+    unsigned stamp = t->ans.rr[i].zone_labels;
 
-    if (labels == 0)
+    if (stamp == 0)
         return 0;
     if (elpis_trr_get_name(&t->ans, i, &owner) != ELPIS_OK)
         return 0;
-    if (labels > owner.labels)
+    if (stamp - 1u > owner.labels)
         return 0;
-    return elpis_name_suffix(&owner, labels, out) == 0;
+    return elpis_name_suffix(&owner, stamp - 1u, out) == 0;
 }
 
 /* Does this leading record have no signature, in a place that needs one? */
@@ -1390,10 +1397,25 @@ static int set_is_unsigned(elpis_task_t *t, unsigned i)
            !set_signer(t, i, &sn);
 }
 
-/* Record that `zone` has no DS, so it never has to be proven again. */
-static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone)
+/*
+ * Record that `zone` has no DS, so it never has to be proven again: on its
+ * delegation, and on `proof`, the cached denial that proved it.  A forwarder
+ * makes no delegations -- it is asked for the whole tree and answers for all
+ * of it -- so under a forward-zone the denial is the only place to keep it.
+ * Without that, every new name under an unsigned zone verified the same proof
+ * again.  Negative entries are cached unchecked and nothing else gives a DS
+ * denial a verdict, so INSECURE on one means exactly this.
+ */
+static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone,
+                               elpis_rrset_buf_t *proof)
 {
     elpis_deleg_t d;
+
+    if (proof->sec != (uint8_t)ELPIS_SEC_INSECURE) {
+        proof->sec = (uint8_t)ELPIS_SEC_INSECURE;
+        elpis_rcache_put_buf(t->w->ctx->rcache, proof,
+                             t->w->ctx->conf.serve_stale, 0);
+    }
 
     if (elpis_dcache_get(t->w->ctx->dcache, zone, elpis_cached_now_s(),
                          &d) != ELPIS_OK)
@@ -1506,21 +1528,27 @@ static int denial_proves(elpis_task_t *t, val_t *v,
  * in com and net -- which is most of the web.
  *
  * Only names below the closest trust anchor count: a zone configured as an
- * anchor of its own is secure whatever its parent says.  ELPIS_DS_ABSENT is
- * set in one place, note_unsigned_zone(), and only on a denial verified
- * against the parent's keys.
+ * anchor of its own is secure whatever its parent says.  Both marks --
+ * ELPIS_DS_ABSENT on a delegation, INSECURE on a DS denial -- are set in one
+ * place, note_unsigned_zone(), and only on a denial verified against the
+ * parent's keys.
  */
 static int below_unsigned_cut(elpis_task_t *t, const elpis_name_t *name)
 {
     const elpis_name_t *anchor = elpis_ta_closest(t->w->ctx->ta, name);
     elpis_name_t cur = *name;
     uint32_t now = elpis_cached_now_s();
+    uint8_t sec, flags;
 
     if (anchor == NULL)
         return 0;
     while (cur.labels > anchor->labels) {
         if (elpis_dcache_ds_state(t->w->ctx->dcache, &cur, now) ==
             ELPIS_DS_ABSENT)
+            return 1;
+        if (elpis_rcache_state(t->w->ctx->rcache, &cur, ELPIS_T_DS,
+                               ELPIS_CLASS_IN, now, &sec, &flags) == ELPIS_OK &&
+            (flags & ELPIS_RRF_NODATA) && sec == (uint8_t)ELPIS_SEC_INSECURE)
             return 1;
         if (elpis_name_parent(&cur, &cur) != 0)
             break;
@@ -1945,7 +1973,7 @@ static void val_run(elpis_task_t *t)
                      * on an NSEC or NSEC3 verified against the keys of the
                      * zone above.  Everything below is insecure; stop here.
                      */
-                    note_unsigned_zone(t, &next);
+                    note_unsigned_zone(t, &next, scratch);
                     v->cut[v->si] = 1;
                     v->stage = VS_VERIFY;
                     continue;

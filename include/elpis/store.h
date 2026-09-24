@@ -116,9 +116,9 @@ typedef struct {
     uint8_t      sigcount;     /* RRSIGs following the data        */
     uint8_t      flags;
     /*
-     * Labels of the zone that served this RRset, or 0 when unknown -- the
-     * same stamp elpis_trr_t carries, kept here so a cached RRset can be
-     * judged as fairly as the copy that came off the wire.
+     * The zone that served this RRset, as ELPIS_ZONE_STAMP() makes it, or 0
+     * when unknown -- the same stamp elpis_trr_t carries, kept here so a
+     * cached RRset can be judged as fairly as the copy that came off the wire.
      */
     uint8_t      zone_labels;
     uint16_t     len[ELPIS_RRSET_MAX_RR];
@@ -166,6 +166,17 @@ int elpis_rcache_put_buf(elpis_cache_t *c, const elpis_rrset_buf_t *b,
 
 int elpis_rcache_del(elpis_cache_t *c, const elpis_name_t *name,
                      uint16_t type, uint16_t klass);
+
+/*
+ * Just the verdict and flags of a live entry, stale ones not counted, without
+ * copying its records out: ELPIS_OK with *sec and *flags set, or
+ * ELPIS_ENOTFOUND.  For a question asked of every label of every unsigned
+ * answer, where elpis_rcache_get() would copy out a whole denial proof to
+ * read two bytes of it.
+ */
+int elpis_rcache_state(elpis_cache_t *c, const elpis_name_t *name,
+                       uint16_t type, uint16_t klass, uint32_t now,
+                       uint8_t *sec, uint8_t *flags);
 
 /* Helpers for assembling an elpis_rrset_buf_t. */
 void elpis_rrset_buf_init(elpis_rrset_buf_t *b, const elpis_name_t *name,

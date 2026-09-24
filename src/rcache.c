@@ -342,6 +342,28 @@ int elpis_rcache_put_buf(elpis_cache_t *c, const elpis_rrset_buf_t *b,
                       max_stale, pinned);
 }
 
+int elpis_rcache_state(elpis_cache_t *c, const elpis_name_t *name,
+                       uint16_t type, uint16_t klass, uint32_t now,
+                       uint8_t *sec, uint8_t *flags)
+{
+    rkey_t k;
+    unsigned shard;
+    rent_t *e;
+    int rc = ELPIS_ENOTFOUND;
+
+    rkey_init(&k, name, type, klass);
+    e = (rent_t *)elpis_cache_read_begin(c, k.hash, &k, &shard);
+    if (e == NULL)
+        return ELPIS_ENOTFOUND;
+    if (now - e->stored < e->ttl) {
+        *sec   = e->sec;
+        *flags = e->flags;
+        rc = ELPIS_OK;
+    }
+    elpis_cache_read_end(c, shard);
+    return rc;
+}
+
 int elpis_rcache_del(elpis_cache_t *c, const elpis_name_t *name,
                      uint16_t type, uint16_t klass)
 {

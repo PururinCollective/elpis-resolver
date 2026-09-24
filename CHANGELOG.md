@@ -14,6 +14,39 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Fixed
 
+**Behind `forward-zone: .`, an answer stripped of its signatures was
+served.** Every record is stamped with the zone that served it, and the
+validator declines to judge an unsigned record with no stamp. The stamp was
+the zone's label count, which made the root 0, the same as no stamp. Under
+`forward-zone: .` the root is the zone every question is asked under, so
+nothing forwarded was ever judged. A forwarder, or anything on the path to it,
+could remove the signatures from a signed answer and have it served as an
+ordinary unsigned one, without AD, instead of refused. `harden-dnssec-stripped`
+did nothing in that mode. Answers that arrived signed were validated as usual.
+
+Through a forwarder that removes the signatures from A and AAAA answers:
+
+```
+                                      before           now
+www.isc.org A                         NOERROR, no AD   SERVFAIL, EDE 10
+dnssec-failed.org A                   NOERROR, no AD   SERVFAIL, EDE 9
+github.com A                          NOERROR, no AD   NOERROR, no AD
+```
+
+And through one that does not validate, a name whose signatures are missing at
+the source:
+
+```
+<id>-nosig.test-alg13.dnscheck.tools  NOERROR, no AD   SERVFAIL, EDE 10
+```
+
+An unsigned answer is now followed down the signed tree, through the same
+forwarder, until its zone is proven unsigned. The proof is kept, so the next
+name under the same unsigned zone costs no further signature checks: 20 new
+names under github.com took 5 verifications, where without it they took 41.
+When resolving directly, the root zone's own data is now judged the same way;
+nothing that validated before changes.
+
 **DNS64 skipped DNSSEC-aware clients and synthesised for the one it must
 not.** RFC 6147 has a client that sets both DO and CD validate for itself and
 do its own synthesis, so it must be given the data untouched. DO alone is
@@ -43,6 +76,20 @@ configured zone to be at or below the name proven not to exist: `corp.` routed
 and `corp.` denied. The exception for RFC 8020 (nothing below a nonexistent
 name) is bounded the same way. Stub and forward zones for private names
 resolve as in 1.1.15.
+
+### Changed
+
+**A private zone behind `forward-zone: .` has to be routed here too.** This
+follows from the fix above. If the upstream serves `corp.` from a stub-zone of
+its own, this instance no longer takes its word for it. The signed tree says
+`corp.` does not exist, so the zone is refused (SERVFAIL, or NXDOMAIN once that
+denial is cached) until it is routed here as well. It is then answered as
+insecure, as in 1.1.15:
+
+```
+forward-zone: . 10.0.0.53
+forward-zone: corp 10.0.0.53
+```
 
 ## 1.1.15 — 2026-09-24
 

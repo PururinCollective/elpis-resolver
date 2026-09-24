@@ -24,12 +24,22 @@ typedef struct {
     uint8_t  section;     /* elpis_section_t */
     /*
      * How many labels of this record's owner name make up the zone that
-     * served it, or 0 when that is not known.  An answer assembled across a
-     * CNAME chain spans several zones, and an RRset that arrives with no
-     * signature can only be judged against the one that actually produced it.
+     * served it, plus one -- so the root is 1 -- or 0 when that is not known.
+     * An answer assembled across a CNAME chain spans several zones, and an
+     * RRset that arrives with no signature can only be judged against the one
+     * that actually produced it.  ELPIS_ZONE_STAMP() makes one.
      */
     uint8_t  zone_labels;
 } elpis_trr_t;
+
+/*
+ * The stamp for a record served by `zone`.  Plain label counts made the root
+ * 0, which is also "unknown", and a record the validator cannot place is one
+ * it declines to judge: everything under "forward-zone: ." -- where the
+ * forwarder is asked for the whole tree and "." is the zone we queried --
+ * went out as insecure without a look, signatures stripped or not.
+ */
+#define ELPIS_ZONE_STAMP(zone) ((uint8_t)((zone)->labels + 1u))
 
 typedef struct {
     elpis_trr_t *rr;

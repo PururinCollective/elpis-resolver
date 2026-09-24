@@ -317,7 +317,7 @@ static int rrlist_add_stamped(elpis_task_t *t, elpis_section_t sec,
     elpis_name_lower(&owner);
     t->ans.zone_labels =
         (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
-            ? t->deleg.zone.labels : 0;
+            ? ELPIS_ZONE_STAMP(&t->deleg.zone) : 0;
     return elpis_rrlist_add(&t->ans, sec, &owner, type, klass, ttl, rd, rdlen);
 }
 
@@ -1128,7 +1128,7 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
      */
     t->ans.zone_labels =
         (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
-            ? t->deleg.zone.labels : 0;
+            ? ELPIS_ZONE_STAMP(&t->deleg.zone) : 0;
     return elpis_rrlist_add(&t->ans, sec, &owner, rr->type, rr->klass,
                             elpis_clamp_ttl(&t->w->ctx->conf, rr->ttl),
                             rd, (uint16_t)rdlen);
@@ -1180,7 +1180,7 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
         elpis_rrset_buf_init(b, &rr.name, rr.type, rr.klass, ttl);
         b->flags = ELPIS_RRF_AUTH;
         /* Which zone served it, as accept_rr() stamps the live copy. */
-        b->zone_labels = zone->labels;
+        b->zone_labels = ELPIS_ZONE_STAMP(zone);
 
         /*
          * Gather the RRset, then its signatures, in two passes.  The records
