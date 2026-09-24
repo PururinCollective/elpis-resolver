@@ -70,7 +70,7 @@ and update it with the rest of the system.
 
 ## Linking and portability
 
-Build targets and CPU tuning are covered in the [README](../README.md#install).
+Build targets and CPU tuning are covered in [COMPILING.md](COMPILING.md).
 
 SSE2/AVX2 and NEON kernels are selected at runtime from CPUID; the scalar
 fallbacks are always compiled, and the test suite checks that every vector path

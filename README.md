@@ -1,294 +1,180 @@
-# ΕΛΠΙΣ Resolver
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+    <img alt="ΕΛΠΙΣ Resolver" src="docs/images/logo-light.svg" width="420">
+  </picture>
+</p>
 
-A recursive DNS resolver in portable C99, for people who would rather not send
-every lookup to Google or Cloudflare.
+<p align="center">
+  <b>A private, validating, recursive DNS resolver, in portable C99.</b><br>
+  It asks the root, the TLDs and the authoritative servers itself,<br>
+  so your lookups stay between you and the servers that hold the answers.
+</p>
 
-It does the recursion itself — root servers, TLDs, authoritative servers — so
-your queries stay between you and the servers that actually hold the answers.
-No external dependencies: the crypto, the event loop and the wire format are
-all in this tree, so it builds into one static binary you copy to a machine
-and run.
+<p align="center">
+  <a href="../../releases"><img alt="Release" src="https://img.shields.io/github/v/release/PururinCollective/elpis-resolver?color=2f9ee0&label=release"></a>
+  <img alt="C99" src="https://img.shields.io/badge/C-C99-2f9ee0">
+  <img alt="DNSSEC" src="https://img.shields.io/badge/DNSSEC-validating-2ea44f">
+  <img alt="Platforms" src="https://img.shields.io/badge/runs%20on-Linux%20%7C%20BSD%20%7C%20macOS-555">
+  <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--2.0-555"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/COMPILING.md">Compiling</a> ·
+  <a href="docs/configuration.md">Configuration</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+---
+
+*Elpis* (Ελπίς) is the Greek word for hope.
+
+## Highlights
+
+- 🌳 **Real recursion.** It resolves from the root servers down. There is no
+  upstream to trust and nothing to forward to.
+- 🔐 **DNSSEC validation.** RSA, ECDSA, Ed25519, and post-quantum ML-DSA. It
+  catches forged and stripped answers, even behind a forwarder.
+- ⚡ **Fast.** 0.6 ms median from cache, and hand-written AVX2, SSE2 and NEON
+  code chosen at runtime for the CPU it runs on.
+- 📦 **One static binary with no dependencies.** The crypto, the event loop and
+  the DNS wire format are all in this tree. Copy the binary and its config to
+  a machine, and it runs.
+- 🧠 **A cache that takes care of itself.** It sizes itself to your RAM or
+  container, refreshes popular names before they expire, serves stale data
+  through outages, and remembers failures.
+- 🌐 **DNS64**, with an option to answer IPv6 only, for trying an IPv6-only
+  network without turning IPv4 off.
+- 📊 **An optional status page** with live charts, the busiest names and
+  clients, and the recent log.
+
+## How it fits
+
+Elpis is the back half of a private DNS setup. Put **AdGuard Home** or
+**Pi-hole** in front for blocklists, per-client rules and DoH, DoT and DoQ,
+and point their upstream at Elpis:
 
 ```
-$ make && ./bin/elpis -d
-elpis 2.0.1 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
-              gcc 13.3.0, x86_64 generic, 4096 MiB RAM detected, cache budget 819 MiB
-msg-cache: 32 shards, budget 409 MiB
-rrset-cache: 32 shards, budget 262 MiB
-listening with 4 workers
+  clients ──► AdGuard Home / Pi-hole ──► ΕΛΠΙΣ ──► root, TLD and authoritative servers
+              filtering, DoH / DoT        recursion, cache, DNSSEC
 ```
 
-## What it is for
+List two or more Elpis instances as upstreams, and AdGuard spreads the load
+and fails over between them. Each Elpis is happiest in its own LXC container
+or VM, with its own IPv6 address: easy to firewall, easy to move, and easy to
+spot in a packet capture.
 
-Elpis is the back half of a private DNS setup. It is **not** a public-facing
-server and it does not speak DoH, DoT or DoQ — AdGuard Home and Pi-hole
-already do that well, so put one of them in front and let Elpis do what it is
-good at.
+## Quick start
 
-```
-                          ┌────────────────┐
-                      ┌───┤ ΕΛΠΙΣ Resolver │  2402:4e20::1001
-                      │   └────────────────┘
-                      │   ┌────────────────┐
-                      ├───┤ ΕΛΠΙΣ Resolver │  2402:4e20::1111
-  ┌─────────┐         │   └────────────────┘
-  │ AdGuard ├─────────┤   ┌────────────────┐
-  └─────────┘         ├───┤ ΕΛΠΙΣ Resolver │  2402:4e20::babe
-                      │   └────────────────┘
-                      │   ┌────────────────┐
-                      └───┤ ΕΛΠΙΣ Resolver │  151.158.198.49:5304
-                          └────────────────┘
+**From source.** A C compiler and make are all it needs. See
+[docs/COMPILING.md](docs/COMPILING.md) for every platform, CPU tuning and
+static builds.
 
-   public face,            recursion, caching, DNSSEC,
-   DoH / DoT / DoQ,        straight to the root and TLD servers
-   filtering, logging
+```bash
+sudo apt install build-essential git
+git clone https://github.com/PururinCollective/elpis-resolver.git
+cd elpis-resolver && make
+./bin/elpis                               # listens on 127.0.0.1:5335
+dig @127.0.0.1 -p 5335 example.com        # in another terminal
 ```
 
-AdGuard faces the network and handles the encrypted transports, the blocklists
-and the per-client rules. Elpis sits behind it, resolves from the root, and
-answers from cache. Point AdGuard's upstream at the Elpis addresses; list
-several and it will spread load and fail over between them.
-
-**Run each Elpis in its own LXC container or VM**, isolated from whatever else
-the host does, and give it **its own IPv6 address**. A resolver with an address
-of its own is easy to firewall, easy to move, and easy to pick out of a packet
-capture when something is wrong. Nothing stops you running it on loopback next
-to AdGuard — it just gives up the isolation.
-
-## Install
-
-### Pre-built binary
-
-Grab the latest static binary from [Releases](../../releases). It has no
-shared-library dependencies, so it runs on any reasonably recent Linux without
-installing anything:
+**Pre-built.** Grab the static binary from [Releases](../../releases). It runs
+on any recent Linux with nothing to install:
 
 ```bash
 sudo mkdir -p /opt/elpis-resolver/bin
 sudo cp elpis elpis.conf /opt/elpis-resolver/bin/
-sudo chmod +x /opt/elpis-resolver/bin/elpis
-/opt/elpis-resolver/bin/elpis -t        # check the config and exit
+/opt/elpis-resolver/bin/elpis -t          # check the config and exit
 ```
 
-The binary reads the `elpis.conf` sitting beside it, so those two files are the
-whole installation. Without a config it still runs, on `127.0.0.1:5335` with
-built-in defaults.
-
-### Building it yourself
-
-A C compiler, make and the C library headers are all it needs. The
-cryptography is its own, and the binary links nothing but libc. On Debian or
-Ubuntu:
-
-```bash
-sudo apt install build-essential git
-```
-
-git is only for the clone and for the commit a binary reports; a tarball
-builds without it and says `no git checkout`. python3, if it is there,
-regenerates the status page after you edit `web/index.html`; without it the
-committed copy is used.
-
-For working on Elpis rather than running it, three more tools come in. None is
-needed to build or run it, so a VM or container that only runs the resolver
-can leave them out:
-
-```bash
-sudo apt install valgrind cppcheck clang
-```
-
-| tool | for |
-|---|---|
-| `clang` | `make fuzz`, and a second compiler's warnings |
-| `valgrind` | memory errors and leaks in a running resolver |
-| `cppcheck` | static analysis |
-
-```bash
-valgrind --leak-check=full bin/elpis -c bin/elpis.conf   # Ctrl-C for the report
-cppcheck --enable=warning,portability -q -Iinclude -Isrc src src/crypto
-```
-
-The release binary is built for portability — a generic `x86-64` baseline that
-runs anywhere. If you want the last few percent, compile for your own CPU:
-
-```bash
-make static OPT="-O3 -fno-strict-aliasing -march=znver3 -mtune=znver3"
-```
-
-`OPT` replaces the optimisation flags for the whole build, static included.
-Pick the one that matches your processor:
-
-| CPU | flags |
-|---|---|
-| AMD Zen 3 (Ryzen 5000, EPYC Milan) | `-march=znver3 -mtune=znver3` |
-| AMD Zen 4 (Ryzen 7000, EPYC Genoa) | `-march=znver4 -mtune=znver4` |
-| Intel Alder Lake and later | `-march=alderlake -mtune=alderlake` |
-| Intel Skylake / Cascade Lake | `-march=skylake-avx512` |
-| whatever this machine is | `-march=native -mtune=native` |
-
-Use `-march=native` only when you build on the same machine you run on — the
-binary will not start on an older CPU.
-
-Startup says what a binary was built for — compiler, instruction set, and the
-CPU as the compiler resolved `-march` and `-mtune`, or `generic` when neither
-was given — and so do the About window and the CPU pane of the status page:
-
-```
-elpis 2.0.1 starting: ..., epoll, gcc 13.3.0, x86_64 znver3 (native), ...
-```
-
-Changing `OPT` needs no `make clean`: the build notices the flags changed and
-recompiles everything they apply to.
-
-```bash
-make            # ordinary build      -> bin/elpis + bin/elpis.conf
-make static     # one relocatable binary, no shared libraries
-make test       # 368 self tests, no network needed
-make debug      # -O0 -g3
-make asan       # address and UB sanitizers
-make fuzz       # libFuzzer over the message parser, needs clang
-make clean      # objects and binaries; keeps your bin/elpis.conf
-make distclean  # bin/ and everything in it
-```
-
-Everything the build produces goes in `bin/`, which is in `.gitignore`, so
-`git pull && make clean && make` never leaves anything behind for git to
-notice.
-
-`bin/` is a complete bundle — the binary plus a config seeded from the shipped
-defaults — so you can copy the directory to another machine and run it. The
-seeding happens once: your edits to `bin/elpis.conf` survive every rebuild and
-`make clean`, and the copy in the source tree stays the untouched reference.
-
-### Installing it
-
-```bash
-sudo make install          # -> /opt/elpis-resolver/bin/{elpis,elpis.conf}
-```
-
-`/opt` keeps it clear of anything the distribution manages, which is what you
-want for a program that ships as one binary and one file beside it. The
-installed layout is the same shape as `bin/`, so the config is found the same
-way in both. An existing config is never overwritten, and `make uninstall`
-leaves it alone. `PREFIX=/usr/local make install` if you would rather.
-
-A systemd unit is in [contrib/elpis.service](contrib/elpis.service); it expects
-exactly this path and binds port 53 with `CAP_NET_BIND_SERVICE` instead of
+`sudo make install` puts a source build in the same place. A systemd unit is
+in [contrib/elpis.service](contrib/elpis.service); it binds port 53 without
 running as root.
-
-Strict C99 plus POSIX.1-2008. epoll on Linux, kqueue on the BSDs and macOS,
-poll everywhere else.
-
-## Hardware
-
-**CPU.** The hot paths — cache lookup, name comparison, case folding — have
-hand-written SIMD kernels chosen at runtime from CPUID. **x86-64 with AVX2 is
-recommended**; SSE2 and ARM NEON kernels are there too, and a scalar fallback
-covers everything else. The test suite checks that every vector path agrees
-with the scalar one byte for byte, so the only difference is speed.
-
-Startup says which it picked, and what the CPU offered:
-
-```
-elpis 1.1.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll, ...
-```
-
-**Memory.** The cache sizes itself from the memory this process can actually
-use — a fifth of it on a typical box. In a container that means the cgroup
-limit or the figure lxcfs reports, whichever is smaller, so an LXC guest with
-4 GB is sized for 4 GB and not for whatever the host happens to have. On
-**4 GB**, with a stock Ubuntu Server using about 800 MB, Elpis takes roughly
-**820 MB of cache and holds about 1.6 million names**, leaving well over 2 GB
-free.
-
-| RAM | cache budget | names held |
-|---|---|---|
-| 1 GB | 171 MiB | ~340,000 |
-| 2 GB | 410 MiB | ~830,000 |
-| **4 GB** | **819 MiB** | **~1,600,000** |
-| 8 GB | 2 GiB | ~4,100,000 |
-| 16 GB | 4 GiB | ~8,300,000 |
-
-Measured rather than estimated: a 64 MiB message cache held 258,047 entries
-before it began evicting, with four A records per name. Names carrying more —
-IPv6 plus HTTPS records plus DNSSEC signatures — cost more, so treat these as
-an upper bound for a typical browsing mix. `cache-size: 2G` overrides the lot
-if you would rather say it yourself.
-
-At 1.6 million names, a home or small-office name set fits many times over, so
-a 4 GB container spends its time answering from cache rather than evicting.
-
-The cache is never spilled to swap on purpose. It is a hash table, so a lookup
-touches a random page: served from swap that is a page fault which stalls the
-worker thread, where an ordinary cache miss would have gone out to the network
-without blocking anything. Missing is cheaper than swapping. Setting
-`cache-size` above what the machine can hold is allowed — and warned about at
-startup — but it buys latency, not capacity.
 
 ## Configure
 
-`make` puts a config beside the binary at `bin/elpis.conf`, seeded from the
-shipped defaults, and that is the one it reads. (Failing that it looks one
-directory up, then in `/etc/elpis/`, then `/etc/`.) A minimal config for the
-setup above:
+The config lives beside the binary (`bin/elpis.conf`, or
+`/opt/elpis-resolver/bin/elpis.conf` once installed). Every setting is
+documented there at its default. A minimal setup behind AdGuard:
 
 ```
 listen: [2402:4e20::1111]@53
 access-control: 2402:4e20::/48 allow
-
-cache-size: auto
 dnssec: yes
-prefetch: yes
 ```
 
-Then point AdGuard Home's upstream at `[2402:4e20::1111]:53`. The shipped
-[elpis.conf](elpis.conf) documents every setting at its default value.
+Then set AdGuard Home's upstream to `[2402:4e20::1111]:53`.
 
-## Documentation
+## Performance
 
-| | |
-|---|---|
-| [Caching](docs/caching.md) | the three caches, background refresh, what happens when a refresh fails, delegation reuse |
-| [DNSSEC](docs/dnssec.md) | validation, RSA / ECDSA / Ed25519 / ML-DSA-44, cookies, standards |
-| [Configuration](docs/configuration.md) | every setting, privileged ports, binding, signals, the identity probe |
-| [Troubleshooting](docs/troubleshooting.md) | queries arriving but answers not coming back, port conflicts, malformed input |
-| [Status page](docs/status-page.md) | the read-only web interface, and how to reach it safely |
-| [Licensing](docs/licensing.md) | signed deployment licences, what a signature can and cannot prove |
-| [Changelog](CHANGELOG.md) | what changed in each release |
-| [Internals](docs/internals.md) | why the hot paths look the way they do, and what is deliberately missing |
+Measured for 2.0 across 28 groups of popular services (Google, YouTube,
+Steam, Epic, Telegram, Microsoft and Windows Update, Apple, Discord, GitHub,
+Shopee, Taobao, Malaysian banks and more): 1,221 lookups, with every host
+asked A, AAAA and HTTPS at once, as a browser asks.
+
+| | median | 90th percentile | 99th percentile |
+|---|---|---|---|
+| **Elpis, answered from cache** | **0.6 ms** | **1.1 ms** | **1.5 ms** |
+| Elpis, cold cache (full recursion) | 82 ms | 269 ms | 709 ms |
+| 1.1.1.1, from the same machine | 4.2 ms | 15.5 ms | 170 ms |
+
+Elpis's answers matched 1.1.1.1's on 1,218 of the 1,221 lookups. Of the other
+three, two were CDNs answering differently for a different location, and one
+was a name that 1.1.1.1 failed to resolve.
+
+## Hardware
+
+- **CPU:** any 64-bit x86 or ARM, or anything else with a C99 compiler. AVX2
+  is used when the CPU has it.
+- **Memory:** the cache takes about a fifth of what the machine or container
+  may use:
+
+  | RAM | cache | names held |
+  |---|---|---|
+  | 1 GB | 171 MiB | ~340,000 |
+  | 2 GB | 410 MiB | ~830,000 |
+  | **4 GB** | **819 MiB** | **~1,600,000** |
+  | 8 GB | 2 GiB | ~4,100,000 |
+
+  A home or office network fits in a 4 GB container many times over.
 
 ## Status page
 
-Optional, read-only, off by default:
+Optional and read-only. Two lines switch it on:
 
 ```
 webgui: yes
 webgui-password: choose-something
 ```
 
-It shows cache hit rate, response times split between answered-from-cache and
-resolved-upstream, CPU and memory, queries and SERVFAIL per second, the busiest
-names and clients, the upstream servers that have gone quiet, and the recent
-log — in draggable windows with light and dark themes.
-
-It speaks plain HTTP and binds loopback, because a DNS resolver has no business
-carrying a TLS stack for a status page. Reach it over an SSH tunnel, a VPN, or
-a reverse proxy that already terminates TLS with your certificate:
-
-```bash
-ssh -L 8082:127.0.0.1:8082 user@resolver
-```
-
-There is no endpoint that changes anything. See
+It shows the cache hit rate, response times, CPU and memory, the busiest names
+and clients, upstream servers that have gone quiet, and the recent log, in
+draggable windows with light and dark themes. It binds to loopback; reach it
+over an SSH tunnel, a VPN, or your own TLS reverse proxy. See
 [docs/status-page.md](docs/status-page.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [Compiling](docs/COMPILING.md) | building on every platform, CPU tuning, static and cross builds |
+| [Configuration](docs/configuration.md) | every setting, privileged ports, signals, the identity probe |
+| [Caching](docs/caching.md) | the caches, background refresh, what happens when a refresh fails |
+| [DNSSEC](docs/dnssec.md) | validation, the algorithms, cookies, the standards followed |
+| [Status page](docs/status-page.md) | the web interface and how to reach it safely |
+| [Troubleshooting](docs/troubleshooting.md) | answers not coming back, port conflicts, malformed input |
+| [Internals](docs/internals.md) | why the hot paths look the way they do |
+| [Licensing](docs/licensing.md) | signed deployment licences |
+| [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Not here
 
-DoH, DoT and DoQ — Elpis speaks UDP and TCP, and the thing in front of it
-terminates the encrypted transports.
-
-Authoritative service, zone files, dynamic update, TSIG signing. This
-resolves; it does not serve.
+- **DoH, DoT and DoQ.** Elpis speaks UDP and TCP. AdGuard or Pi-hole in front
+  handles the encrypted transports.
+- **Authoritative service.** No zone files, dynamic updates or TSIG. Elpis
+  resolves; it does not serve zones.
 
 ## Commercial support
 
@@ -299,4 +185,4 @@ integration work, and prioritised fixes.
 
 ## Licence
 
-See [LICENSE](LICENSE).
+GPL-2.0. See [LICENSE](LICENSE).
