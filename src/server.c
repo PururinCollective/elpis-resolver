@@ -19,6 +19,7 @@
 
 static void tcp_close(elpis_tcpconn_t *c);
 static void tcp_resolved(elpis_tcpconn_t *c);
+static void fail_note(const elpis_task_t *t);
 
 /* Kick off a background refresh of the name just served from cache. */
 static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
@@ -148,6 +149,7 @@ void elpis_task_respond(elpis_task_t *t)
 
     if (!t->has_client)
         return;
+    fail_note(t);
 
     now_ms = elpis_cached_now_ms();
     elpis_tm_observe(&w->tm,
@@ -320,9 +322,10 @@ static void reply_badcookie(elpis_worker_t *w, int fd, const elpis_msg_t *m,
 }
 
 /* Short error reply that does not need a task. */
-static void reply_error(elpis_worker_t *w, int fd, const elpis_msg_t *m,
-                        unsigned rcode, const elpis_addr_t *to,
-                        const elpis_addr_t *from, elpis_tcpconn_t *conn)
+static void reply_error_ede(elpis_worker_t *w, int fd, const elpis_msg_t *m,
+                            unsigned rcode, const elpis_addr_t *to,
+                            const elpis_addr_t *from, elpis_tcpconn_t *conn,
+                            int ede)
 {
     elpis_bld_t b;
     uint16_t flags;
@@ -340,6 +343,7 @@ static void reply_error(elpis_worker_t *w, int fd, const elpis_msg_t *m,
     if (m->have_opt) {
         elpis_edns_t e;
         elpis_edns_init(&e, w->ctx->conf.edns_buffer, m->do_bit);
+        e.ede_code = ede;
         if (w->ctx->conf.use_cookies && m->have_cookie && m->cookie_len >= 8) {
             uint8_t full[24];
             elpis_cookie_server(m->cookie, to, full);
@@ -355,6 +359,120 @@ static void reply_error(elpis_worker_t *w, int fd, const elpis_msg_t *m,
         tcp_queue(conn, w->txbuf, b.len);
     else
         send_udp(w, fd, w->txbuf, b.len, to, from);
+}
+
+static void reply_error(elpis_worker_t *w, int fd, const elpis_msg_t *m,
+                        unsigned rcode, const elpis_addr_t *to,
+                        const elpis_addr_t *from, elpis_tcpconn_t *conn)
+{
+    reply_error_ede(w, fd, m, rcode, to, from, conn, -1);
+}
+
+/* ------------------------------------------------------------------ */
+/* Resolution failures (RFC 9520)                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A question whose resolution just failed is answered SERVFAIL straight
+ * away for a while, rather than resolved again and failed again.
+ *
+ * Nothing remembered a failure before.  www.cimb.com.my's nameservers drop
+ * every HTTPS-type query unanswered, so that question can only end in
+ * SERVFAIL -- after 5.3 seconds the first time, 9.5 the second (each timeout
+ * had raised the servers' estimates), and past a client's patience after
+ * that.  Browsers ask the HTTPS type for every site, and they and stub
+ * resolvers retry a failure, so each retry paid it in full and sent the
+ * servers the same doomed queries.  RFC 9520 has resolvers remember a
+ * failure for at least a second and back off on repeats.
+ *
+ * Five seconds the first time, doubling while the same question keeps
+ * failing, to at most a minute; any answer clears it.  One table for all the
+ * workers: with SO_REUSEPORT a client's retry lands on whichever worker its
+ * new source port hashes to, and a table per worker let each of them fail
+ * the question once more.  Direct mapped, no allocation, and no lock: each
+ * slot carries a sequence number (a seqlock), a reader that catches a slot
+ * mid-update counts it a miss, and a writer that finds it busy leaves it --
+ * the worst either can do is resolve the question once more, never answer a
+ * question it did not fail.  Keyed by CD as well as name, type and class,
+ * since a client that disables checking gets data a validating one does not.
+ * Overload replies under max-pending never get here: they are not failures
+ * of the question.
+ */
+#define FAIL_SLOTS     4096u
+#define FAIL_FIRST_MS  5000u
+#define FAIL_MAX_MS    60000u
+#define FAIL_FORGET_MS 300000u     /* failing again after this: start over */
+
+typedef struct {
+    uint32_t seq;                  /* odd while being written */
+    uint32_t hold_ms;
+    uint64_t key;
+    uint64_t until_ms, last_ms;
+} fail_slot_t;
+
+static fail_slot_t g_fail[FAIL_SLOTS];
+
+static uint64_t fail_key(const elpis_name_t *qname, uint16_t qtype,
+                         uint16_t qclass, int cd)
+{
+    uint64_t k = elpis_name_hash(qname);
+    k ^= ((uint64_t)qtype << 32 | (uint64_t)qclass << 16 | (cd ? 1u : 0u)) *
+         0xBF58476D1CE4E5B9ull;
+    return k ? k : 1u;
+}
+
+static int fail_cached(const elpis_msg_t *m)
+{
+    uint64_t k = fail_key(&m->qname, m->qtype, m->qclass,
+                          (m->hdr.flags & ELPIS_FLAG_CD) != 0);
+    fail_slot_t *f = &g_fail[k % FAIL_SLOTS];
+    uint32_t s1, s2;
+    uint64_t key, until;
+
+    s1 = __atomic_load_n(&f->seq, __ATOMIC_ACQUIRE);
+    if (s1 & 1u)
+        return 0;
+    key   = __atomic_load_n(&f->key, __ATOMIC_RELAXED);
+    until = __atomic_load_n(&f->until_ms, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    s2 = __atomic_load_n(&f->seq, __ATOMIC_RELAXED);
+    return s1 == s2 && key == k && elpis_cached_now_ms() < until;
+}
+
+static void fail_note(const elpis_task_t *t)
+{
+    uint64_t k = fail_key(&t->orig_qname, t->orig_qtype, t->qclass,
+                          t->client_cd);
+    fail_slot_t *f = &g_fail[k % FAIL_SLOTS];
+    uint64_t now = elpis_cached_now_ms();
+    uint32_t seq = __atomic_load_n(&f->seq, __ATOMIC_RELAXED);
+    uint32_t hold;
+
+    /* An answer only matters to a slot holding this question. */
+    if (t->rcode != ELPIS_RC_SERVFAIL &&
+        __atomic_load_n(&f->key, __ATOMIC_RELAXED) != k)
+        return;
+    if ((seq & 1u) ||
+        !__atomic_compare_exchange_n(&f->seq, &seq, seq + 1u, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return;                     /* another worker is writing it */
+
+    if (t->rcode != ELPIS_RC_SERVFAIL) {
+        __atomic_store_n(&f->key, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&f->until_ms, 0, __ATOMIC_RELAXED);
+    } else {
+        if (__atomic_load_n(&f->key, __ATOMIC_RELAXED) == k &&
+            now - __atomic_load_n(&f->last_ms, __ATOMIC_RELAXED) < FAIL_FORGET_MS)
+            hold = ELPIS_MIN(__atomic_load_n(&f->hold_ms, __ATOMIC_RELAXED) * 2u,
+                             FAIL_MAX_MS);
+        else
+            hold = FAIL_FIRST_MS;
+        __atomic_store_n(&f->hold_ms, hold, __ATOMIC_RELAXED);
+        __atomic_store_n(&f->key, k, __ATOMIC_RELAXED);
+        __atomic_store_n(&f->last_ms, now, __ATOMIC_RELAXED);
+        __atomic_store_n(&f->until_ms, now + hold, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&f->seq, seq + 2u, __ATOMIC_RELEASE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -574,6 +692,14 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
             tcp_queue(conn, w->txbuf, outlen);
         else
             send_udp(w, fd, w->txbuf, outlen, from, to);
+        return;
+    }
+
+    if (fail_cached(&m)) {
+        elpis_stat_inc(&w->stats.servfail, 1);
+        elpis_tm_answer(&w->tm, &m.qname, from, ELPIS_RC_SERVFAIL, 0);
+        reply_error_ede(w, fd, &m, ELPIS_RC_SERVFAIL, from, to, conn,
+                        ELPIS_EDE_CACHED_ERROR);
         return;
     }
 
