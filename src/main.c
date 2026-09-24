@@ -310,6 +310,10 @@ void elpis_worker_fini(elpis_worker_t *w)
 {
     unsigned i;
 
+    /* Tasks first: they hold queries and client connections, and freeing
+     * one cancels its queries on a loop that still exists. */
+    elpis_resolver_fini(w);
+    elpis_server_fini(w);
     elpis_out_fini(w);
     for (i = 0; i < w->n_udp; i++) {
         elpis_loop_del(w->loop, &w->udp_ev[i]);

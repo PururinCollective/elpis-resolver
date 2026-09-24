@@ -77,6 +77,16 @@ and `corp.` denied. The exception for RFC 8020 (nothing below a nonexistent
 name) is bounded the same way. Stub and forward zones for private names
 resolve as in 1.1.15.
 
+**Lookups still running at shutdown are freed.** Stopping the process freed
+the queries it had outstanding but not the lookups waiting on them. Each of
+those was left behind, and so were client TCP connections still waiting for an
+answer. 1.1.15 reported nothing only because its test workload had finished
+everything before it stopped. Stopped mid-flight, after 350 queries and 50 TCP
+clients of which 40 were still waiting, it left 1.6 MB in 249 allocations. Now
+every lookup still running is freed without answering anyone, then every
+client connection is closed. Stopped the same way, valgrind reports 0 bytes in
+use at exit: 5,447 allocations, 5,447 frees.
+
 ### Changed
 
 **A private zone behind `forward-zone: .` has to be routed here too.** This

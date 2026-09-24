@@ -157,6 +157,10 @@ elpis_task_t *elpis_task_new(elpis_worker_t *w)
     t->state = ELPIS_TS_INIT;
     t->start_ms = elpis_cached_now_ms();
     elpis_rrlist_init(&t->ans);
+    t->live_next = w->tasks;
+    if (w->tasks != NULL)
+        w->tasks->live_prev = t;
+    w->tasks = t;
     w->n_tasks++;
     return t;
 }
@@ -199,9 +203,28 @@ void elpis_task_free(elpis_task_t *t)
     elpis_timer_del(t->w->loop, &t->kick);
     elpis_val_free(t);
     elpis_rrlist_free(&t->ans);
+    if (t->live_prev != NULL) t->live_prev->live_next = t->live_next;
+    else                      t->w->tasks = t->live_next;
+    if (t->live_next != NULL) t->live_next->live_prev = t->live_prev;
     if (t->w->n_tasks)
         t->w->n_tasks--;
     elpis_free(t);
+}
+
+/*
+ * Whatever is still resolving when the worker stops.  Nothing else frees it:
+ * the outbound queries go in elpis_out_fini() and the loop after them, and a
+ * task waiting on either -- or on a child, a timer, the validator -- used to
+ * be dropped where it stood, a leak at every shutdown that caught one mid-
+ * flight.  elpis_task_free() runs no callbacks and answers no client, which
+ * is what teardown wants; it detaches children, and they are on this list
+ * too.  Client TCP connections are left to elpis_server_fini(), which frees
+ * them whatever their count of queries pending.
+ */
+void elpis_resolver_fini(elpis_worker_t *w)
+{
+    while (w->tasks != NULL)
+        elpis_task_free(w->tasks);
 }
 
 static void task_deadline(elpis_loop_t *lp, elpis_timer_t *tm)

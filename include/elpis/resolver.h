@@ -113,6 +113,9 @@ struct elpis_task {
      */
     elpis_task_t   *children;
     elpis_task_t   *sib_next, *sib_prev;
+    /* Every live task of the worker, so shutdown can find the ones still in
+     * flight: see elpis_resolver_fini(). */
+    elpis_task_t   *live_next, *live_prev;
     unsigned        depth;
     unsigned        nchild;
     elpis_task_done_fn done_cb;
@@ -240,6 +243,7 @@ struct elpis_worker {
     elpis_tcpconn_t *conns;
     unsigned         n_conns;
 
+    elpis_task_t   *tasks;      /* live tasks, linked through live_next */
     unsigned        n_tasks;
 
     /* Scratch buffers, reused per event; never held across a yield. */
@@ -272,12 +276,17 @@ void elpis_worker_run(elpis_worker_t *w);
 
 /* ---- server side (server.c) ---- */
 void elpis_server_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
+/* Close and free every client TCP connection, queries pending or not: for
+ * shutdown only, after elpis_resolver_fini(). */
+void elpis_server_fini(elpis_worker_t *w);
 void elpis_server_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
 void elpis_task_respond(elpis_task_t *t);
 
 /* ---- resolution (resolver.c) ---- */
 elpis_task_t *elpis_task_new(elpis_worker_t *w);
 void elpis_task_free(elpis_task_t *t);
+/* Free every task still in flight, answering nobody: for shutdown only. */
+void elpis_resolver_fini(elpis_worker_t *w);
 void elpis_task_start(elpis_task_t *t);
 void elpis_task_step(elpis_task_t *t);
 void elpis_task_fail(elpis_task_t *t, unsigned rcode, int ede);

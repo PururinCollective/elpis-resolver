@@ -764,6 +764,15 @@ static void tcp_close(elpis_tcpconn_t *c)
     elpis_free(c);
 }
 
+void elpis_server_fini(elpis_worker_t *w)
+{
+    while (w->conns != NULL) {
+        elpis_tcpconn_t *c = w->conns;
+        c->pending = 0;          /* the tasks that counted are already gone */
+        tcp_close(c);
+    }
+}
+
 /* A resolution for this connection is done, answered or not. */
 static void tcp_resolved(elpis_tcpconn_t *c)
 {
