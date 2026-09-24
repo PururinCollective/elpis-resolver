@@ -1959,12 +1959,18 @@ static void val_run(elpis_task_t *t)
                  * this, every name under such a zone was SERVFAIL with DNSSEC
                  * on, which it is by default.
                  *
-                 * Only for configured zones, and only on a proof verified
-                 * against the parent's keys.  Anywhere else, data for a name
-                 * the signed tree says does not exist is refused as before.
+                 * Only on a proof verified against the parent's keys, and
+                 * only for a configured zone at or below the name proven
+                 * not to exist: "corp." routed and "corp." denied.  Every
+                 * name is under "forward-zone: .", and a denial of
+                 * nosuchname.com. says nothing about what the operator
+                 * routed -- data for x.nosuchname.com. is as forged there as
+                 * anywhere.  Anywhere else, data for a name the signed tree
+                 * says does not exist is refused as before.
                  */
                 if ((scratch->flags & ELPIS_RRF_NXDOMAIN) &&
-                    elpis_route_covers(c, &v->signers[v->si]) &&
+                    elpis_route_depth(c, &v->signers[v->si]) >=
+                        (int)next.labels &&
                     denial_proves(t, v, &next, scratch, &v->cur,
                                   PROVES_NXDOMAIN)) {
                     v->cut[v->si] = 1;

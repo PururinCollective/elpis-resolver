@@ -90,9 +90,15 @@ static const elpis_zoneroute_t *route_lookup(const elpis_conf_t *c,
     return best;
 }
 
-int elpis_route_covers(const elpis_conf_t *c, const elpis_name_t *name)
+int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name)
 {
-    return c->nroute > 0 && route_lookup(c, name) != NULL;
+    const elpis_zoneroute_t *r;
+    elpis_name_t z;
+
+    if (c->nroute == 0 || (r = route_lookup(c, name)) == NULL ||
+        elpis_name_from_text(&z, r->name) != ELPIS_OK)
+        return -1;
+    return (int)z.labels;
 }
 
 /* Turn a configured route into a delegation the send path can use. */
@@ -457,19 +463,22 @@ static int cache_try(elpis_task_t *t)
 
         /*
          * A cached NXDOMAIN above this name covers it too (RFC 8020) -- but
-         * not inside a configured stub-zone or forward-zone.  The public tree
-         * saying "corp." does not exist is exactly why the operator routed
-         * corp. elsewhere; applying it answered NXDOMAIN for the whole zone
-         * from the second query on.
+         * not one at or above a configured stub-zone or forward-zone.  The
+         * public tree saying "corp." does not exist is exactly why the
+         * operator routed corp. elsewhere; applying it answered NXDOMAIN for
+         * the whole zone from the second query on.  One below the zone -- a
+         * name its own servers denied, or anything under "forward-zone: ."
+         * -- still counts.
          */
-        if (c->harden_below_nxdomain && !elpis_route_covers(c, &t->qname)) {
+        if (c->harden_below_nxdomain) {
             elpis_name_t up = t->qname;
             unsigned lvl = 0;
+            int routed = elpis_route_depth(c, &t->qname);
             while (up.len > 1 && lvl < 8u) {
                 if (elpis_name_parent(&up, &up) != 0)
                     break;
                 lvl++;
-                if (up.len <= 1)
+                if (up.len <= 1 || (int)up.labels <= routed)
                     break;
                 if (elpis_rcache_get(w->ctx->rcache, &up, ELPIS_T_NXNAME,
                                      t->qclass, now, 0, b) == ELPIS_OK &&

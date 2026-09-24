@@ -32,6 +32,18 @@ github.com AAAA, DO and CD    before: synthesised          now: left as it is
 Names with real AAAA records, NXDOMAIN answers and answers that fail
 validation are treated as before: kept, not synthesised over, and SERVFAIL.
 
+**The private-zone rule from 1.1.15 now applies only to the zone configured.**
+1.1.15 answered a stub-zone or forward-zone as insecure when the signed tree
+proved it did not exist, and it applied that to any name under any configured
+route. A route high in the tree, such as `stub-zone: .` for a local copy of the
+root or a route for a whole TLD, covers every name below it. Under such a
+route, a proof that `nosuchname.com.` does not exist made forged data for
+`x.nosuchname.com.` insecure instead of bogus. The rule now needs the
+configured zone to be at or below the name proven not to exist: `corp.` routed
+and `corp.` denied. The exception for RFC 8020 (nothing below a nonexistent
+name) is bounded the same way. Stub and forward zones for private names
+resolve as in 1.1.15.
+
 ## 1.1.15 — 2026-09-24
 
 A release review: the faults a resolver meets after weeks of running that a
