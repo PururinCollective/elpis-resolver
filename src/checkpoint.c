@@ -18,6 +18,7 @@
 #include "elpis/atomic.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -440,19 +441,104 @@ int elpis_ckpt_read(const char *path, unsigned max, elpis_ckpt_list_t *l,
 }
 
 /* ------------------------------------------------------------------ */
+/* Merging                                                             */
+/* ------------------------------------------------------------------ */
+
+/* FNV-1a over the question: only to bring equal ones together. */
+static uint64_t ent_key(const elpis_ckpt_list_t *l, const elpis_ckpt_ent_t *e)
+{
+    const uint8_t *p = elpis_ckpt_name(l, e);
+    uint64_t h = 0xCBF29CE484222325ull;
+    unsigned i;
+
+    for (i = 0; i < e->namelen; i++)
+        h = (h ^ p[i]) * 0x100000001B3ull;
+    h = (h ^ e->qtype) * 0x100000001B3ull;
+    h = (h ^ e->kflags) * 0x100000001B3ull;
+    return h;
+}
+
+static int ent_same(const elpis_ckpt_list_t *l, const elpis_ckpt_ent_t *a,
+                    const elpis_ckpt_ent_t *b)
+{
+    return a->namelen == b->namelen && a->qtype == b->qtype &&
+           a->kflags == b->kflags &&
+           memcmp(elpis_ckpt_name(l, a), elpis_ckpt_name(l, b), a->namelen) == 0;
+}
+
+static int key_cmp(const void *a, const void *b)
+{
+    const elpis_ckpt_ent_t *x = (const elpis_ckpt_ent_t *)a;
+    const elpis_ckpt_ent_t *y = (const elpis_ckpt_ent_t *)b;
+
+    if (x->score != y->score)
+        return x->score < y->score ? -1 : 1;
+    return x->name_off < y->name_off ? -1 : (x->name_off > y->name_off);
+}
+
+/* Fold every repeat of a question into its first appearance. */
+static void dedupe(elpis_ckpt_list_t *l)
+{
+    unsigned i, j, out = 0, run;
+
+    for (i = 0; i < l->n; i++)
+        l->ent[i].score = ent_key(l, &l->ent[i]);
+    if (l->n > 1)
+        qsort(l->ent, l->n, sizeof *l->ent, key_cmp);
+
+    for (i = 0; i < l->n; i = run) {
+        /* A run shares a hash; within it, compare the questions properly. */
+        for (run = i + 1; run < l->n && l->ent[run].score == l->ent[i].score; run++)
+            ;
+        for (j = i; j < run; j++) {
+            elpis_ckpt_ent_t *e = &l->ent[j];
+            unsigned k;
+            for (k = out; k > 0 && l->ent[k - 1].score == e->score; k--) {
+                elpis_ckpt_ent_t *keep = &l->ent[k - 1];
+                if (ent_same(l, keep, e)) {
+                    keep->hits += e->hits;
+                    if (e->cost_ms > keep->cost_ms)
+                        keep->cost_ms = e->cost_ms;
+                    break;
+                }
+            }
+            if (k == 0 || l->ent[k - 1].score != e->score)
+                l->ent[out++] = *e;
+        }
+    }
+    l->n = out;
+    compact(l);
+}
+
+int elpis_ckpt_merge(elpis_ckpt_list_t *into, const elpis_ckpt_list_t *from,
+                     unsigned div)
+{
+    unsigned i;
+
+    if (div == 0)
+        div = 1;
+    for (i = 0; i < from->n; i++) {
+        const elpis_ckpt_ent_t *e = &from->ent[i];
+        if (elpis_ckpt_list_add(into, elpis_ckpt_name(from, e), e->namelen,
+                                e->qtype, e->kflags, (e->hits + div - 1u) / div,
+                                e->cost_ms) != ELPIS_OK)
+            return ELPIS_ENOMEM;
+    }
+    dedupe(into);
+    return ELPIS_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
-/*
- * What the warm-up works through: read once before the workers start and
- * only read after, so it needs no lock.  It is freed after they stop, never
- * before -- a warm-up task keeps a pointer into it until it finishes.
- */
-static elpis_ckpt_list_t g_list;
 static int      g_refuse;          /* something else lives at the path */
-static uint64_t g_warm_left;       /* workers still warming            */
-static uint64_t g_warm_issued, g_warm_cached;
-static uint64_t g_warm_t0;
+static unsigned g_nworkers = 1;
+static int      g_warm_on;         /* warm-rate is not 0               */
+static int      g_expect_more;     /* the mesh may submit lists later   */
+static uint64_t g_start_ms;
+/* What was read at startup, until it is submitted or the mesh takes it. */
+static elpis_ckpt_list_t g_startup;
 
 #define WARMUP_DELAY_MS 3000u      /* root priming and the TLDs go first */
 
@@ -462,11 +548,15 @@ void elpis_ckpt_load(elpis_ctx_t *ctx, unsigned nworkers)
     unsigned bad = 0;
     int rc;
 
-    elpis_ckpt_list_init(&g_list);
+    g_nworkers    = nworkers ? nworkers : 1u;
+    g_warm_on     = c->warm_rate > 0;
+    g_expect_more = c->mesh && g_warm_on;
+    g_start_ms    = elpis_now_ms();
+    elpis_ckpt_list_init(&g_startup);
     if (c->checkpoint[0] == '\0')
         return;
 
-    rc = elpis_ckpt_read(c->checkpoint, c->checkpoint_names, &g_list, &bad);
+    rc = elpis_ckpt_read(c->checkpoint, c->checkpoint_names, &g_startup, &bad);
     if (rc == ELPIS_ENOTFOUND) {
         elpis_info("checkpoint: no names in %s yet", c->checkpoint);
         return;
@@ -485,17 +575,19 @@ void elpis_ckpt_load(elpis_ctx_t *ctx, unsigned nworkers)
     if (bad > 0)
         elpis_warn("checkpoint: %u line%s of %s did not parse and were "
                    "skipped", bad, bad == 1 ? "" : "s", c->checkpoint);
+    elpis_info("checkpoint: %u names read from %s", g_startup.n, c->checkpoint);
 
-    if (c->warm_rate == 0 || g_list.n == 0) {
-        elpis_info("checkpoint: %u names in %s, warm-up off", g_list.n,
-                   c->checkpoint);
-        elpis_ckpt_list_free(&g_list);
-        return;
+    /* With a mesh, the list waits to be merged with what the peers know. */
+    if (!c->mesh) {
+        elpis_warmup_submit(&g_startup, "checkpoint");
+        elpis_ckpt_list_free(&g_startup);
     }
-    g_warm_left = nworkers ? nworkers : 1u;
-    g_warm_t0   = elpis_now_ms() + WARMUP_DELAY_MS;
-    elpis_info("checkpoint: warming %u names from %s at %u a second",
-               g_list.n, c->checkpoint, (unsigned)c->warm_rate);
+}
+
+void elpis_ckpt_take_startup(elpis_ckpt_list_t *out)
+{
+    *out = g_startup;
+    elpis_ckpt_list_init(&g_startup);
 }
 
 int elpis_ckpt_writing(const elpis_ctx_t *ctx)
@@ -547,27 +639,110 @@ void *elpis_ckpt_main(void *arg)
     return NULL;
 }
 
-void elpis_ckpt_fini(void)
-{
-    elpis_ckpt_list_free(&g_list);
-}
-
 /* ------------------------------------------------------------------ */
-/* Warm-up                                                             */
+/* Warm-up jobs                                                        */
 /* ------------------------------------------------------------------ */
 
 /*
- * Each worker takes every nth name of the ranked list, so all of them work
- * down it from the top together, and paces itself so the workers between them
- * send warm-rate a second.  Clients come first: a worker at half its
- * max-pending issues nothing, the same line the background refreshes stop at.
+ * A job is one ranked list to warm: the checkpoint at startup, merged with
+ * whatever the mesh's peers sent in time, and later any list a peer sends on
+ * its own.  Jobs are taken in order.  Each worker takes every nth name of a
+ * job, so all of them work down it from the top together, and paces itself
+ * so the workers between them send warm-rate a second.  Clients come first:
+ * a worker at half its max-pending issues nothing, the same line the
+ * background refreshes stop at.
+ *
+ * A warm-up task carries what it needs in the task itself, never a pointer
+ * into the job, so the last worker to finish its share frees the job.
  */
+typedef struct warm_job {
+    struct warm_job   *next;
+    uint64_t           id;
+    elpis_ckpt_list_t  list;
+    char               what[96];
+    uint64_t           left;          /* workers yet to finish their share */
+    uint64_t           issued, cached;
+    uint64_t           t0;
+} warm_job_t;
+
+static pthread_mutex_t g_jobs_mu = PTHREAD_MUTEX_INITIALIZER;
+static warm_job_t     *g_jobs;        /* oldest first */
+static uint64_t        g_job_seq;
+
+int elpis_warmup_submit(elpis_ckpt_list_t *l, const char *what)
+{
+    warm_job_t *j, **pp;
+    uint64_t now = elpis_now_ms();
+
+    if (!g_warm_on || l->n == 0)
+        return ELPIS_OK;
+    j = (warm_job_t *)elpis_calloc(1, sizeof *j);
+    if (j == NULL)
+        return ELPIS_ENOMEM;
+    j->list = *l;                   /* the job owns the names from here */
+    elpis_ckpt_list_init(l);
+    elpis_strlcpy(j->what, what, sizeof j->what);
+    j->left = g_nworkers;
+    j->t0 = now > g_start_ms + WARMUP_DELAY_MS ? now : g_start_ms + WARMUP_DELAY_MS;
+
+    pthread_mutex_lock(&g_jobs_mu);
+    j->id = ++g_job_seq;
+    for (pp = &g_jobs; *pp != NULL; pp = &(*pp)->next)
+        ;
+    *pp = j;
+    pthread_mutex_unlock(&g_jobs_mu);
+
+    elpis_info("warm-up: %u names from %s", j->list.n, what);
+    return ELPIS_OK;
+}
+
+/* The oldest job this worker has not done yet. */
+static warm_job_t *job_after(uint64_t id)
+{
+    warm_job_t *j;
+
+    pthread_mutex_lock(&g_jobs_mu);
+    for (j = g_jobs; j != NULL && j->id <= id; j = j->next)
+        ;
+    pthread_mutex_unlock(&g_jobs_mu);
+    return j;
+}
+
+static void job_free(warm_job_t *j)
+{
+    warm_job_t **pp;
+
+    pthread_mutex_lock(&g_jobs_mu);
+    for (pp = &g_jobs; *pp != NULL; pp = &(*pp)->next)
+        if (*pp == j) {
+            *pp = j->next;
+            break;
+        }
+    pthread_mutex_unlock(&g_jobs_mu);
+    elpis_ckpt_list_free(&j->list);
+    elpis_free(j);
+}
+
+void elpis_ckpt_fini(void)
+{
+    warm_job_t *j;
+
+    elpis_ckpt_list_free(&g_startup);
+    while ((j = g_jobs) != NULL) {
+        g_jobs = j->next;
+        elpis_ckpt_list_free(&j->list);
+        elpis_free(j);
+    }
+}
+
 #define WARMUP_TICK_MS 100u
 #define WARMUP_BURST   16u         /* most one tick catches up on */
 
 typedef struct {
     elpis_worker_t *w;
     elpis_timer_t   timer;
+    warm_job_t     *job;           /* the one being worked on, or NULL */
+    uint64_t        done_id;       /* the newest job finished          */
     unsigned        next, stride;
     unsigned        inflight;
     unsigned        issued, cached;
@@ -577,9 +752,10 @@ typedef struct {
 
 static ELPIS_TLS warmup_t g_wu;
 
-static void warmup_key(const elpis_ckpt_ent_t *e, elpis_mkey_t *k)
+static void ent_key_m(const elpis_ckpt_list_t *l, const elpis_ckpt_ent_t *e,
+                      elpis_mkey_t *k)
 {
-    k->qname    = elpis_ckpt_name(&g_list, e);
+    k->qname    = elpis_ckpt_name(l, e);
     k->qnamelen = e->namelen;
     k->qtype    = e->qtype;
     k->qclass   = ELPIS_CLASS_IN;
@@ -588,9 +764,15 @@ static void warmup_key(const elpis_ckpt_ent_t *e, elpis_mkey_t *k)
 }
 
 /*
- * The warmed entry starts with half the count the file carries, so a name
+ * The warmed entry starts with half the count its list carried, so a name
  * nobody asks for any more fades out over a few restarts rather than being
  * warmed for ever on the strength of old traffic.
+ *
+ * That count may be partly a peer's, already halved in the merge.  Carrying
+ * it is what lets the knowledge outlive the instance that gathered it: when
+ * the one instance clients use restarts, the siblings it warmed hand its
+ * names back, at a quarter of the weight, and they fade unless asked again.
+ * Lists move only when an instance starts, so this is a decay, not a loop.
  */
 static uint8_t warmup_pop(const elpis_ckpt_ent_t *e)
 {
@@ -599,26 +781,40 @@ static uint8_t warmup_pop(const elpis_ckpt_ent_t *e)
 
 static void warmup_done(elpis_task_t *t, void *ctx)
 {
-    const elpis_ckpt_ent_t *e = (const elpis_ckpt_ent_t *)ctx;
+    uint8_t folded[ELPIS_MAX_NAME];
     elpis_mkey_t k;
 
-    warmup_key(e, &k);
-    elpis_mcache_seed(t->w->ctx->mcache, &k, warmup_pop(e));
+    (void)ctx;
+    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
+    k.qname    = folded;
+    k.qnamelen = t->orig_qname.len;
+    k.qtype    = t->orig_qtype;
+    k.qclass   = t->qclass;
+    k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
+                           (t->client_cd ? ELPIS_MK_CD : 0u));
+    elpis_mkey_hash(&k);
+    elpis_mcache_seed(t->w->ctx->mcache, &k, t->warm_pop);
     if (g_wu.inflight > 0)
         g_wu.inflight--;
 }
 
-static void warmup_finished(warmup_t *s)
+/* This worker's share of the job is done; the last one out frees it. */
+static void job_share_done(warmup_t *s)
 {
-    elpis_atomic_add64(&g_warm_issued, s->issued);
-    elpis_atomic_add64(&g_warm_cached, s->cached);
-    if (elpis_atomic_sub64(&g_warm_left, 1) != 0)
-        return;
-    elpis_info("checkpoint: warm-up done in %.1f s, %llu names resolved, "
-               "%llu already cached by a client",
-               (double)(elpis_now_ms() - g_warm_t0) / 1000.0,
-               (unsigned long long)elpis_atomic_load64(&g_warm_issued),
-               (unsigned long long)elpis_atomic_load64(&g_warm_cached));
+    warm_job_t *j = s->job;
+
+    s->done_id = j->id;
+    s->job = NULL;
+    elpis_atomic_add64(&j->issued, s->issued);
+    elpis_atomic_add64(&j->cached, s->cached);
+    if (elpis_atomic_sub64(&j->left, 1) != 0)
+        return;                     /* not ours to touch any more */
+    elpis_info("warm-up: %s done in %.1f s, %llu names resolved, %llu "
+               "already cached", j->what,
+               (double)(elpis_now_ms() - j->t0) / 1000.0,
+               (unsigned long long)elpis_atomic_load64(&j->issued),
+               (unsigned long long)elpis_atomic_load64(&j->cached));
+    job_free(j);
 }
 
 static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
@@ -629,6 +825,7 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
     /* Credit is in tenths of a query per worker: warm-rate is for all of
      * them together, and a tick is a tenth of a second. */
     uint64_t unit = 10ull * s->stride;
+    const elpis_ckpt_list_t *l;
     uint64_t now;
 
     (void)lp;
@@ -636,12 +833,27 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
         return;
     now = elpis_cached_now_ms();
 
+    if (s->job == NULL) {
+        s->job = job_after(s->done_id);
+        if (s->job == NULL) {
+            if (g_expect_more)
+                elpis_timer_add(w->loop, &s->timer, WARMUP_TICK_MS,
+                                warmup_tick, s);
+            return;
+        }
+        s->next = w->index;
+        s->issued = s->cached = 0;
+        s->inflight = 0;
+        s->last_ms = now;
+    }
+    l = &s->job->list;
+
     s->credit += c->warm_rate;
     if (s->credit > unit * WARMUP_BURST)
         s->credit = unit * WARMUP_BURST;
 
-    while (s->credit >= unit && s->next < g_list.n) {
-        const elpis_ckpt_ent_t *e = &g_list.ent[s->next];
+    while (s->credit >= unit && s->next < l->n) {
+        const elpis_ckpt_ent_t *e = &l->ent[s->next];
         elpis_mkey_t k;
         elpis_name_t n;
         elpis_task_t *t;
@@ -650,9 +862,9 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
         if (w->n_tasks >= c->max_pending / 2u)
             break;
 
-        warmup_key(e, &k);
+        ent_key_m(l, e, &k);
         if (elpis_mcache_seed(w->ctx->mcache, &k, warmup_pop(e))) {
-            s->next += s->stride;       /* a client got there first */
+            s->next += s->stride;       /* a client, or a job before, got there first */
             s->cached++;
             continue;
         }
@@ -667,10 +879,10 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
         t->qtype     = e->qtype;
         t->qclass    = ELPIS_CLASS_IN;
         t->warmup    = 1;
+        t->warm_pop  = warmup_pop(e);
         t->client_do = (e->kflags & ELPIS_MK_DO) ? 1u : 0u;
         t->client_cd = (e->kflags & ELPIS_MK_CD) ? 1u : 0u;
         t->done_cb   = warmup_done;
-        t->done_ctx  = (void *)e;
         s->next += s->stride;
         s->inflight++;
         s->issued++;
@@ -680,29 +892,23 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
     }
 
     /*
-     * Done when the share is issued and answered.  A resolution gives up by
-     * query-total-timeout, so one still counted after twice that is a count
-     * gone astray, not a query -- stop waiting for it.  The list stays until
-     * shutdown either way, so a late callback still finds its entry.
+     * The share is done when it is issued and answered.  A resolution gives
+     * up by query-total-timeout, so one still counted after twice that is a
+     * count gone astray, not a query: stop waiting for it.
      */
-    if (s->next < g_list.n ||
-        (s->inflight > 0 &&
-         now - s->last_ms < 2ull * c->query_total_ms)) {
-        elpis_timer_add(w->loop, &s->timer, WARMUP_TICK_MS, warmup_tick, s);
-        return;
-    }
-    warmup_finished(s);
+    if (s->next >= l->n &&
+        (s->inflight == 0 || now - s->last_ms >= 2ull * c->query_total_ms))
+        job_share_done(s);
+    elpis_timer_add(w->loop, &s->timer, WARMUP_TICK_MS, warmup_tick, s);
 }
 
 int elpis_warmup_start(elpis_worker_t *w, unsigned nworkers)
 {
-    if (g_list.n == 0 || w->ctx->conf.warm_rate == 0)
+    if (!g_warm_on)
         return ELPIS_OK;
     memset(&g_wu, 0, sizeof g_wu);
     g_wu.w      = w;
-    g_wu.next   = w->index;
     g_wu.stride = nworkers ? nworkers : 1u;
-    g_wu.last_ms = elpis_cached_now_ms();
     elpis_timer_add(w->loop, &g_wu.timer, WARMUP_DELAY_MS, warmup_tick, &g_wu);
     return ELPIS_OK;
 }

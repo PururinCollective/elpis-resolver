@@ -1,14 +1,17 @@
 /*
- * elpis/crypto.h -- the verification primitives DNSSEC needs.
+ * elpis/crypto.h -- the verification primitives DNSSEC needs, and the
+ * cipher and key agreement the mesh needs.
  *
  * Everything here is self-contained so the binary links statically without
- * OpenSSL.  The resolver only ever verifies: no key generation, no signing, no
- * private keys.  (Ed25519 signing exists for the licence issuing tool, behind
- * ELPIS_ED25519_SIGN, and is not compiled into bin/elpis.)  All inputs are
- * public data, so these routines are written
+ * OpenSSL.  For DNSSEC the resolver only ever verifies: no signing and no
+ * long-term private keys.  (Ed25519 signing exists for the licence issuing
+ * tool, behind ELPIS_ED25519_SIGN, and is not compiled into bin/elpis.)
+ * Those inputs are public data, so the verification routines are written
  * for clarity and bounds safety rather than constant time -- with one
  * exception, the final signature comparisons, which use a constant-time
- * compare out of habit rather than necessity.
+ * compare out of habit rather than necessity.  The mesh primitives at the
+ * end hold secrets and are constant time; they agree keys and encrypt, and
+ * sign nothing.
  */
 #ifndef ELPIS_CRYPTO_H
 #define ELPIS_CRYPTO_H
@@ -154,5 +157,35 @@ size_t elpis_mldsa_sig_bytes(int variant);
 /* ---- randomness ---------------------------------------------------- */
 void     elpis_random_init(void);
 void     elpis_random_reseed(void);
+
+/* ---- secrets: the mesh (x25519.c, chachapoly.c) --------------------- */
+/*
+ * Everything above verifies public data.  These are the exception: the mesh
+ * keeps a pre-shared key and makes session keys, so they run in constant
+ * time, and what held a secret is wiped with elpis_memzero().
+ */
+void elpis_memzero(void *p, size_t n);
+/* 1 when equal; takes the same time wherever the first difference is. */
+int  elpis_ct_eq(const void *a, const void *b, size_t n);
+
+/* RFC 7748.  ELPIS_ERR when the result is all zeros (a low-order point). */
+int  elpis_x25519(uint8_t out[32], const uint8_t scalar[32],
+                  const uint8_t point[32]);
+int  elpis_x25519_base(uint8_t pub[32], const uint8_t secret[32]);
+
+/* RFC 8439. */
+void elpis_chacha20_xor(const uint8_t key[32], const uint8_t nonce[12],
+                        uint32_t counter, const uint8_t *in, uint8_t *out,
+                        size_t n);
+void elpis_poly1305(const uint8_t key[32], const uint8_t *m, size_t n,
+                    uint8_t tag[16]);
+/* `out` gets ptlen + 16 bytes: the ciphertext, then the tag. */
+void elpis_aead_seal(const uint8_t key[32], const uint8_t nonce[12],
+                     const uint8_t *ad, size_t adlen,
+                     const uint8_t *pt, size_t ptlen, uint8_t *out);
+/* `out` gets ctlen - 16 bytes, and only when the tag is right. */
+int  elpis_aead_open(const uint8_t key[32], const uint8_t nonce[12],
+                     const uint8_t *ad, size_t adlen,
+                     const uint8_t *ct, size_t ctlen, uint8_t *out);
 
 #endif /* ELPIS_CRYPTO_H */

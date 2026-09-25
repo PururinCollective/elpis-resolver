@@ -29,6 +29,7 @@ prefetch: yes
 prefetch-threshold: 10     # refresh with 10% of the TTL left
 refresh-nxdomain-confirmations: 3
 checkpoint: no             # or /var/lib/elpis/names: warm up after a restart
+mesh: no                   # yes: instances you run warm each other (mesh.md)
 
 dnssec: yes
 root-zone-transfer: no     # yes = pull every TLD delegation at startup
@@ -216,4 +217,4 @@ raises verbosity, repeatable.
 
 ---
 
-[Caching](caching.md) · [DNSSEC](dnssec.md) · [Internals](internals.md) · [Troubleshooting](troubleshooting.md)
+[Caching](caching.md) · [DNSSEC](dnssec.md) · [Internals](internals.md) · [Mesh](mesh.md) · [Troubleshooting](troubleshooting.md)

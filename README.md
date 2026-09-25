@@ -161,7 +161,8 @@ over an SSH tunnel, a VPN, or your own TLS reverse proxy. See
 |---|---|
 | [Compiling](docs/COMPILING.md) | building on every platform, CPU tuning, static and cross builds |
 | [Configuration](docs/configuration.md) | every setting, privileged ports, signals, the identity probe |
-| [Caching](docs/caching.md) | the caches, background refresh, what happens when a refresh fails |
+| [Caching](docs/caching.md) | the caches, background refresh, what happens when a refresh fails, warming after a restart |
+| [Mesh](docs/mesh.md) | instances you run warming each other after a restart, without a disk |
 | [DNSSEC](docs/dnssec.md) | validation, the algorithms, cookies, the standards followed |
 | [Status page](docs/status-page.md) | the web interface and how to reach it safely |
 | [Troubleshooting](docs/troubleshooting.md) | answers not coming back, port conflicts, malformed input |

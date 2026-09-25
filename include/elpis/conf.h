@@ -22,6 +22,11 @@
 #define ELPIS_MAX_STUB   16
 #define ELPIS_MAX_OUT_SRC 8
 
+/* The mesh: its default port, and how many of each address it takes. */
+#define ELPIS_MESH_PORT        7878
+#define ELPIS_MESH_MAX_LISTEN  4
+#define ELPIS_MESH_MAX_BRIDGES 16
+
 /*
  * The default name of the identity probe.  It sits in an undelegated TLD on
  * purpose: nothing on the public internet can ever own it, so the probe only
@@ -84,6 +89,17 @@ typedef struct {
     uint32_t     checkpoint_names;         /* most names kept            */
     uint32_t     checkpoint_min_hits;      /* asked fewer times: left out */
     uint32_t     warm_rate;                /* startup queries/s; 0 = off */
+
+    /* --- mesh (mesh.c) -------------------------------------------- */
+    uint8_t      mesh;
+    char         mesh_psk_file[512];       /* read once, before chroot   */
+    elpis_addr_t mesh_listen[ELPIS_MESH_MAX_LISTEN];
+    unsigned     n_mesh_listen;
+    elpis_addr_t mesh_peer[ELPIS_MESH_MAX_BRIDGES];   /* the bridges     */
+    unsigned     n_mesh_peer;
+    uint8_t      mesh_share;               /* answer peers' list requests */
+    uint32_t     mesh_share_min_hits;
+    uint32_t     mesh_max_peers;
 
     /* --- roots and TLDs ------------------------------------------- */
     char         root_hints[512];

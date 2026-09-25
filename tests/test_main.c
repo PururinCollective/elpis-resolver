@@ -25,6 +25,8 @@
 #include "elpis/deleg.h"
 #include "elpis/conflict.h"
 #include "elpis/checkpoint.h"
+#include "elpis/noise.h"
+#include "elpis/mesh.h"
 
 #include "vectors.h"
 
@@ -2295,6 +2297,46 @@ static void test_checkpoint(void)
     unlink(other);
     rmdir(dir);
 
+    /*
+     * Merging a peer's list into ours: a question on both is summed, the
+     * peer's count halved; the slower cost wins.
+     */
+    elpis_ckpt_list_init(&l);
+    elpis_ckpt_list_init(&r);
+    elpis_name_from_text(&n, "both.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_A, 0, 10, 40);
+    elpis_ckpt_list_add(&r, n.d, n.len, ELPIS_T_A, 0, 20, 90);
+    elpis_ckpt_list_add(&r, n.d, n.len, ELPIS_T_AAAA, 0, 20, 90);
+    elpis_name_from_text(&n, "ours.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_A, 0, 6, 10);
+    elpis_name_from_text(&n, "theirs.example.");
+    elpis_ckpt_list_add(&r, n.d, n.len, ELPIS_T_A, ELPIS_MK_DO, 7, 300);
+    elpis_ckpt_list_add(&r, n.d, n.len, ELPIS_T_A, ELPIS_MK_DO, 3, 100);
+    CHECK(elpis_ckpt_merge(&l, &r, 2) == ELPIS_OK && l.n == 4,
+          "merge folds equal questions together (%u)", l.n);
+    elpis_ckpt_rank(&l, 100);
+    {
+        unsigned i, ok = 0;
+        for (i = 0; i < l.n; i++) {
+            const elpis_ckpt_ent_t *e = &l.ent[i];
+            if (ckpt_has(&l, i, "both.example.", ELPIS_T_A, 0) &&
+                e->hits == 20 && e->cost_ms == 90)
+                ok++;
+            if (ckpt_has(&l, i, "both.example.", ELPIS_T_AAAA, 0) &&
+                e->hits == 10)
+                ok++;
+            if (ckpt_has(&l, i, "ours.example.", ELPIS_T_A, 0) &&
+                e->hits == 6)
+                ok++;
+            if (ckpt_has(&l, i, "theirs.example.", ELPIS_T_A, ELPIS_MK_DO) &&
+                e->hits == 6 && e->cost_ms == 300)
+                ok++;
+        }
+        CHECK(ok == 4, "counts added and halved (%u of 4)", ok);
+    }
+    elpis_ckpt_list_free(&l);
+    elpis_ckpt_list_free(&r);
+
     /* Configuration. */
     elpis_conf_defaults(&c);
     CHECK(c.checkpoint[0] == '\0' && c.checkpoint_interval == 3600 &&
@@ -2319,6 +2361,270 @@ static void test_checkpoint(void)
     elpis_strlcpy(line, "warm-rate: 0", sizeof line);
     CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
           c.warm_rate == 0, "warm-rate: 0 turns the warm-up off");
+}
+
+/* ================================================================== */
+/*
+ * The mesh's primitives, against the RFC vectors (each confirmed against an
+ * independent implementation when these were written).
+ */
+static void test_mesh_crypto(void)
+{
+    uint8_t a[64], b[64], c[64], out[32], tag[16];
+    uint8_t key[32], nonce[12], aad[12], pt[128], ct[160], back[128];
+    static const char k_pt[] =
+        "Ladies and Gentlemen of the class of '99: If I could offer you only "
+        "one tip for the future, sunscreen would be it.";
+    size_t ptlen = sizeof k_pt - 1u, n;
+    unsigned i;
+
+    section("mesh crypto");
+
+    unhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", a, 32);
+    unhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", b, 32);
+    unhex("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552", c, 32);
+    CHECK(elpis_x25519(out, a, b) == ELPIS_OK && !memcmp(out, c, 32),
+          "X25519: RFC 7748 section 5.2");
+
+    /* Section 6.1: both sides of a key agreement. */
+    unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", a, 32);
+    unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", b, 32);
+    elpis_x25519_base(a + 32, a);
+    elpis_x25519_base(b + 32, b);
+    unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", c, 32);
+    unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", c + 32, 32);
+    CHECK(!memcmp(a + 32, c, 32) && !memcmp(b + 32, c + 32, 32),
+          "X25519: public keys from RFC 7748 section 6.1");
+    unhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", c, 32);
+    CHECK(elpis_x25519(out, a, b + 32) == ELPIS_OK && !memcmp(out, c, 32) &&
+          elpis_x25519(out, b, a + 32) == ELPIS_OK && !memcmp(out, c, 32),
+          "X25519: both sides agree on the RFC's shared secret");
+
+    /* Section 5.2, iterated: k = X25519(k, u), u = old k. */
+    memset(a, 0, 32); a[0] = 9;
+    memset(b, 0, 32); b[0] = 9;
+    for (i = 0; i < 1000; i++) {
+        elpis_x25519(out, a, b);
+        memcpy(b, a, 32);
+        memcpy(a, out, 32);
+        if (i == 0) {
+            unhex("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079", c, 32);
+            CHECK(!memcmp(a, c, 32), "X25519: one iteration");
+        }
+    }
+    unhex("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51", c, 32);
+    CHECK(!memcmp(a, c, 32), "X25519: a thousand iterations");
+
+    memset(b, 0, 32);           /* u = 0 is a low-order point */
+    CHECK(elpis_x25519(out, a, b) == ELPIS_ERR,
+          "X25519: an all-zero result from a low-order point is refused");
+
+    unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b", key, 32);
+    elpis_poly1305(key, (const uint8_t *)"Cryptographic Forum Research Group",
+                   34, tag);
+    unhex("a8061dc1305136c6c22b8baf0c0127a9", c, 16);
+    CHECK(!memcmp(tag, c, 16), "Poly1305: RFC 8439 section 2.5.2");
+
+    for (i = 0; i < 32; i++)
+        key[i] = (uint8_t)(0x80 + i);
+    unhex("070000004041424344454647", nonce, 12);
+    unhex("50515253c0c1c2c3c4c5c6c7", aad, 12);
+    memcpy(pt, k_pt, ptlen);
+    elpis_aead_seal(key, nonce, aad, 12, pt, ptlen, ct);
+    {
+        uint8_t want[160];
+        n = unhex("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+                  "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+                  "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+                  "3ff4def08e4b7a9de576d26586cec64b6116"
+                  "1ae10b594f09e26a7e902ecbd0600691", want, sizeof want);
+        CHECK(n == ptlen + 16u && !memcmp(ct, want, n),
+              "ChaCha20-Poly1305: RFC 8439 section 2.8.2");
+    }
+    CHECK(elpis_aead_open(key, nonce, aad, 12, ct, ptlen + 16u, back) == ELPIS_OK &&
+          !memcmp(back, pt, ptlen), "and it opens again");
+    ct[3] ^= 1;
+    memset(back, 0xAA, sizeof back);
+    CHECK(elpis_aead_open(key, nonce, aad, 12, ct, ptlen + 16u, back) == ELPIS_ERR &&
+          back[0] == 0xAA, "one flipped bit is refused, and nothing is decrypted");
+    ct[3] ^= 1;
+    aad[0] ^= 1;
+    CHECK(elpis_aead_open(key, nonce, aad, 12, ct, ptlen + 16u, back) == ELPIS_ERR,
+          "and so is a change to the associated data");
+    CHECK(elpis_aead_open(key, nonce, aad, 12, ct, 15, back) == ELPIS_ERR,
+          "and anything shorter than a tag");
+}
+
+/*
+ * The handshake, byte for byte against a vector from an independent Python
+ * implementation of the Noise spec over the `cryptography` package, then
+ * the ways it has to fail.
+ */
+static void noise_pair(elpis_noise_hs_t *i, elpis_noise_hs_t *r,
+                       const uint8_t psk_i[32], const uint8_t psk_r[32])
+{
+    static const char prologue[] = "elpis mesh 1";
+    elpis_noise_init(i, 1, psk_i, (const uint8_t *)prologue, sizeof prologue - 1u);
+    elpis_noise_init(r, 0, psk_r, (const uint8_t *)prologue, sizeof prologue - 1u);
+}
+
+static void test_noise(void)
+{
+    static const char p1[] = "hello from the initiator";
+    static const char p2[] = "and back from the responder";
+    uint8_t psk[32], other[32], ei[32], er[32];
+    uint8_t m1[128], m2[128], want[128], got[128], t[128];
+    size_t n1, n2, nw, np;
+    elpis_noise_hs_t i, r;
+    elpis_noise_cs_t itx, irx, rtx, rrx;
+    unsigned k;
+
+    section("noise handshake");
+
+    for (k = 0; k < 32; k++)
+        psk[k] = (uint8_t)(0x20 + k);
+    unhex("893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b0569da977c464a", ei, 32);
+    unhex("bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b", er, 32);
+
+    noise_pair(&i, &r, psk, psk);
+    elpis_noise_set_ephemeral(&i, ei);
+    elpis_noise_set_ephemeral(&r, er);
+    CHECK(elpis_noise_write(&i, (const uint8_t *)p1, sizeof p1 - 1u, m1,
+                            sizeof m1, &n1) == ELPIS_OK, "message 1 written");
+    nw = unhex("ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944"
+               "583aeb06fa033d2236747b93480382d0b7dc71fb67f2ee71633b8d90e58ebdc5"
+               "ddde6bd1f38dfabd", want, sizeof want);
+    CHECK(n1 == nw && !memcmp(m1, want, nw), "message 1 matches the reference");
+    CHECK(elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_OK &&
+          np == sizeof p1 - 1u && !memcmp(got, p1, np),
+          "the responder reads its payload");
+    CHECK(elpis_noise_write(&r, (const uint8_t *)p2, sizeof p2 - 1u, m2,
+                            sizeof m2, &n2) == ELPIS_OK, "message 2 written");
+    nw = unhex("95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f144808843"
+               "3149b1bdd84484a26a9b2ce7e00fdddcdd794b05c171890fe743dd9564c98f87"
+               "422fdc85faebd76802e616", want, sizeof want);
+    CHECK(n2 == nw && !memcmp(m2, want, nw), "message 2 matches the reference");
+    CHECK(elpis_noise_read(&i, m2, n2, got, sizeof got, &np) == ELPIS_OK &&
+          np == sizeof p2 - 1u && !memcmp(got, p2, np),
+          "the initiator reads its payload");
+    CHECK(elpis_noise_done(&i) && elpis_noise_done(&r), "both sides are done");
+
+    elpis_noise_split(&i, &itx, &irx);
+    elpis_noise_split(&r, &rtx, &rrx);
+    elpis_noise_encrypt(&itx, (const uint8_t *)"first transport message", 23, t);
+    nw = unhex("237d1e6bb86246ee1afcff8e413f0c8e9f63375238a1ebf194586b4b40d8af0c"
+               "c0a808aa986a8c", want, sizeof want);
+    CHECK(nw == 39 && !memcmp(t, want, nw), "transport keys match the reference");
+    CHECK(elpis_noise_decrypt(&rrx, t, 39, got) == ELPIS_OK &&
+          !memcmp(got, "first transport message", 23), "and open on the other side");
+    CHECK(elpis_noise_decrypt(&rrx, t, 39, got) == ELPIS_ERR,
+          "a replayed message does not open: the nonce has moved on");
+    elpis_noise_encrypt(&rtx, (const uint8_t *)"reply", 5, t);
+    nw = unhex("aa8f1c707e2879658f6cbd4242af92b5913c3043c0", want, sizeof want);
+    CHECK(nw == 21 && !memcmp(t, want, nw) &&
+          elpis_noise_decrypt(&irx, t, 21, got) == ELPIS_OK,
+          "the reply direction has a key of its own");
+
+    /* Without the PSK there is no getting past message 1. */
+    memcpy(other, psk, 32);
+    other[31] ^= 1;
+    noise_pair(&i, &r, psk, other);
+    elpis_noise_write(&i, (const uint8_t *)p1, sizeof p1 - 1u, m1, sizeof m1, &n1);
+    CHECK(elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_ERR,
+          "a responder with another PSK refuses message 1");
+    noise_pair(&i, &r, other, psk);
+    elpis_noise_write(&i, (const uint8_t *)p1, sizeof p1 - 1u, m1, sizeof m1, &n1);
+    CHECK(elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_ERR,
+          "and so does one facing an initiator with another PSK");
+
+    /* Random ephemerals: a fresh pair agrees, and a tampered message 2 fails. */
+    noise_pair(&i, &r, psk, psk);
+    elpis_noise_write(&i, NULL, 0, m1, sizeof m1, &n1);
+    CHECK(elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_OK && np == 0,
+          "an empty payload is fine");
+    elpis_noise_write(&r, NULL, 0, m2, sizeof m2, &n2);
+    m2[5] ^= 0x10;
+    CHECK(elpis_noise_read(&i, m2, n2, got, sizeof got, &np) == ELPIS_ERR,
+          "a changed ephemeral key in message 2 is caught");
+    CHECK(elpis_noise_write(&i, NULL, 0, m1, sizeof m1, &n1) == ELPIS_ERR,
+          "and a message out of turn is refused");
+
+    noise_pair(&i, &r, psk, psk);
+    CHECK(elpis_noise_read(&i, m1, n1, got, sizeof got, &np) == ELPIS_ERR,
+          "an initiator does not read message 1");
+    memset(m1, 0, 32);          /* a low-order ephemeral */
+    elpis_noise_write(&i, NULL, 0, m2, sizeof m2, &n1);
+    elpis_noise_read(&r, m2, n1, got, sizeof got, &np);
+    elpis_noise_write(&r, NULL, 0, m2, sizeof m2, &n2);
+    memset(m2, 0, 32);
+    CHECK(elpis_noise_read(&i, m2, n2, got, sizeof got, &np) == ELPIS_ERR,
+          "an all-zero ephemeral from the responder is refused");
+}
+
+static void test_mesh(void)
+{
+    static const char hex[] =
+        "b2b264d69db10e5e5c3a721b83970cf58baca35463d9550b45a0213bb65cbe24";
+    uint8_t psk[32], want[32];
+    char text[256];
+    elpis_addr_t a, b, c, d, e;
+    elpis_conf_t cf;
+    char line[128];
+
+    section("mesh");
+
+    unhex(hex, want, 32);
+    snprintf(text, sizeof text, "# elpis mesh key\n%s\n", hex);
+    CHECK(elpis_mesh_psk_parse(text, psk) == ELPIS_OK && !memcmp(psk, want, 32),
+          "a key file as --gen-psk writes it");
+    snprintf(text, sizeof text, "  %.32s\n  %s  \n# trailing comment", hex, hex + 32);
+    CHECK(elpis_mesh_psk_parse(text, psk) == ELPIS_OK && !memcmp(psk, want, 32),
+          "split over lines, with a comment after");
+    CHECK(elpis_mesh_psk_parse("abcd", psk) == ELPIS_ERR, "too short is refused");
+    snprintf(text, sizeof text, "%s00", hex);
+    CHECK(elpis_mesh_psk_parse(text, psk) == ELPIS_ERR, "and so is too long");
+    snprintf(text, sizeof text, "%.62szz", hex);
+    CHECK(elpis_mesh_psk_parse(text, psk) == ELPIS_ERR, "and anything not hex");
+    snprintf(text, sizeof text, "x # not a comment mid-line %s", hex);
+    CHECK(elpis_mesh_psk_parse(text, psk) == ELPIS_ERR,
+          "a comment only starts a line");
+
+    elpis_addr_parse(&a, "127.0.0.1@7878", 7878);
+    elpis_addr_parse(&b, "192.168.89.10@7878", 7878);
+    elpis_addr_parse(&c, "203.0.113.7@7878", 7878);
+    elpis_addr_parse(&d, "[fd00::1]@7878", 7878);
+    elpis_addr_parse(&e, "[2001:db8::1]@7878", 7878);
+    CHECK(elpis_mesh_addr_private(&a) && elpis_mesh_addr_private(&b) &&
+          elpis_mesh_addr_private(&d) && !elpis_mesh_addr_private(&c) &&
+          !elpis_mesh_addr_private(&e), "private and public told apart");
+    {
+        elpis_addr_t f, g;
+        elpis_addr_parse(&f, "100.64.1.1@7878", 7878);
+        elpis_addr_parse(&g, "[::ffff:10.1.2.3]@7878", 7878);
+        CHECK(elpis_mesh_addr_private(&f) && elpis_mesh_addr_private(&g),
+              "shared address space and v4-mapped private too");
+    }
+    CHECK(elpis_mesh_may_tell(&c, &b) && elpis_mesh_may_tell(&c, &e),
+          "a public address can go to anyone");
+    CHECK(elpis_mesh_may_tell(&b, &d) && !elpis_mesh_may_tell(&b, &c),
+          "a private one only to peers on a private network");
+    CHECK(elpis_mesh_may_tell(&a, &a) && !elpis_mesh_may_tell(&a, &b),
+          "a loopback one only to peers on loopback");
+
+    elpis_conf_defaults(&cf);
+    CHECK(!cf.mesh && cf.mesh_share && cf.mesh_share_min_hits == 5 &&
+          cf.mesh_max_peers == 16, "the mesh is off by default");
+    elpis_strlcpy(line, "mesh-peer: 192.0.2.6", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          cf.n_mesh_peer == 1 && elpis_addr_port(&cf.mesh_peer[0]) == 7878,
+          "mesh-peer defaults to port 7878");
+    elpis_strlcpy(line, "mesh-listen: [::]@7900", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          cf.n_mesh_listen == 1 && elpis_addr_port(&cf.mesh_listen[0]) == 7900,
+          "mesh-listen takes a port");
+    elpis_strlcpy(line, "mesh-psk: mesh.key", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) != ELPIS_OK,
+          "mesh-psk wants an absolute path");
 }
 
 /* ================================================================== */
@@ -2351,6 +2657,9 @@ int main(void)
     test_task_ceiling();
     test_popularity();
     test_checkpoint();
+    test_mesh_crypto();
+    test_noise();
+    test_mesh();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

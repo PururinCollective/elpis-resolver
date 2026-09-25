@@ -197,6 +197,7 @@ struct elpis_task {
      * exactly as the client's own query would have.
      */
     unsigned        warmup : 1;
+    uint8_t         warm_pop;       /* the count the warmed entry starts at */
     unsigned        dns64_tried : 1;
     unsigned        dns64_synth : 1;
     unsigned        revalidate : 1;   /* cache hit whose status is unknown */

@@ -14,6 +14,18 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**Instances can warm each other, with nothing on disk.** With `mesh: yes`,
+instances you run connect to the bridges in `mesh-peer:` and to the instances
+those know. One that starts asks the others for the questions their clients ask
+most, merges them with its checkpoint if there is one, and warms the lot.
+Measured with three instances: the only one with clients, restarted with no
+checkpoint, was warm four and a half seconds later, its slowest answer 158 ms
+against 1,065 ms cold. Names only, never answers, and only names asked
+`mesh-share-min-hits` times. Connections are Noise_NNpsk0 over TCP, keyed by
+one PSK from `elpis --gen-psk`: X25519 for forward secrecy, ChaCha20-Poly1305,
+and the PSK mixed into every key, so recorded traffic stays safe from a future
+quantum computer while the key does. See [Mesh](docs/mesh.md).
+
 **A restart can come back warm.** With `checkpoint:` set to a path, Elpis
 writes down the questions clients ask most, every `checkpoint-interval` and
 never at shutdown, and after a restart resolves them all again, most valuable

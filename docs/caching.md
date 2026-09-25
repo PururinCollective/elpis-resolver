@@ -120,7 +120,8 @@ either way:
 
 The warm-up itself took 1.3 seconds for 177 questions. A new instance can
 start warm too: copy the file from one that has been running, and set
-`checkpoint-interval: 0` if it should only read it.
+`checkpoint-interval: 0` if it should only read it. Or let the instances ask
+each other, with nothing on disk at all: see [Mesh](mesh.md).
 
 ## Every level of the delegation chain
 
@@ -158,4 +159,4 @@ after    datatracker.ietf.org -> start at zone ietf.org.   (5 addrs)
 
 ---
 
-[Configuration](configuration.md) · [DNSSEC](dnssec.md) · [Internals](internals.md) · [Troubleshooting](troubleshooting.md)
+[Configuration](configuration.md) · [DNSSEC](dnssec.md) · [Internals](internals.md) · [Mesh](mesh.md) · [Troubleshooting](troubleshooting.md)

@@ -17,6 +17,7 @@
 #include "elpis/log.h"
 #include "elpis/webui.h"
 #include "elpis/checkpoint.h"
+#include "elpis/mesh.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -993,7 +994,9 @@ static void usage(const char *argv0)
         "            print a webgui-password: line to paste into the config.\n"
         "            Use this when the config file is read-only, which under\n"
         "            the shipped systemd unit it is.  With no PASS, reads one\n"
-        "            line from stdin so it stays out of your shell history.\n",
+        "            line from stdin so it stays out of your shell history.\n"
+        "  --gen-psk print a new key for mesh-psk:, to give every instance\n"
+        "            of a mesh the same copy of.\n",
         ELPIS_VERSION, argv0, ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
 }
 
@@ -1096,8 +1099,8 @@ int main(int argc, char **argv)
     int axfr_started = 0, probe_started = 0;
     pthread_t web_th;
     int web_started = 0;
-    pthread_t ckpt_th;
-    int ckpt_started = 0;
+    pthread_t ckpt_th, mesh_th;
+    int ckpt_started = 0, mesh_started = 0;
 
     for (i = 1; i < (unsigned)argc; i++) {
         const char *a = argv[i];
@@ -1107,6 +1110,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-v"))                           verbose++;
         else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
         else if (!strcmp(a, "--hash-password")) return hash_password(argv[i + 1]);
+        else if (!strcmp(a, "--gen-psk")) { elpis_random_init(); return elpis_mesh_gen_psk(); }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option '%s'\n", a); usage(argv[0]); return 2; }
     }
@@ -1173,6 +1177,9 @@ int main(int argc, char **argv)
         }
     }
 
+    /* The PSK is read, and the mesh's ports bound, while still privileged. */
+    elpis_mesh_init(&ctx);
+
     if (drop_privilege(&ctx.conf) != ELPIS_OK)
         return 1;
 
@@ -1223,6 +1230,12 @@ int main(int argc, char **argv)
             ckpt_started = 1;
         else
             elpis_warn("could not start the checkpoint thread");
+    }
+    if (ctx.conf.mesh) {
+        if (pthread_create(&mesh_th, NULL, elpis_mesh_main, &ctx) == 0)
+            mesh_started = 1;
+        else
+            elpis_warn("could not start the mesh thread");
     }
 
     for (i = 1; i < nthreads; i++) {
@@ -1298,6 +1311,8 @@ int main(int argc, char **argv)
         pthread_join(web_th, NULL);
     if (ckpt_started)
         pthread_join(ckpt_th, NULL);
+    if (mesh_started)
+        pthread_join(mesh_th, NULL);
 
     elpis_stats_report(&ctx);
 
@@ -1308,6 +1323,7 @@ int main(int argc, char **argv)
      * given back here. */
     elpis_dnssec_thread_done();
     elpis_free(g_workers);
+    elpis_mesh_fini();
     elpis_ckpt_fini();
 
     if (ctx.conf.pidfile[0] != '\0')

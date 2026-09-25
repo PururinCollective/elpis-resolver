@@ -56,6 +56,10 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->checkpoint_names   = 50000;
     c->checkpoint_min_hits = 2;
     c->warm_rate          = 200;
+    c->mesh               = 0;
+    c->mesh_share         = 1;
+    c->mesh_share_min_hits = 5;
+    c->mesh_max_peers     = 16;
     c->web                = 0;
     elpis_addr_parse(&c->web_listen, "127.0.0.1@8082", 8082);
     elpis_strlcpy(c->web_user, "admin", sizeof c->web_user);
@@ -383,6 +387,47 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         uint32_t v;
         if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
         c->warm_rate = ELPIS_MIN(v, 100000u);
+        return ELPIS_OK;
+    }
+
+    /* ---- mesh ---- */
+    if (KEY("mesh")) return want_bool(&p, key, val, &c->mesh);
+    if (KEY("mesh-psk")) {
+        if (val[0] != '/' || strlen(val) >= sizeof c->mesh_psk_file) {
+            elpis_error("%s:%u: 'mesh-psk' takes an absolute path", src, lineno);
+            return ELPIS_ERR;
+        }
+        elpis_strlcpy(c->mesh_psk_file, val, sizeof c->mesh_psk_file);
+        return ELPIS_OK;
+    }
+    if (KEY("mesh-listen") || KEY("mesh-peer")) {
+        int listen = KEY("mesh-listen");
+        elpis_addr_t *arr = listen ? c->mesh_listen : c->mesh_peer;
+        unsigned *n = listen ? &c->n_mesh_listen : &c->n_mesh_peer;
+        unsigned max = listen ? ELPIS_MESH_MAX_LISTEN : ELPIS_MESH_MAX_BRIDGES;
+        if (*n >= max) {
+            elpis_warn("%s:%u: more than %u '%s' lines; the rest are ignored",
+                       src, lineno, max, key);
+            return ELPIS_OK;
+        }
+        if (elpis_addr_parse(&arr[*n], val, ELPIS_MESH_PORT) != 0) {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        (*n)++;
+        return ELPIS_OK;
+    }
+    if (KEY("mesh-share")) return want_bool(&p, key, val, &c->mesh_share);
+    if (KEY("mesh-share-min-hits")) {
+        uint32_t v;
+        if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
+        c->mesh_share_min_hits = ELPIS_CLAMP(v, 1u, 1000000u);
+        return ELPIS_OK;
+    }
+    if (KEY("mesh-max-peers")) {
+        uint32_t v;
+        if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
+        c->mesh_max_peers = ELPIS_CLAMP(v, 1u, 64u);
         return ELPIS_OK;
     }
 
@@ -795,6 +840,17 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  checkpoint=%s every %us, up to %u names, warm-rate=%u/s",
                    c->checkpoint, (unsigned)c->checkpoint_interval,
                    (unsigned)c->checkpoint_names, (unsigned)c->warm_rate);
+    if (c->mesh) {
+        for (i = 0; i < c->n_mesh_listen; i++)
+            elpis_info("  mesh-listen %s",
+                       elpis_addr_str(&c->mesh_listen[i], buf, sizeof buf));
+        for (i = 0; i < c->n_mesh_peer; i++)
+            elpis_info("  mesh-peer %s",
+                       elpis_addr_str(&c->mesh_peer[i], buf, sizeof buf));
+        elpis_info("  mesh-share=%d (min hits %u), mesh-max-peers=%u",
+                   (int)c->mesh_share, (unsigned)c->mesh_share_min_hits,
+                   (unsigned)c->mesh_max_peers);
+    }
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "
                    "max-udp-reply-size=%u", (unsigned)c->edns_buffer4,

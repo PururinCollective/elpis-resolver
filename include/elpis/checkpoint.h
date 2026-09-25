@@ -77,10 +77,26 @@ int  elpis_ckpt_write(const char *path, const elpis_ckpt_list_t *l);
 int  elpis_ckpt_read(const char *path, unsigned max, elpis_ckpt_list_t *l,
                      unsigned *bad);
 
+/*
+ * Add `from` into `into`, each count divided by `div` (rounded up): a
+ * question already there has the hits added.  Repeats are folded together;
+ * the result is not ranked.
+ */
+int  elpis_ckpt_merge(elpis_ckpt_list_t *into, const elpis_ckpt_list_t *from,
+                      unsigned div);
+
 /* ---- process lifecycle (the warm-up itself is in resolver.h) ---- */
 /* Read the configured checkpoint for the warm-up, which `nworkers` workers
  * share.  Before the workers start. */
 void  elpis_ckpt_load(elpis_ctx_t *ctx, unsigned nworkers);
+/* With a mesh, what the checkpoint held at startup, for it to merge with
+ * the peers' lists; the list is handed over and left empty here. */
+void  elpis_ckpt_take_startup(elpis_ckpt_list_t *out);
+/*
+ * Queue a list to be warmed, ranked, best first; `what` names it in the log.
+ * The job takes the names and leaves `l` empty.  Any thread.
+ */
+int   elpis_warmup_submit(elpis_ckpt_list_t *l, const char *what);
 /* 1 when a writer thread should run. */
 int   elpis_ckpt_writing(const elpis_ctx_t *ctx);
 /* The writer thread. */
