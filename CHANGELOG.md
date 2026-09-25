@@ -10,6 +10,21 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**A restart can come back warm.** With `checkpoint:` set to a path, Elpis
+writes down the questions clients ask most, every `checkpoint-interval` and
+never at shutdown, and after a restart resolves them all again, most valuable
+first, before clients ask. Names are ranked by how often they are asked times
+how long they took cold, so the far-away ones come first. Measured on 60 sites
+after a restart, the slowest went from 1,580 ms cold to 13 ms warmed; the
+warm-up took 1.3 seconds. The file holds names, never answers, so everything
+it brings back is resolved and validated as usual. It is still a list of what
+clients looked up, so it is off by default and written `0600`. See
+[Caching](docs/caching.md#surviving-a-restart).
+
 ## 2.0.2 — 2026-09-25
 
 ### Fixed

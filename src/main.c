@@ -16,6 +16,7 @@
 #include "elpis/util.h"
 #include "elpis/log.h"
 #include "elpis/webui.h"
+#include "elpis/checkpoint.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -502,6 +503,7 @@ void elpis_worker_run(elpis_worker_t *w)
         elpis_prime_start(w);
         elpis_tld_warm_start(w);
     }
+    elpis_warmup_start(w, g_nworkers);
     while (!w->ctx->shutdown && !elpis_loop_stopped(w->loop))
         elpis_loop_once(w->loop, 500);
     publish_stats(w);
@@ -1094,6 +1096,8 @@ int main(int argc, char **argv)
     int axfr_started = 0, probe_started = 0;
     pthread_t web_th;
     int web_started = 0;
+    pthread_t ckpt_th;
+    int ckpt_started = 0;
 
     for (i = 1; i < (unsigned)argc; i++) {
         const char *a = argv[i];
@@ -1189,6 +1193,13 @@ int main(int argc, char **argv)
 
     elpis_info("listening with %u worker%s", nthreads, nthreads == 1 ? "" : "s");
 
+    /*
+     * After privileges are dropped and any chroot is entered, so the file is
+     * read from where it will later be written, and before the workers
+     * start, which only ever read the list.
+     */
+    elpis_ckpt_load(&ctx, nthreads);
+
     if (ctx.conf.root_zone_transfer) {
         if (pthread_create(&axfr_th, NULL, axfr_main, &ctx) == 0)
             axfr_started = 1;
@@ -1206,6 +1217,12 @@ int main(int argc, char **argv)
             web_started = 1;
         else
             elpis_warn("could not start the status page thread");
+    }
+    if (elpis_ckpt_writing(&ctx)) {
+        if (pthread_create(&ckpt_th, NULL, elpis_ckpt_main, &ctx) == 0)
+            ckpt_started = 1;
+        else
+            elpis_warn("could not start the checkpoint thread");
     }
 
     for (i = 1; i < nthreads; i++) {
@@ -1225,6 +1242,7 @@ int main(int argc, char **argv)
         elpis_clock_tick();
         elpis_prime_start(w0);
         elpis_tld_warm_start(w0);
+        elpis_warmup_start(w0, nthreads);
         elpis_selfinfo_start(w0);
 
         while (!ctx.shutdown) {
@@ -1278,6 +1296,8 @@ int main(int argc, char **argv)
         pthread_join(probe_th, NULL);
     if (web_started)
         pthread_join(web_th, NULL);
+    if (ckpt_started)
+        pthread_join(ckpt_th, NULL);
 
     elpis_stats_report(&ctx);
 
@@ -1288,6 +1308,7 @@ int main(int argc, char **argv)
      * given back here. */
     elpis_dnssec_thread_done();
     elpis_free(g_workers);
+    elpis_ckpt_fini();
 
     if (ctx.conf.pidfile[0] != '\0')
         unlink(ctx.conf.pidfile);

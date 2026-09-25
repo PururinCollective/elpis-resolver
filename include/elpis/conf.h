@@ -78,6 +78,13 @@ typedef struct {
      */
     unsigned     refresh_nx_confirm;
 
+    /* --- checkpoint and warm-up (checkpoint.c) --------------------- */
+    char         checkpoint[512];          /* "" = off                   */
+    uint32_t     checkpoint_interval;      /* seconds; 0 = never written */
+    uint32_t     checkpoint_names;         /* most names kept            */
+    uint32_t     checkpoint_min_hits;      /* asked fewer times: left out */
+    uint32_t     warm_rate;                /* startup queries/s; 0 = off */
+
     /* --- roots and TLDs ------------------------------------------- */
     char         root_hints[512];
     uint8_t      prime_root;

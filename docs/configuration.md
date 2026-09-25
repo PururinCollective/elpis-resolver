@@ -28,6 +28,7 @@ serve-stale: 86400         # RFC 8767
 prefetch: yes
 prefetch-threshold: 10     # refresh with 10% of the TTL left
 refresh-nxdomain-confirmations: 3
+checkpoint: no             # or /var/lib/elpis/names: warm up after a restart
 
 dnssec: yes
 root-zone-transfer: no     # yes = pull every TLD delegation at startup

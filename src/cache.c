@@ -41,6 +41,7 @@ struct elpis_cache {
     shard_t             *sh;
     elpis_cache_free_fn  freefn;
     elpis_cache_eq_fn    eqfn;
+    elpis_cache_carry_fn carryfn;
     uint64_t             bytes_max;
 };
 
@@ -352,6 +353,28 @@ void elpis_cache_read_end(elpis_cache_t *c, unsigned shard)
     pthread_rwlock_unlock(&c->sh[shard].lock);
 }
 
+void *elpis_cache_peek_begin(elpis_cache_t *c, uint64_t hash, const void *key,
+                             unsigned *shard)
+{
+    unsigned si = shard_of(c, hash);
+    shard_t *s = &c->sh[si];
+    void *e;
+
+    pthread_rwlock_rdlock(&s->lock);
+    e = find_slot(c, s, hash, key, NULL);
+    if (e == NULL) {
+        pthread_rwlock_unlock(&s->lock);
+        return NULL;
+    }
+    *shard = si;
+    return e;
+}
+
+void elpis_cache_set_carry(elpis_cache_t *c, elpis_cache_carry_fn fn)
+{
+    c->carryfn = fn;
+}
+
 int elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key)
 {
     elpis_chdr_t *h = hdr_of(entry);
@@ -365,6 +388,8 @@ int elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key)
 
     old = find_slot(c, s, h->hash, key, &idx);
     if (old != NULL) {
+        if (c->carryfn != NULL)
+            c->carryfn(entry, old);
         s->bytes -= hdr_of(old)->size;
         if (hdr_of(old)->pinned) {
             s->pinned_entries--;
@@ -494,6 +519,21 @@ uint64_t elpis_cache_expire(elpis_cache_t *c, uint32_t now, unsigned budget)
         pthread_rwlock_unlock(&s->lock);
     }
     return n;
+}
+
+void elpis_cache_walk(elpis_cache_t *c, elpis_cache_visit_fn fn, void *arg)
+{
+    unsigned i;
+
+    for (i = 0; i < c->nshards; i++) {
+        shard_t *s = &c->sh[i];
+        uint32_t j;
+        pthread_rwlock_rdlock(&s->lock);
+        for (j = 0; j < s->cap; j++)
+            if (IS_FULL(s->ctrl[j]) && s->slots[j] != NULL)
+                fn(s->slots[j], arg);
+        pthread_rwlock_unlock(&s->lock);
+    }
 }
 
 void elpis_cache_stats(const elpis_cache_t *c, elpis_cache_stats_t *out)

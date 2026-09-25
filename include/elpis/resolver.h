@@ -190,6 +190,13 @@ struct elpis_task {
     unsigned        from_cache : 1;
     unsigned        prefetch : 1;   /* background refresh of cached data  */
     unsigned        warming : 1;    /* priming / TLD warming, no client   */
+    /*
+     * Startup warm-up of a name clients asked for before the restart.  No
+     * client either, but unlike a refresh it may answer from the RRset cache,
+     * and unlike TLD warming it is validated and lands in the message cache
+     * exactly as the client's own query would have.
+     */
+    unsigned        warmup : 1;
     unsigned        dns64_tried : 1;
     unsigned        dns64_synth : 1;
     unsigned        revalidate : 1;   /* cache hit whose status is unknown */
@@ -362,6 +369,8 @@ int  elpis_rrl_decide(elpis_worker_t *w, const elpis_addr_t *client,
 /* ---- priming and warming (roots.c, tld.c, axfr.c) ---- */
 int  elpis_prime_start(elpis_worker_t *w);
 int  elpis_tld_warm_start(elpis_worker_t *w);
+/* This worker's share of warming the checkpoint's names (checkpoint.c). */
+int  elpis_warmup_start(elpis_worker_t *w, unsigned nworkers);
 int  elpis_axfr_root(elpis_ctx_t *ctx);
 int  elpis_probe_roots(elpis_ctx_t *ctx);
 /* Find our public addresses and network, through our own recursion. */

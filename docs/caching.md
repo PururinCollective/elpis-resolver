@@ -60,6 +60,68 @@ seven seconds, 6 about a minute. Below that the glitch is absorbed and no
 client ever sees it; above it the records are dropped and the next query
 resolves for real.
 
+## Surviving a restart
+
+A restart empties every cache, and for the first minutes each popular name
+pays for its whole referral chain again. With `checkpoint:` set to a path,
+Elpis writes down the questions clients ask most and, after a restart, asks
+them all again before clients do.
+
+Every message-cache entry counts how often it is asked. The count is a Morris
+counter in a byte that was already padding, so an entry is no bigger: a hit
+bumps it with a probability that halves every four steps, which keeps it
+within about a third of the true count and means a name asked a million times
+writes to its entry about seventy times rather than a million. A refresh
+carries the count over to the entry that replaces it, along with the slowest
+time the name took to resolve.
+
+Every `checkpoint-interval` a thread of its own walks the cache, keeps each
+question asked at least `checkpoint-min-hits` times, ranks them, and replaces
+the file whole: a temporary file, fsync, rename. Nothing is written at
+shutdown, so a restart is no slower than before. The ranking is how often a
+name is asked times how long it took cold. A name whose servers are a
+millisecond away is cheap to resolve on demand, and one on the other side of
+the world is where the first client after a restart would wait:
+
+```
+# elpis checkpoint 1
+# written 2026-09-25 20:46:13 UTC by elpis 2.0.2, 177 names
+#
+# The questions clients asked most, in the order a restart warms them:
+# estimated hits, slowest resolution in ms, DO/CD bits, type, name.
+4 1096 - HTTPS www.baidu.com.
+4 1071 - A www.baidu.com.
+```
+
+At startup the list is read back and every worker resolves its share, from
+the top, at `warm-rate` queries a second between them. It starts three seconds
+in, behind root priming, and gives way to clients the way a background refresh
+does. Each warmed entry starts with half the count the file carried, so a name
+nobody asks for any more fades out over a few restarts.
+
+The file holds names, never answers. An answer read back from disk might be
+out of date, and its DNSSEC status would have to be proven all over again; a
+name is simply resolved, validated like any other query. A name whose
+signatures fail stays SERVFAIL however high it sits in the file. It is still a
+list of what clients looked up, though, which is why it is off by default and
+written `0600`: leave it off if you keep no logs. And since the path is
+rewritten later, a file already there that does not start with the checkpoint
+header is neither read nor overwritten, so a typo cannot take out a config
+file.
+
+Measured on the data-centre VM, 60 sites (A, AAAA and HTTPS at once, the way a
+browser asks) queried after a restart, given the same four and a half seconds
+either way:
+
+| after a restart | median | 90th percentile | slowest |
+|---|---|---|---|
+| cold | 222 ms | 728 ms | 1,580 ms |
+| warmed from a checkpoint | 0 ms | 2 ms | 13 ms |
+
+The warm-up itself took 1.3 seconds for 177 questions. A new instance can
+start warm too: copy the file from one that has been running, and set
+`checkpoint-interval: 0` if it should only read it.
+
 ## Every level of the delegation chain
 
 Every level of the delegation chain is

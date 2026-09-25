@@ -2426,8 +2426,9 @@ static void cache_store_answer(elpis_task_t *t)
     unsigned i;
     uint32_t ttl;
 
-    /* Background refreshes must land in the cache too; that is their job. */
-    if (!t->has_client && !t->prefetch && t->parent == NULL)
+    /* Background refreshes and warm-ups must land in the cache too; that is
+     * their job. */
+    if (!t->has_client && !t->prefetch && !t->warmup && t->parent == NULL)
         return;
     if (t->ans.n == 0 && t->rcode == ELPIS_RC_NOERROR)
         return;
@@ -2520,5 +2521,6 @@ static void cache_store_answer(elpis_task_t *t)
                        w->ttl_off, w->ttl_val, b.nttl, ns_off, ar_off,
                        t->rcode,
                        (uint16_t)(t->sec == ELPIS_SEC_SECURE ? ELPIS_FLAG_AD : 0),
-                       t->sec, ttl, c->serve_stale);
+                       t->sec, ttl, c->serve_stale,
+                       (uint32_t)(elpis_cached_now_ms() - t->start_ms));
 }

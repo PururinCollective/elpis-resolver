@@ -88,12 +88,54 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
 int elpis_mcache_refresh_outcome(elpis_cache_t *c, const elpis_mkey_t *k,
                                  int outcome, unsigned nx_confirm);
 
+/*
+ * `cost_ms` is how long the resolution behind this response took.  An entry
+ * that replaces one for the same question keeps the old one's popularity and
+ * the larger of the two costs: a refresh is quick because the chain above it
+ * is cached, and it is the cold cost that a restart has to pay again.  The
+ * carry happens inside the insert, under the shard's write lock.
+ */
 int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint8_t *wire, size_t len, size_t qend,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale);
+                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms);
+
+/*
+ * Popularity: how many times clients asked, the miss that stored an entry
+ * counting as the first.  Every hit after that may bump a one-byte counter,
+ * with a probability that halves every four steps (a Morris counter, base
+ * 2^(1/4)), so a byte covers any real count to within about a third, and a
+ * name asked for a million times writes to its entry about seventy times
+ * instead of a million -- the hit path takes only a shared lock, and a store
+ * on every hit would bounce that cache line between every core serving it.
+ */
+#define ELPIS_POP_MAX 127u
+/* Estimated asks behind a counter value, and the value for a count. */
+uint64_t elpis_pop_hits(uint8_t pop);
+uint8_t  elpis_pop_from_hits(uint64_t hits);
+
+/*
+ * Raise a live entry's counter to at least `pop`.  Returns 1 when there is an
+ * entry for `k`, 0 when there is none.
+ */
+int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop);
+
+/* What elpis_mcache_walk() shows of each entry. */
+typedef struct {
+    const uint8_t *qname;       /* case-folded wire form           */
+    uint8_t        qnamelen;
+    uint8_t        kflags;
+    uint16_t       qtype, qclass;
+    unsigned       rcode;
+    uint8_t        pop;
+    uint16_t       cost_ms;
+} elpis_mview_t;
+
+typedef void (*elpis_mcache_visit_fn)(const elpis_mview_t *v, void *arg);
+/* Every entry, under the shard lock: see elpis_cache_walk(). */
+void elpis_mcache_walk(elpis_cache_t *c, elpis_mcache_visit_fn fn, void *arg);
 
 /* ================================================================== */
 /* RRset cache                                                         */

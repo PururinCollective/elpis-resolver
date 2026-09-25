@@ -56,6 +56,18 @@ void elpis_cache_free(elpis_cache_t *c);
 void *elpis_cache_read_begin(elpis_cache_t *c, uint64_t hash, const void *key,
                              unsigned *shard);
 void  elpis_cache_read_end(elpis_cache_t *c, unsigned shard);
+/* The same, for the cache's own bookkeeping rather than a lookup: it counts
+ * as neither a hit nor a miss and does not mark the entry as used. */
+void *elpis_cache_peek_begin(elpis_cache_t *c, uint64_t hash, const void *key,
+                             unsigned *shard);
+
+/*
+ * Called under the shard's write lock when an insert replaces an entry for
+ * the same key, before the old one is freed, so state that belongs to the key
+ * rather than the value can move across.
+ */
+typedef void (*elpis_cache_carry_fn)(void *entry, const void *old);
+void  elpis_cache_set_carry(elpis_cache_t *c, elpis_cache_carry_fn fn);
 
 /* Takes ownership of `entry` (whose header is already filled in).  Replaces
  * any existing entry with the same key. */
@@ -65,6 +77,14 @@ void  elpis_cache_flush(elpis_cache_t *c);
 
 /* Remove expired entries; `budget` bounds the work per call. */
 uint64_t elpis_cache_expire(elpis_cache_t *c, uint32_t now, unsigned budget);
+
+/*
+ * Visit every entry, one shard at a time under that shard's shared lock.
+ * `fn` must only copy out what it needs: the entry is not valid after it
+ * returns, and a slow visitor holds up inserts into that shard.
+ */
+typedef void (*elpis_cache_visit_fn)(const void *entry, void *arg);
+void elpis_cache_walk(elpis_cache_t *c, elpis_cache_visit_fn fn, void *arg);
 
 void elpis_cache_stats(const elpis_cache_t *c, elpis_cache_stats_t *out);
 const char *elpis_cache_name(const elpis_cache_t *c);

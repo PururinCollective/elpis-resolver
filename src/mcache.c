@@ -30,6 +30,15 @@ typedef struct {
     uint32_t ar_off;       /* blob-relative start of the additional section*/
     uint32_t prefetch_at;  /* last time a refresh was triggered, monotonic */
     /*
+     * How often clients ask for this, as a Morris counter (ELPIS_POP_MAX)
+     * that counts the miss which stored it as the first ask, and the slowest
+     * resolution behind it in milliseconds.  Both sit in what was tail
+     * padding, so an entry is no bigger for them.
+     */
+    uint8_t  pop;
+    uint8_t  pad;
+    uint16_t cost_ms;
+    /*
      * Trailing payload, in this order:
      *   uint8_t  qname[qnamelen]
      *   uint32_t ttl_off[nttl]      (blob-relative, ascending)
@@ -77,9 +86,145 @@ void elpis_mkey_hash(elpis_mkey_t *k)
     k->hash = elpis_simd_hash_ci(k->qname, k->qnamelen, seed);
 }
 
+/*
+ * A refresh replaces the entry, and every popular name is refreshed each TTL,
+ * so the count would never get past a few minutes' worth if it did not move
+ * across to the new one.
+ */
+static void ment_carry(void *entry, const void *old)
+{
+    ment_t *e = (ment_t *)entry;
+    const ment_t *o = (const ment_t *)old;
+
+    if (o->pop > e->pop)
+        e->pop = o->pop;
+    if (o->cost_ms > e->cost_ms)
+        e->cost_ms = o->cost_ms;
+}
+
 elpis_cache_t *elpis_mcache_new(uint64_t bytes, unsigned shards)
 {
-    return elpis_cache_new("msg-cache", bytes, shards, ment_free, ment_eq);
+    elpis_cache_t *c;
+
+    c = elpis_cache_new("msg-cache", bytes, shards, ment_free, ment_eq);
+    if (c != NULL)
+        elpis_cache_set_carry(c, ment_carry);
+    return c;
+}
+
+/* ------------------------------------------------------------------ */
+/* Popularity                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The counter is bumped from the hit path, so the coin it tosses has to be
+ * cheap: xorshift64* on a per-thread state, seeded from the real generator
+ * the first time a thread needs it.  Nothing depends on it being unguessable
+ * -- a client that could predict it could at most nudge its own name's count.
+ */
+static ELPIS_TLS uint64_t g_pop_rng;
+
+static uint32_t pop_rand(void)
+{
+    uint64_t x = g_pop_rng;
+
+    if (x == 0) {
+        x = ((uint64_t)elpis_random_u32() << 32) | elpis_random_u32();
+        if (x == 0)
+            x = 0x9E3779B97F4A7C15ull;
+    }
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    g_pop_rng = x;
+    return (uint32_t)((x * 0x2545F4914F6CDD1Dull) >> 32);
+}
+
+/* 2^32 * 2^(-k/4) for k = 0..3: the bump probability within one octave. */
+static const uint64_t k_pop_p[4] = {
+    0x100000000ull, 0xD744FCCBull, 0xB504F334ull, 0x9837F052ull
+};
+/* 2^(k/4) for k = 0..3, and 2^(1/4) - 1. */
+static const double k_pop_up[4] = {
+    1.0, 1.189207115002721, 1.4142135623730951, 1.681792830507429
+};
+#define POP_BASE_M1 0.189207115002721
+
+ELPIS_INLINE void pop_bump(ment_t *e)
+{
+    uint8_t v = e->pop;
+
+    if (v >= ELPIS_POP_MAX)
+        return;
+    if ((uint64_t)pop_rand() < (k_pop_p[v & 3u] >> (v >> 2)))
+        e->pop = (uint8_t)(v + 1u);
+}
+
+uint64_t elpis_pop_hits(uint8_t pop)
+{
+    double up;
+
+    if (pop > ELPIS_POP_MAX)
+        pop = ELPIS_POP_MAX;
+    up = (double)(1ull << (pop >> 2)) * k_pop_up[pop & 3u];
+    return (uint64_t)((up - 1.0) / POP_BASE_M1 + 0.5);
+}
+
+uint8_t elpis_pop_from_hits(uint64_t hits)
+{
+    uint8_t v = 0;
+
+    /* The value whose estimate is nearest, from below: a count read back
+     * never comes out larger than the one written. */
+    while (v < ELPIS_POP_MAX && elpis_pop_hits((uint8_t)(v + 1u)) <= hits)
+        v++;
+    return v;
+}
+
+int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop)
+{
+    unsigned shard;
+    ment_t *e;
+
+    e = (ment_t *)elpis_cache_peek_begin(c, k->hash, k, &shard);
+    if (e == NULL)
+        return 0;
+    /* The same benign race as the bump itself: at worst a count is lost. */
+    if (e->pop < pop)
+        e->pop = pop > ELPIS_POP_MAX ? (uint8_t)ELPIS_POP_MAX : pop;
+    elpis_cache_read_end(c, shard);
+    return 1;
+}
+
+typedef struct {
+    elpis_mcache_visit_fn fn;
+    void *arg;
+} mwalk_t;
+
+static void mwalk_one(const void *entry, void *arg)
+{
+    const ment_t *e = (const ment_t *)entry;
+    const mwalk_t *w = (const mwalk_t *)arg;
+    elpis_mview_t v;
+
+    v.qname    = ment_qname_c(e);
+    v.qnamelen = e->qnamelen;
+    v.kflags   = e->kflags;
+    v.qtype    = e->qtype;
+    v.qclass   = e->qclass;
+    v.rcode    = e->rcode;
+    v.pop      = e->pop;
+    v.cost_ms  = e->cost_ms;
+    w->fn(&v, w->arg);
+}
+
+void elpis_mcache_walk(elpis_cache_t *c, elpis_mcache_visit_fn fn, void *arg)
+{
+    mwalk_t w;
+
+    w.fn  = fn;
+    w.arg = arg;
+    elpis_cache_walk(c, mwalk_one, &w);
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,6 +269,8 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
     info->sec   = (elpis_sec_t)e->sec;
     info->ttl   = rem;
     info->stale = (rem == 0) ? 1u : 0u;
+
+    pop_bump(e);
 
     /*
      * Ask for a refresh when the entry is stale or nearly so.  The timestamp
@@ -268,7 +415,7 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale)
+                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms)
 {
     ment_t *e;
     size_t bloblen, sz;
@@ -316,6 +463,9 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
     e->hdr.ref    = 1;
     e->hdr.pinned = 0;
     e->hdr.expiry = elpis_cached_now_s() + ttl + max_stale;
+    /* The question that brought the entry in is its first ask: a name asked
+     * twice has one hit, and "asked twice" is what people mean. */
+    e->pop        = 1;
 
     e->qtype    = k->qtype;
     e->qclass   = k->qclass;
@@ -359,6 +509,7 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
     }
 
     memcpy(ment_blob(e), wire + qend, bloblen);
+    e->cost_ms = (uint16_t)(cost_ms > 0xFFFFu ? 0xFFFFu : cost_ms);
 
     return elpis_cache_insert(c, e, k);
 }

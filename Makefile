@@ -55,7 +55,7 @@ CORE_SRC := \
   src/sock.c src/server.c src/outbound.c src/resolver.c src/delegation.c \
   src/roots.c src/tld.c src/axfr.c src/probe.c src/dns64.c src/localzone.c src/ratelimit.c \
   src/stats.c src/telemetry.c src/selfinfo.c src/licence.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
-  src/cookie.c src/rrl.c src/conflict.c src/webui.c src/main.c
+  src/cookie.c src/rrl.c src/conflict.c src/checkpoint.c src/webui.c src/main.c
 
 CRYPTO_SRC := \
   src/crypto/sha1.c src/crypto/sha2.c src/crypto/keccak.c src/crypto/bn.c \

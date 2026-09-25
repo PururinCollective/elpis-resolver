@@ -24,11 +24,13 @@
 #include "elpis/ctx.h"
 #include "elpis/deleg.h"
 #include "elpis/conflict.h"
+#include "elpis/checkpoint.h"
 
 #include "vectors.h"
 
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static int g_pass, g_fail;
 
@@ -1908,6 +1910,417 @@ static void test_task_ceiling(void)
     elpis_free(w);
 }
 
+
+/* ================================================================== */
+/*
+ * A minimal cached answer for `name`: the question and one A record, the
+ * way cache_store_answer() lays a response out for the message cache.
+ */
+static int mc_put(elpis_cache_t *mc, const char *name, uint16_t qtype,
+                  uint16_t qclass, uint8_t kflags, unsigned rcode,
+                  uint32_t cost_ms)
+{
+    elpis_name_t n;
+    elpis_mkey_t k;
+    uint8_t wire[512];
+    size_t len, qend;
+    uint32_t toff, tval = 300;
+
+    if (elpis_name_from_text(&n, name) != ELPIS_OK)
+        return ELPIS_ERR;
+    elpis_name_lower(&n);
+    memset(wire, 0, 12);
+    elpis_put16(wire + 2, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA | rcode));
+    elpis_put16(wire + 4, 1);
+    elpis_put16(wire + 6, 1);
+    memcpy(wire + 12, n.d, n.len);
+    len = 12u + n.len;
+    elpis_put16(wire + len, qtype);
+    elpis_put16(wire + len + 2, qclass);
+    qend = len + 4u;
+    len = qend;
+    elpis_put16(wire + len, 0xC00C);
+    elpis_put16(wire + len + 2, ELPIS_T_A);
+    elpis_put16(wire + len + 4, ELPIS_CLASS_IN);
+    toff = (uint32_t)(len + 6u);
+    elpis_put32(wire + len + 6, tval);
+    elpis_put16(wire + len + 10, 4);
+    wire[len + 12] = 192; wire[len + 13] = 0; wire[len + 14] = 2; wire[len + 15] = 1;
+    len += 16u;
+
+    k.qname    = n.d;
+    k.qnamelen = n.len;
+    k.qtype    = qtype;
+    k.qclass   = qclass;
+    k.kflags   = kflags;
+    elpis_mkey_hash(&k);
+    return elpis_mcache_store(mc, &k, wire, len, qend, &toff, &tval, 1, len,
+                              len, rcode, 0, ELPIS_SEC_INSECURE, 300, 0,
+                              cost_ms);
+}
+
+static void mc_key(elpis_mkey_t *k, elpis_name_t *n, const char *name,
+                   uint16_t qtype, uint8_t kflags)
+{
+    elpis_name_from_text(n, name);
+    elpis_name_lower(n);
+    k->qname    = n->d;
+    k->qnamelen = n->len;
+    k->qtype    = qtype;
+    k->qclass   = ELPIS_CLASS_IN;
+    k->kflags   = kflags;
+    elpis_mkey_hash(k);
+}
+
+static int mc_serve(elpis_cache_t *mc, const char *name, uint16_t qtype)
+{
+    elpis_mkey_t k;
+    elpis_name_t n;
+    elpis_mserve_t info;
+    uint8_t out[512];
+    size_t outlen = 0;
+
+    mc_key(&k, &n, name, qtype, 0);
+    return elpis_mcache_serve(mc, &k, 1, n.d, ELPIS_FLAG_QR, sizeof out, 0, 30,
+                              0, out, sizeof out, &outlen, &info);
+}
+
+typedef struct {
+    unsigned n;
+    uint8_t  pop;
+    uint16_t cost;
+} mc_seen_t;
+
+static void mc_seen(const elpis_mview_t *v, void *arg)
+{
+    mc_seen_t *s = (mc_seen_t *)arg;
+    s->n++;
+    s->pop  = v->pop;
+    s->cost = v->cost_ms;
+}
+
+static void test_popularity(void)
+{
+    elpis_cache_t *mc;
+    elpis_cache_stats_t st;
+    elpis_mkey_t k;
+    elpis_name_t n;
+    mc_seen_t seen;
+    unsigned v, i, j, ok = 1;
+    uint64_t sum = 0, before;
+
+    section("popularity");
+
+    CHECK(elpis_pop_hits(0) == 0 && elpis_pop_hits(1) == 1,
+          "no bumps is no hits, and the first bump is one");
+    for (v = 1; v <= ELPIS_POP_MAX; v++)
+        if (elpis_pop_hits((uint8_t)v) <= elpis_pop_hits((uint8_t)(v - 1u)))
+            ok = 0;
+    CHECK(ok, "the estimate rises with every step");
+    ok = 1;
+    for (v = 0; v <= ELPIS_POP_MAX; v++)
+        if (elpis_pop_from_hits(elpis_pop_hits((uint8_t)v)) != v)
+            ok = 0;
+    CHECK(ok, "a count written as hits reads back as the same counter");
+    CHECK(elpis_pop_from_hits(0) == 0 && elpis_pop_from_hits(3) == 2 &&
+          elpis_pop_from_hits(UINT64_MAX) == ELPIS_POP_MAX,
+          "hits between steps round down, and huge counts saturate");
+
+    mc = elpis_mcache_new(4u * 1024u * 1024u, 4);
+    CHECK(mc != NULL, "message cache created");
+    if (mc == NULL)
+        return;
+
+    /*
+     * The counter is random, so check the average of many: 64 names asked
+     * 2,000 times each.  One counter is good to about a third; the mean of
+     * 64 to about 4%, so 20% either way is five standard deviations.
+     */
+    for (i = 0; i < 64; i++) {
+        char name[32];
+        snprintf(name, sizeof name, "n%u.pop.example.", i);
+        mc_put(mc, name, ELPIS_T_A, ELPIS_CLASS_IN, 0, ELPIS_RC_NOERROR, 5);
+        for (j = 0; j < 2000; j++)
+            mc_serve(mc, name, ELPIS_T_A);
+    }
+    memset(&seen, 0, sizeof seen);
+    elpis_mcache_walk(mc, mc_seen, &seen);
+    CHECK(seen.n == 64, "the walk visits every entry (%u)", seen.n);
+    {
+        elpis_ckpt_list_t l;
+        elpis_ckpt_list_init(&l);
+        elpis_ckpt_collect(mc, 1, 1000, &l);
+        for (i = 0; i < l.n; i++)
+            sum += l.ent[i].hits;
+        CHECK(l.n == 64, "all 64 are collected (%u)", l.n);
+        CHECK(sum / 64u > 1600u && sum / 64u < 2400u,
+              "2,000 hits each are counted as %llu on average",
+              (unsigned long long)(sum / 64u));
+        elpis_ckpt_list_free(&l);
+    }
+
+    /* Serving a name must not count its own bookkeeping as hits. */
+    elpis_cache_stats(mc, &st);
+    before = st.hits + st.misses;
+    mc_key(&k, &n, "n0.pop.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mcache_seed(mc, &k, 0) == 1, "seed finds a live entry");
+    mc_key(&k, &n, "absent.pop.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mcache_seed(mc, &k, 9) == 0, "and reports a missing one");
+    mc_put(mc, "n1.pop.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+           ELPIS_RC_NOERROR, 5);
+    elpis_cache_stats(mc, &st);
+    CHECK(st.hits + st.misses == before,
+          "seeding and replacing are neither hits nor misses");
+
+    /*
+     * A refresh replaces the entry.  The count and the slowest cost must
+     * survive it, or no name would ever be counted past one TTL.
+     */
+    elpis_cache_flush(mc);
+    mc_put(mc, "carry.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+           ELPIS_RC_NOERROR, 240);
+    memset(&seen, 0, sizeof seen);
+    elpis_mcache_walk(mc, mc_seen, &seen);
+    CHECK(seen.n == 1 && elpis_pop_hits(seen.pop) == 1,
+          "the miss that stored an entry is its first ask");
+    mc_key(&k, &n, "carry.example.", ELPIS_T_A, 0);
+    elpis_mcache_seed(mc, &k, 40);
+    elpis_mcache_seed(mc, &k, 10);
+    memset(&seen, 0, sizeof seen);
+    elpis_mcache_walk(mc, mc_seen, &seen);
+    CHECK(seen.n == 1 && seen.pop == 40, "seed raises a counter, never lowers it");
+    mc_put(mc, "carry.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+           ELPIS_RC_NOERROR, 3);
+    memset(&seen, 0, sizeof seen);
+    elpis_mcache_walk(mc, mc_seen, &seen);
+    CHECK(seen.n == 1 && seen.pop == 40,
+          "a replacement keeps the count (%u)", (unsigned)seen.pop);
+    CHECK(seen.cost == 240,
+          "and the slower of the two costs (%u ms)", (unsigned)seen.cost);
+
+    elpis_cache_free(mc);
+}
+
+static int ckpt_has(const elpis_ckpt_list_t *l, unsigned i, const char *name,
+                    uint16_t qtype, uint8_t kflags)
+{
+    elpis_name_t n;
+
+    if (i >= l->n || elpis_name_from_text(&n, name) != ELPIS_OK)
+        return 0;
+    elpis_name_lower(&n);
+    return l->ent[i].namelen == n.len && l->ent[i].qtype == qtype &&
+           l->ent[i].kflags == kflags &&
+           memcmp(elpis_ckpt_name(l, &l->ent[i]), n.d, n.len) == 0;
+}
+
+static void test_checkpoint(void)
+{
+    char dir[] = "/tmp/elpis-ckpt-XXXXXX";
+    char path[128], other[128], tmp[160];
+    elpis_ckpt_list_t l, r;
+    elpis_cache_t *mc;
+    elpis_name_t n;
+    elpis_conf_t c;
+    char line[256];
+    unsigned bad = 0;
+    struct stat sb;
+    FILE *fp;
+
+    section("checkpoint");
+
+    /*
+     * Ranking: how often, times how slow.  A name a thousand clients ask
+     * whose servers answer in a millisecond ranks below one a hundred ask
+     * that takes a third of a second cold.
+     */
+    elpis_ckpt_list_init(&l);
+    elpis_name_from_text(&n, "near.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_A, 0, 1000, 1);
+    elpis_name_from_text(&n, "far.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_A, 0, 100, 300);
+    elpis_name_from_text(&n, "rare.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_A, 0, 2, 300);
+    elpis_ckpt_rank(&l, 10);
+    CHECK(ckpt_has(&l, 0, "far.example.", ELPIS_T_A, 0) &&
+          ckpt_has(&l, 1, "near.example.", ELPIS_T_A, 0) &&
+          ckpt_has(&l, 2, "rare.example.", ELPIS_T_A, 0),
+          "ranked by hits times cold cost");
+    CHECK(elpis_ckpt_score(5, 0) > 0,
+          "a name that cost nothing still ranks by how often it is asked");
+    CHECK(elpis_ckpt_score(1, 60000) == elpis_ckpt_score(1, 10000),
+          "one slow resolution cannot outrank everything for good");
+    elpis_ckpt_rank(&l, 2);
+    CHECK(l.n == 2 && ckpt_has(&l, 1, "near.example.", ELPIS_T_A, 0) &&
+          l.names_len == l.ent[0].namelen + l.ent[1].namelen,
+          "a cut keeps the best and gives back the names it dropped");
+    elpis_ckpt_list_free(&l);
+
+    /* Collecting: IN only, real answers only, and not the one-offs. */
+    mc = elpis_mcache_new(4u * 1024u * 1024u, 4);
+    CHECK(mc != NULL, "message cache created");
+    if (mc == NULL)
+        return;
+    mc_put(mc, "often.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0, ELPIS_RC_NOERROR, 80);
+    mc_put(mc, "often.example.", ELPIS_T_AAAA, ELPIS_CLASS_IN, ELPIS_MK_DO,
+           ELPIS_RC_NOERROR, 80);
+    mc_put(mc, "gone.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0, ELPIS_RC_NXDOMAIN, 80);
+    mc_put(mc, "once.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0, ELPIS_RC_NOERROR, 80);
+    mc_put(mc, "chaos.example.", ELPIS_T_A, ELPIS_CLASS_CH, 0, ELPIS_RC_NOERROR, 80);
+    mc_put(mc, "broken.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0, ELPIS_RC_SERVFAIL, 80);
+    {
+        static const char *const names[] = {
+            "often.example.", "gone.example.", "chaos.example.", "broken.example."
+        };
+        unsigned i;
+        elpis_mkey_t k;
+        for (i = 0; i < ELPIS_ARRAY_LEN(names); i++) {
+            mc_key(&k, &n, names[i], ELPIS_T_A, 0);
+            if (i == 2) {
+                k.qclass = ELPIS_CLASS_CH;
+                elpis_mkey_hash(&k);
+            }
+            elpis_mcache_seed(mc, &k, 20);
+        }
+        mc_key(&k, &n, "often.example.", ELPIS_T_AAAA, ELPIS_MK_DO);
+        elpis_mcache_seed(mc, &k, 12);
+        mc_key(&k, &n, "once.example.", ELPIS_T_A, 0);
+        elpis_mcache_seed(mc, &k, 1);
+    }
+    elpis_ckpt_list_init(&l);
+    CHECK(elpis_ckpt_collect(mc, 2, 100, &l) == ELPIS_OK && l.n == 3,
+          "collect keeps IN answers asked at least twice (%u)", l.n);
+    CHECK(ckpt_has(&l, 2, "often.example.", ELPIS_T_AAAA, ELPIS_MK_DO),
+          "with their DO bit, so the warmed entry is the one clients hit");
+    elpis_cache_free(mc);
+
+    /* The file: written whole, read back the same. */
+    CHECK(mkdtemp(dir) != NULL, "scratch directory");
+    snprintf(path, sizeof path, "%s/names", dir);
+    snprintf(other, sizeof other, "%s/elpis.conf", dir);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+
+    elpis_name_from_text(&n, "odd\\032label.with\\.dot.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, ELPIS_T_HTTPS, ELPIS_MK_DO | ELPIS_MK_CD,
+                        7, 1500);
+    elpis_name_from_text(&n, "type.example.");
+    elpis_ckpt_list_add(&l, n.d, n.len, 65280, ELPIS_MK_CD, 9, 90);
+    elpis_ckpt_rank(&l, 100);
+    CHECK(elpis_ckpt_write(path, &l) == ELPIS_OK, "written");
+    CHECK(stat(path, &sb) == 0 && (sb.st_mode & 0777) == 0600,
+          "readable by the resolver alone");
+    CHECK(access(tmp, F_OK) != 0, "no temporary file left behind");
+
+    elpis_ckpt_list_init(&r);
+    CHECK(elpis_ckpt_read(path, 100, &r, &bad) == ELPIS_OK && bad == 0 &&
+          r.n == l.n, "read back, %u of %u", r.n, l.n);
+    {
+        unsigned i, same = 0;
+        for (i = 0; i < r.n && i < l.n; i++)
+            if (r.ent[i].namelen == l.ent[i].namelen &&
+                r.ent[i].qtype == l.ent[i].qtype &&
+                r.ent[i].kflags == l.ent[i].kflags &&
+                r.ent[i].hits == l.ent[i].hits &&
+                r.ent[i].cost_ms == l.ent[i].cost_ms &&
+                !memcmp(elpis_ckpt_name(&r, &r.ent[i]),
+                        elpis_ckpt_name(&l, &l.ent[i]), l.ent[i].namelen))
+                same++;
+        CHECK(same == l.n,
+              "every entry survives the round trip, escapes and all (%u)", same);
+    }
+    elpis_ckpt_list_free(&r);
+
+    elpis_ckpt_list_init(&r);
+    CHECK(elpis_ckpt_read(path, 2, &r, &bad) == ELPIS_OK && r.n == 2 &&
+          r.ent[0].score >= r.ent[1].score,
+          "a read keeps only the best `max`");
+    elpis_ckpt_list_free(&r);
+    elpis_ckpt_list_free(&l);
+
+    /* Anything odd in the file is skipped, not trusted. */
+    fp = fopen(path, "w");
+    if (fp != NULL) {
+        fputs(ELPIS_CKPT_MAGIC "\n"
+              "# a comment\n"
+              "\n"
+              "10 50 - A good.example.\n"
+              "-1 50 - A negative.example.\n"
+              "10 50 xx A flags.example.\n"
+              "10 50 - ANY meta.example.\n"
+              "10 50 - A two.names.example. extra\n"
+              "10 50 - A\n"
+              "10 50 - A bad..example.\n"
+              "  12  60  do  AAAA  spaced.example.  \n", fp);
+        fclose(fp);
+    }
+    elpis_ckpt_list_init(&r);
+    CHECK(elpis_ckpt_read(path, 100, &r, &bad) == ELPIS_OK && r.n == 2 &&
+          bad == 6, "good lines kept (%u), bad ones counted (%u)", r.n, bad);
+    CHECK(ckpt_has(&r, 0, "spaced.example.", ELPIS_T_AAAA, ELPIS_MK_DO) &&
+          ckpt_has(&r, 1, "good.example.", ELPIS_T_A, 0),
+          "and ranked on the way in");
+    elpis_ckpt_list_free(&r);
+
+    /*
+     * A path that holds something else is refused.  The file is rewritten
+     * in place later, so a typo that points at the config must not end up
+     * overwriting it.
+     */
+    fp = fopen(other, "w");
+    if (fp != NULL) {
+        fputs("listen: 127.0.0.1@5335\n", fp);
+        fclose(fp);
+    }
+    elpis_ckpt_list_init(&r);
+    CHECK(elpis_ckpt_read(other, 100, &r, &bad) == ELPIS_EFORMAT,
+          "a file that is not a checkpoint is refused");
+    fp = fopen(other, "w");
+    if (fp != NULL) {
+        fputs(ELPIS_CKPT_MAGIC "0\n", fp);
+        fclose(fp);
+    }
+    CHECK(elpis_ckpt_read(other, 100, &r, &bad) == ELPIS_EFORMAT,
+          "and so is a different format number");
+    fp = fopen(other, "w");
+    if (fp != NULL)
+        fclose(fp);
+    CHECK(elpis_ckpt_read(other, 100, &r, &bad) == ELPIS_ENOTFOUND,
+          "an empty file is no checkpoint yet");
+    snprintf(tmp, sizeof tmp, "%s/missing", dir);
+    CHECK(elpis_ckpt_read(tmp, 100, &r, &bad) == ELPIS_ENOTFOUND,
+          "and so is a missing one");
+    elpis_ckpt_list_free(&r);
+
+    unlink(path);
+    unlink(other);
+    rmdir(dir);
+
+    /* Configuration. */
+    elpis_conf_defaults(&c);
+    CHECK(c.checkpoint[0] == '\0' && c.checkpoint_interval == 3600 &&
+          c.checkpoint_names == 50000 && c.checkpoint_min_hits == 2 &&
+          c.warm_rate == 200, "off by default, the rest at their defaults");
+    elpis_strlcpy(line, "checkpoint: /var/lib/elpis/names", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          !strcmp(c.checkpoint, "/var/lib/elpis/names"), "an absolute path is taken");
+    elpis_strlcpy(line, "checkpoint: names", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK &&
+          !strcmp(c.checkpoint, "/var/lib/elpis/names"),
+          "a relative one is refused");
+    elpis_strlcpy(line, "checkpoint: no", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.checkpoint[0] == '\0', "and no turns it off again");
+    elpis_strlcpy(line, "checkpoint-interval: 15m", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.checkpoint_interval == 900, "checkpoint-interval takes a duration");
+    elpis_strlcpy(line, "checkpoint-names: 0", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.checkpoint_names == 1, "checkpoint-names is at least one");
+    elpis_strlcpy(line, "warm-rate: 0", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.warm_rate == 0, "warm-rate: 0 turns the warm-up off");
+}
+
 /* ================================================================== */
 int main(void)
 {
@@ -1936,6 +2349,8 @@ int main(void)
     test_val_retry_budget();
     test_cookies();
     test_task_ceiling();
+    test_popularity();
+    test_checkpoint();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
