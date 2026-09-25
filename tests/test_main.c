@@ -2611,9 +2611,51 @@ static void test_mesh(void)
     CHECK(elpis_mesh_may_tell(&a, &a) && !elpis_mesh_may_tell(&a, &b),
           "a loopback one only to peers on loopback");
 
+    /*
+     * Local discovery: an announcement made under one mesh's key checks out
+     * under that key alone, and any change to it is caught.
+     */
+    {
+        uint8_t k1[32], k2[32], other[32], node[16], got[16];
+        uint8_t pkt[ELPIS_MESH_LSD_LEN];
+        uint16_t port = 0;
+        unsigned i;
+
+        memcpy(other, want, 32);
+        other[0] ^= 1;
+        elpis_mesh_lsd_key(want, k1);
+        elpis_mesh_lsd_key(other, k2);
+        CHECK(memcmp(k1, want, 32) != 0, "the announcement key is not the PSK itself");
+        for (i = 0; i < 16; i++)
+            node[i] = (uint8_t)(0xA0 + i);
+        elpis_mesh_lsd_make(k1, node, 7878, pkt);
+        CHECK(!memcmp(pkt, "ELPISLSD", 8) &&
+              elpis_mesh_lsd_check(k1, pkt, sizeof pkt, got, &port) == ELPIS_OK &&
+              port == 7878 && !memcmp(got, node, 16),
+              "an announcement reads back under its own key");
+        CHECK(elpis_mesh_lsd_check(k2, pkt, sizeof pkt, got, &port) == ELPIS_ERR,
+              "and is dropped under another mesh's");
+        pkt[11] ^= 1;               /* the port */
+        CHECK(elpis_mesh_lsd_check(k1, pkt, sizeof pkt, got, &port) == ELPIS_ERR,
+              "a changed port is caught");
+        pkt[11] ^= 1;
+        CHECK(elpis_mesh_lsd_check(k1, pkt, sizeof pkt - 1u, got, &port) == ELPIS_ERR,
+              "and so is a short packet");
+        elpis_mesh_lsd_make(k1, node, 0, pkt);
+        CHECK(elpis_mesh_lsd_check(k1, pkt, sizeof pkt, got, &port) == ELPIS_ERR,
+              "an announcement with no port is no use");
+    }
+    {
+        elpis_addr_t ll, ula;
+        elpis_addr_parse(&ll, "[fe80::1]@7878", 7878);
+        elpis_addr_parse(&ula, "[fd00::2]@7878", 7878);
+        CHECK(!elpis_mesh_may_tell(&ll, &ula),
+              "an IPv6 link-local address is never passed on");
+    }
+
     elpis_conf_defaults(&cf);
     CHECK(!cf.mesh && cf.mesh_share && cf.mesh_share_min_hits == 5 &&
-          cf.mesh_max_peers == 16, "the mesh is off by default");
+          cf.mesh_lsd && cf.mesh_max_peers == 16, "the mesh is off by default");
     elpis_strlcpy(line, "mesh-peer: 192.0.2.6", sizeof line);
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
           cf.n_mesh_peer == 1 && elpis_addr_port(&cf.mesh_peer[0]) == 7878,

@@ -98,6 +98,7 @@ typedef struct {
     elpis_addr_t mesh_peer[ELPIS_MESH_MAX_BRIDGES];   /* the bridges     */
     unsigned     n_mesh_peer;
     uint8_t      mesh_share;               /* answer peers' list requests */
+    uint8_t      mesh_lsd;                 /* find peers on the segment   */
     uint32_t     mesh_share_min_hits;
     uint32_t     mesh_max_peers;
 

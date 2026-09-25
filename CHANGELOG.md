@@ -26,6 +26,14 @@ one PSK from `elpis --gen-psk`: X25519 for forward secrecy, ChaCha20-Poly1305,
 and the PSK mixed into every key, so recorded traffic stays safe from a future
 quantum computer while the key does. See [Mesh](docs/mesh.md).
 
+**Instances on one network segment find each other.** With the mesh on,
+`mesh-lsd: yes` (the default) has each instance announce itself by multicast,
+to `239.255.78.78` and `ff12::7878` on UDP 7878 with a hop limit of 1, and the
+others dial it, so a segment needs no `mesh-peer:` at all. Announcements carry
+an HMAC tag under a key derived from the PSK: another mesh on the same network
+is ignored without a word. Measured on one host, an instance with no bridge was
+found and warm 4.5 seconds after starting.
+
 **A restart can come back warm.** With `checkpoint:` set to a path, Elpis
 writes down the questions clients ask most, every `checkpoint-interval` and
 never at shutdown, and after a restart resolves them all again, most valuable

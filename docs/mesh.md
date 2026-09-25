@@ -47,12 +47,17 @@ mesh-listen: 0.0.0.0@7878          # and/or [::]@7878
 mesh-peer: 192.0.2.1@7878          # a bridge: one or more instances to dial
 ```
 
-An instance needs `mesh-listen:` to be found, `mesh-peer:` to find others, or
-both. The key is read, and the port bound, before privileges are dropped, so
-the key file can belong to root. The mesh port is TCP; open it only to your
-own instances.
+On one network segment `mesh-peer:` can be left out: the instances find each
+other by multicast (below). Across segments, give each one a bridge on the
+other side. The key is read, and the port bound, before privileges are
+dropped, so the key file can belong to root. The mesh port is TCP; open it
+only to your own instances. Listen on each address family your instances
+reach each other over.
 
 ## How instances find each other
+
+Three ways, and all three only say where to dial: the handshake is what lets
+anyone in.
 
 A **bridge** is an instance named in `mesh-peer:`. Each instance dials its
 bridges, and every connected pair tells each other about the other instances
@@ -60,11 +65,35 @@ they are connected to (peer exchange). Instance #4 needs to know only instance
 #1; it learns about #2 and #3 from #1 and dials them itself.
 
 An address only a private network can reach is passed only to peers that are
-on a private network themselves, and a loopback address only to peers on
-loopback, since nobody else could use it. Two instances that dial each other at
-the same moment keep one connection and close the other, and both ends agree
-on which without negotiating. An instance that dials itself notices from the
-node id in the handshake and does not do it again.
+on a private network themselves, a loopback address only to peers on loopback,
+and an IPv6 link-local address to nobody, since nobody else could use it. Two
+instances that dial each other at the same moment keep one connection and
+close the other, and both ends agree on which without negotiating. An instance
+that dials itself notices from the node id in the handshake and does not do it
+again.
+
+**On the local segment**, with `mesh-lsd: yes` (the default once the mesh is
+on), each instance that takes connections announces itself by multicast when
+it starts and every thirty seconds after, and the others dial it. The groups
+are elpis's own, not BitTorrent's LSD group, so torrent clients never see
+them: `239.255.78.78` (administratively scoped) and `ff12::7878` (link-local),
+UDP port 7878, with a hop limit of 1, so they never leave the segment. Each
+family announces only if the instance listens on it somewhere other than
+loopback.
+
+An announcement is 44 bytes: a magic string, the version, the mesh port, the
+node id, and a 16-byte HMAC-SHA256 tag under a key derived from the PSK. An
+announcement from another mesh or a stranger fails the tag and is dropped
+without a word, so a network shared with other meshes, or with anyone else,
+costs nothing. A copy replayed from another address can make an instance dial
+that address at the announced port now and then, and the handshake fails
+there. An instance heard on both IPv4 and IPv6, or reached through a bridge as
+well, ends up with one connection: they are matched by node id, not address.
+
+Measured on one host: with no `mesh-peer:` anywhere, an instance started next
+to one with clients was found by multicast, sent that one's list, and warm
+four and a half seconds after it started, its slowest answer 1 ms. One with a
+different key, on the same segment, was never dialled and never logged.
 
 ## What travels, and when
 

@@ -22,6 +22,11 @@
  *
  * A message of a type this version does not know is skipped, so a later one
  * can add more.
+ *
+ * Peers are found three ways: the bridges in mesh-peer:, the peers those
+ * report (PEERS), and on the local segment by multicast (see "Local service
+ * discovery" below).  All three only say where to dial; the handshake is
+ * what lets anyone in.
  */
 #include "elpis/mesh.h"
 #include "elpis/noise.h"
@@ -33,6 +38,7 @@
 #include "elpis/log.h"
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -85,10 +91,12 @@ typedef struct session {
     unsigned          got_list  : 1;
     unsigned          shares    : 1;   /* its hello says it answers    */
     unsigned          has_listen: 1;
+    unsigned          has_want  : 1;   /* we dialled a known node id    */
     elpis_addr_t      addr;            /* the far end of the socket     */
     elpis_addr_t      dial;            /* what we dialled, as initiator */
     elpis_addr_t      listen;          /* where it takes connections    */
     uint8_t           node[16];
+    uint8_t           want[16];        /* the node id we expect, if known */
     elpis_noise_hs_t  hs;
     elpis_noise_cs_t  tx, rx;
     uint8_t          *in;
@@ -107,6 +115,8 @@ typedef struct {
     unsigned     bridge    : 1;        /* named in mesh-peer:           */
     unsigned     self      : 1;        /* it turned out to be us        */
     unsigned     attempted : 1;        /* one dial has run its course   */
+    unsigned     has_node  : 1;        /* announced on the segment      */
+    uint8_t      node[16];
     unsigned     fails;
     uint32_t     backoff;
     uint64_t     next_try;
@@ -123,6 +133,14 @@ static unsigned     g_nsessions;
 static known_t      g_known[MESH_MAX_KNOWN];
 static unsigned     g_nknown;
 static uint64_t     g_t0;
+/* Local service discovery: a socket per family, and the announcement key. */
+static int          g_lsd4 = -1, g_lsd6 = -1;
+/* The port each family's announcement names: that family's listener, or 0
+ * when it has none the segment could reach -- nothing to announce. */
+static uint16_t     g_lsd_port4, g_lsd_port6;
+static uint8_t      g_lsd_key[32];
+static uint64_t     g_lsd_next;
+static unsigned     g_lsd_sent;
 /* Startup: the checkpoint, and the peers' lists as they arrive. */
 static elpis_ckpt_list_t g_gather;
 static int          g_gathering;
@@ -254,13 +272,155 @@ int elpis_mesh_addr_private(const elpis_addr_t *a)
            (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80);        /* link-local */
 }
 
+static int addr_v6_linklocal(const elpis_addr_t *a)
+{
+    unsigned len;
+    const uint8_t *ip = addr_ip(a, &len);
+    return len == 16 && ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80;
+}
+
 int elpis_mesh_may_tell(const elpis_addr_t *about, const elpis_addr_t *to)
 {
+    /* An IPv6 link-local address means nothing without its interface, and
+     * the interface is this host's, not the listener's. */
+    if (addr_v6_linklocal(about))
+        return 0;
     if (addr_loopback(about))
         return addr_loopback(to);
     if (elpis_mesh_addr_private(about))
         return elpis_mesh_addr_private(to);
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Local service discovery: the packet and the sockets                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * On one network segment the instances need no mesh-peer: at all.  Each one
+ * that takes connections announces itself to a multicast group, at startup
+ * and then every half minute, and the others dial it.
+ *
+ * Not BitTorrent's LSD group: a torrent client would get these, and this
+ * would get theirs.  239.255.78.78 is administratively scoped (RFC 2365) and
+ * ff12::7878 is link-local with the transient flag, which is what a group
+ * nobody assigned is meant to use; a hop limit of 1 keeps both on the segment.
+ *
+ * An announcement is 44 bytes:
+ *
+ *   "ELPISLSD", u8 version, u8 flags, u16 mesh port, node id[16], tag[16]
+ *
+ * The tag is HMAC-SHA256, cut to 16 bytes, under a key derived from the PSK,
+ * so only an instance of this mesh can make the others dial it: one from
+ * another mesh or from a stranger is dropped unread.  A copy replayed from
+ * another address makes an instance dial that address, at the announced
+ * port, now and then -- a connection that fails its handshake.
+ */
+#define LSD_PORT      7878
+#define LSD_GROUP4    "239.255.78.78"
+#define LSD_GROUP6    "ff12::7878"
+#define LSD_MAGIC     "ELPISLSD"
+#define LSD_EVERY_MS  30000u
+
+void elpis_mesh_lsd_key(const uint8_t psk[32], uint8_t key[32])
+{
+    static const char label[] = "elpis mesh lsd 1";
+    /* A key of its own, so the PSK is never used directly in two places. */
+    elpis_hmac_sha256(psk, 32, (const uint8_t *)label, sizeof label - 1u, key);
+}
+
+void elpis_mesh_lsd_make(const uint8_t key[32], const uint8_t node[16],
+                         uint16_t port, uint8_t out[ELPIS_MESH_LSD_LEN])
+{
+    uint8_t mac[32];
+
+    memcpy(out, LSD_MAGIC, 8);
+    out[8] = (uint8_t)MESH_VERSION;
+    out[9] = 0;
+    elpis_put16(out + 10, port);
+    memcpy(out + 12, node, 16);
+    elpis_hmac_sha256(key, 32, out, 28, mac);
+    memcpy(out + 28, mac, 16);
+}
+
+int elpis_mesh_lsd_check(const uint8_t key[32], const uint8_t *p, size_t n,
+                         uint8_t node[16], uint16_t *port)
+{
+    uint8_t mac[32];
+
+    if (n != ELPIS_MESH_LSD_LEN || memcmp(p, LSD_MAGIC, 8) != 0 ||
+        p[8] != MESH_VERSION)
+        return ELPIS_ERR;
+    elpis_hmac_sha256(key, 32, p, 28, mac);
+    if (!elpis_ct_eq(mac, p + 28, 16))
+        return ELPIS_ERR;
+    *port = elpis_get16(p + 10);
+    memcpy(node, p + 12, 16);
+    return *port != 0 ? ELPIS_OK : ELPIS_ERR;
+}
+
+/*
+ * One socket per family, bound to the group's port with SO_REUSEPORT so every
+ * instance on a host hears every announcement, including its own (which it
+ * recognises by node id).  `ifaddr` is the IPv4 address to send and listen
+ * on, or NULL for the one the routing table picks.
+ */
+static int lsd_open(int family, const elpis_addr_t *ifaddr)
+{
+    int fd, one = 1, hops = 1;
+    elpis_addr_t any;
+
+    fd = socket(family, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    elpis_sock_cloexec(fd);
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#ifdef SO_REUSEPORT
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
+    if (family == AF_INET) {
+        struct ip_mreq mr;
+        uint8_t zero[4] = { 0, 0, 0, 0 };
+        unsigned char ttl = 1, loop = 1;
+
+        elpis_addr_from4(&any, zero, LSD_PORT);
+        if (bind(fd, &any.u.sa, any.len) != 0)
+            goto fail;
+        memset(&mr, 0, sizeof mr);
+        inet_pton(AF_INET, LSD_GROUP4, &mr.imr_multiaddr);
+        mr.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (ifaddr != NULL) {
+            mr.imr_interface = ifaddr->u.v4.sin_addr;
+            (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF,
+                             &mr.imr_interface, sizeof mr.imr_interface);
+        }
+        if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr, sizeof mr) != 0)
+            goto fail;
+        (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
+        (void)setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof loop);
+    } else {
+        struct ipv6_mreq mr;
+        uint8_t zero[16];
+        unsigned loop = 1;
+
+        memset(zero, 0, sizeof zero);
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+        elpis_addr_from6(&any, zero, LSD_PORT);
+        if (bind(fd, &any.u.sa, any.len) != 0)
+            goto fail;
+        memset(&mr, 0, sizeof mr);
+        inet_pton(AF_INET6, LSD_GROUP6, &mr.ipv6mr_multiaddr);
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mr, sizeof mr) != 0)
+            goto fail;
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof hops);
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof loop);
+    }
+    if (elpis_sock_nonblock(fd) != ELPIS_OK)
+        goto fail;
+    return fd;
+fail:
+    close(fd);
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -313,9 +473,9 @@ void elpis_mesh_init(elpis_ctx_t *ctx)
         c->mesh = 0;
         return;
     }
-    if (c->n_mesh_listen == 0 && c->n_mesh_peer == 0) {
-        elpis_error("mesh: neither 'mesh-listen:' nor 'mesh-peer:' is set, so "
-                    "there is no one to talk to; the mesh is off");
+    if (c->n_mesh_listen == 0 && c->n_mesh_peer == 0 && !c->mesh_lsd) {
+        elpis_error("mesh: no 'mesh-listen:', no 'mesh-peer:' and 'mesh-lsd: "
+                    "no', so there is no one to talk to; the mesh is off");
         c->mesh = 0;
         return;
     }
@@ -335,19 +495,48 @@ void elpis_mesh_init(elpis_ctx_t *ctx)
         g_lfd[g_nlfd++] = fd;
         if (g_port == 0)
             g_port = elpis_addr_port(&c->mesh_listen[i]);
+        /* Loopback cannot be reached from the segment, so it is not
+         * announced there. */
+        if (!addr_loopback(&c->mesh_listen[i])) {
+            uint16_t *pp = elpis_addr_family(&c->mesh_listen[i]) == AF_INET
+                           ? &g_lsd_port4 : &g_lsd_port6;
+            if (*pp == 0)
+                *pp = elpis_addr_port(&c->mesh_listen[i]);
+        }
     }
-    if (g_nlfd == 0 && c->n_mesh_peer == 0) {
-        elpis_error("mesh: no mesh-listen address could be bound and there "
-                    "is no mesh-peer; the mesh is off");
+    if (c->mesh_lsd) {
+        /* Announce from, and listen on, the listener's own IPv4 address when
+         * it names one, so the others dial the address it is on. */
+        const elpis_addr_t *ifa = NULL;
+        for (i = 0; i < c->n_mesh_listen; i++) {
+            const elpis_addr_t *a = &c->mesh_listen[i];
+            if (elpis_addr_family(a) == AF_INET &&
+                a->u.v4.sin_addr.s_addr != htonl(INADDR_ANY)) {
+                ifa = a;
+                break;
+            }
+        }
+        g_lsd4 = lsd_open(AF_INET, ifa);
+        g_lsd6 = lsd_open(AF_INET6, NULL);
+        if (g_lsd4 < 0 && g_lsd6 < 0)
+            elpis_warn("mesh: cannot join the local discovery groups (UDP %u): "
+                       "only mesh-peer: will find peers", (unsigned)LSD_PORT);
+        elpis_mesh_lsd_key(g_psk, g_lsd_key);
+    }
+    if (g_nlfd == 0 && c->n_mesh_peer == 0 && g_lsd4 < 0 && g_lsd6 < 0) {
+        elpis_error("mesh: no mesh-listen address could be bound, there is no "
+                    "mesh-peer and no local discovery; the mesh is off");
         elpis_memzero(g_psk, sizeof g_psk);
         c->mesh = 0;
         return;
     }
     elpis_random_bytes(g_node, sizeof g_node);
     hex8(g_node, id);
-    elpis_info("mesh: node %s, %u listener%s, %u bridge%s", id,
-               g_nlfd, g_nlfd == 1 ? "" : "s",
-               c->n_mesh_peer, c->n_mesh_peer == 1 ? "" : "s");
+    elpis_info("mesh: node %s, %u listener%s, %u bridge%s, local discovery %s",
+               id, g_nlfd, g_nlfd == 1 ? "" : "s",
+               c->n_mesh_peer, c->n_mesh_peer == 1 ? "" : "s",
+               g_lsd4 >= 0 && g_lsd6 >= 0 ? "on IPv4 and IPv6"
+               : g_lsd4 >= 0 ? "on IPv4" : g_lsd6 >= 0 ? "on IPv6" : "off");
 }
 
 void elpis_mesh_fini(void)
@@ -357,6 +546,12 @@ void elpis_mesh_fini(void)
     for (i = 0; i < g_nlfd; i++)
         close(g_lfd[i]);
     g_nlfd = 0;
+    if (g_lsd4 >= 0)
+        close(g_lsd4);
+    if (g_lsd6 >= 0)
+        close(g_lsd6);
+    g_lsd4 = g_lsd6 = -1;
+    elpis_memzero(g_lsd_key, sizeof g_lsd_key);
     elpis_ckpt_list_free(&g_gather);
     elpis_memzero(g_psk, sizeof g_psk);
 }
@@ -1022,9 +1217,100 @@ static void on_connected(session_t *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* Local service discovery: announcing and hearing                     */
+/* ------------------------------------------------------------------ */
+
+static void lsd_send(int fd, const char *group, const uint8_t *pkt, int *warned)
+{
+    elpis_addr_t g;
+
+    if (fd < 0 || elpis_addr_parse(&g, group, LSD_PORT) != 0)
+        return;
+    if (sendto(fd, pkt, ELPIS_MESH_LSD_LEN, 0, &g.u.sa, g.len) < 0 && !*warned) {
+        *warned = 1;
+        elpis_info("mesh: cannot announce to %s: %s", group, strerror(errno));
+    }
+}
+
+/* Three announcements close together at startup, in case one is lost, and
+ * then one every half minute.  Only an instance that takes connections. */
+static void lsd_announce(uint64_t now)
+{
+    static int warned4, warned6;
+    uint8_t pkt[ELPIS_MESH_LSD_LEN];
+
+    if (now < g_lsd_next)
+        return;
+    /* Each family names its own listener, so a dial that follows the
+     * announcement lands on a socket that is there. */
+    if (g_lsd_port4 != 0) {
+        elpis_mesh_lsd_make(g_lsd_key, g_node, g_lsd_port4, pkt);
+        lsd_send(g_lsd4, LSD_GROUP4, pkt, &warned4);
+    }
+    if (g_lsd_port6 != 0) {
+        elpis_mesh_lsd_make(g_lsd_key, g_node, g_lsd_port6, pkt);
+        lsd_send(g_lsd6, LSD_GROUP6, pkt, &warned6);
+    }
+    g_lsd_sent++;
+    g_lsd_next = now + (g_lsd_sent == 1 ? 1000u : g_lsd_sent == 2 ? 2000u
+                                                                   : LSD_EVERY_MS);
+}
+
+static void lsd_on_readable(int fd)
+{
+    for (;;) {
+        uint8_t buf[128], node[16];
+        elpis_addr_t from;
+        uint16_t port;
+        known_t *k;
+        ssize_t n;
+
+        memset(&from, 0, sizeof from);
+        from.len = sizeof from.u.ss;
+        n = recvfrom(fd, buf, sizeof buf, 0, &from.u.sa, &from.len);
+        if (n < 0)
+            return;
+        /* Another mesh, a stranger, or noise: not a word about it. */
+        if (elpis_mesh_lsd_check(g_lsd_key, buf, (size_t)n, node, &port) != ELPIS_OK)
+            continue;
+        if (memcmp(node, g_node, 16) == 0 || session_by_node(node, NULL) != NULL)
+            continue;               /* our own, looped back, or already up */
+
+        if (elpis_addr_family(&from) == AF_INET)
+            from.u.v4.sin_port = htons(port);
+        else
+            from.u.v6.sin6_port = htons(port);
+        k = known_find(&from);
+        if (k == NULL) {
+            char name[64];
+            unsigned i, seen = 0;
+            /* One line per instance, not one per address it announces on. */
+            for (i = 0; i < g_nknown && !seen; i++)
+                seen = g_known[i].has_node && !memcmp(g_known[i].node, node, 16);
+            if ((k = known_add(&from, 0)) == NULL)
+                continue;
+            if (!seen)
+                elpis_info("mesh: found %s on the local network",
+                           elpis_addr_str(&from, name, sizeof name));
+        }
+        memcpy(k->node, node, 16);
+        k->has_node = 1;
+        /* Still announcing after the dials to it gave up: it is there, so
+         * one more try -- but no more often than the backoff allows. */
+        if (k->fails >= MESH_LEARNED_TRIES && elpis_now_ms() >= k->next_try)
+            k->fails = MESH_LEARNED_TRIES - 1u;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* The loop                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Whether a known address already has a session: by address, or -- for one
+ * announced on the segment, which may be the same instance a bridge already
+ * reached another way -- by node id.
+ */
 static int known_connected(const known_t *k)
 {
     const session_t *s;
@@ -1034,6 +1320,10 @@ static int known_connected(const known_t *k)
         if (s->initiator && elpis_addr_eq(&s->dial, &k->a))
             return 1;
         if (s->state == S_UP && s->has_listen && elpis_addr_eq(&s->listen, &k->a))
+            return 1;
+        if (k->has_node &&
+            ((s->state == S_UP && memcmp(s->node, k->node, 16) == 0) ||
+             (s->has_want && memcmp(s->want, k->node, 16) == 0)))
             return 1;
     }
     return 0;
@@ -1066,6 +1356,10 @@ static void dial_due(uint64_t now)
         }
         s->dial = k->a;
         s->state = S_CONNECTING;
+        if (k->has_node) {
+            memcpy(s->want, k->node, 16);
+            s->has_want = 1;
+        }
     }
 }
 
@@ -1151,7 +1445,8 @@ void *elpis_mesh_main(void *arg)
 {
     elpis_ctx_t *ctx = (elpis_ctx_t *)arg;
     const elpis_conf_t *c = &ctx->conf;
-    struct pollfd pf[ELPIS_MESH_MAX_LISTEN + MESH_MAX_SESSIONS];
+    struct pollfd pf[ELPIS_MESH_MAX_LISTEN + 2u + MESH_MAX_SESSIONS];
+    int lsd[2];
     session_t *ps[MESH_MAX_SESSIONS];
     unsigned i;
 
@@ -1165,12 +1460,16 @@ void *elpis_mesh_main(void *arg)
     if (!g_gathering)
         elpis_ckpt_list_free(&g_gather);
 
+    lsd[0] = g_lsd4;
+    lsd[1] = g_lsd6;
+
     while (!ctx->shutdown) {
         uint64_t now = elpis_now_ms();
-        unsigned nf = 0, ns = 0, l;
+        unsigned nf = 0, ns = 0, l, base;
         session_t *s;
         int n;
 
+        lsd_announce(now);
         dial_due(now);
         timers(now);
         reap(now);
@@ -1181,6 +1480,15 @@ void *elpis_mesh_main(void *arg)
             pf[nf].revents = 0;
             nf++;
         }
+        /* Both discovery sockets always take a slot, -1 when not open, which
+         * poll() passes over: the sessions then start at a fixed place. */
+        for (l = 0; l < 2; l++) {
+            pf[nf].fd = lsd[l];
+            pf[nf].events = POLLIN;
+            pf[nf].revents = 0;
+            nf++;
+        }
+        base = nf;
         for (s = g_sessions; s != NULL && ns < MESH_MAX_SESSIONS; s = s->next) {
             pf[nf].fd = s->fd;
             pf[nf].events = POLLIN;
@@ -1198,8 +1506,11 @@ void *elpis_mesh_main(void *arg)
         for (l = 0; l < g_nlfd; l++)
             if (pf[l].revents & POLLIN)
                 on_accept(g_lfd[l]);
+        for (l = 0; l < 2; l++)
+            if (pf[g_nlfd + l].revents & POLLIN)
+                lsd_on_readable(lsd[l]);
         for (i = 0; i < ns; i++) {
-            short ev = pf[g_nlfd + i].revents;
+            short ev = pf[base + i].revents;
             s = ps[i];
             if (ev == 0 || s->dead)
                 continue;

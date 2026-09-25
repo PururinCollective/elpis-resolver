@@ -10,10 +10,11 @@
  * instance's warm-up on names nobody here wanted.  It is how an operator with
  * a no-log policy gets a warm restart without writing anything to disk.
  *
- * Peers are found through the bridges named in mesh-peer:, and through the
- * peers those know (peer exchange).  Every connection is TCP under
- * Noise_NNpsk0 (see noise.h), keyed by one PSK the operator gives every
- * instance; without it nothing gets past the first message.
+ * Peers are found through the bridges named in mesh-peer:, through the peers
+ * those know (peer exchange), and on the local segment by multicast.  Every
+ * connection is TCP under Noise_NNpsk0 (see noise.h), keyed by one PSK the
+ * operator gives every instance; without it nothing gets past the first
+ * message.
  */
 #ifndef ELPIS_MESH_H
 #define ELPIS_MESH_H
@@ -44,5 +45,18 @@ int   elpis_mesh_addr_private(const elpis_addr_t *a);
  * loopback one only to peers on loopback: anyone else could not use it.
  */
 int   elpis_mesh_may_tell(const elpis_addr_t *about, const elpis_addr_t *to);
+
+/*
+ * Local service discovery: the announcement an instance multicasts to its
+ * segment, tagged under a key derived from the PSK.  check() returns
+ * ELPIS_OK, with the node id and mesh port, only for one made under the
+ * same key.
+ */
+#define ELPIS_MESH_LSD_LEN 44u
+void  elpis_mesh_lsd_key(const uint8_t psk[32], uint8_t key[32]);
+void  elpis_mesh_lsd_make(const uint8_t key[32], const uint8_t node[16],
+                          uint16_t port, uint8_t out[ELPIS_MESH_LSD_LEN]);
+int   elpis_mesh_lsd_check(const uint8_t key[32], const uint8_t *p, size_t n,
+                           uint8_t node[16], uint16_t *port);
 
 #endif /* ELPIS_MESH_H */
