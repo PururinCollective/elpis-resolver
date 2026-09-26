@@ -90,6 +90,51 @@ size_t elpis_licence_payload(const elpis_licence_t *l, uint8_t *out, size_t cap)
 /* "2027-01-01", or "never" when t is 0. */
 void elpis_licence_date(int64_t t, char *out, size_t outsz);
 
+/* ---- mesh certificates -------------------------------------------- */
+/*
+ * The issuer's statement that one instance's mesh key belongs to an
+ * organisation, until a date.  With mesh-require-licence: yes an instance
+ * proves in the handshake that it holds the private half of the key its
+ * certificate names, so a certificate copied out of someone's config is no
+ * use to anyone else, and one issued to another organisation does not get
+ * in.  A separate token from the deployment licence, signed under its own
+ * context string, so neither can ever be passed off as the other.
+ *
+ *   elpism1.<base64url payload>.<base64url signature>
+ *
+ *   0   1  format version (1)
+ *   1   4  serial          big-endian
+ *   5   8  issued          unix seconds, signed
+ *   13  8  expires         unix seconds, 0 = never
+ *   21  32 the instance's X25519 mesh public key
+ *   53  1  length of org
+ *   54  N  org, UTF-8
+ *
+ * Unlike a licence, an expired certificate is refused: the mesh only ever
+ * makes resolution faster, so retiring a key costs speed and never answers.
+ */
+#define ELPIS_MESHCERT_MAGIC   "elpism1"
+#define ELPIS_MESHCERT_CONTEXT "elpis-mesh-cert-v1"
+
+typedef struct {
+    uint8_t  present;
+    uint8_t  valid;               /* the signature verified                */
+    uint8_t  expired;
+    uint32_t serial;
+    int64_t  issued;
+    int64_t  expires;             /* 0 means never */
+    uint8_t  key[32];
+    char     org[ELPIS_LICENCE_MAX_ORG + 1];
+    char     why[96];
+} elpis_meshcert_t;
+
+size_t elpis_meshcert_payload(const elpis_meshcert_t *c, uint8_t *out,
+                              size_t cap);
+/* As elpis_licence_parse(): `valid` only once the signature checks out
+ * against this build's issuer key, `why` otherwise. */
+int    elpis_meshcert_parse(const char *token, int64_t now,
+                            elpis_meshcert_t *out);
+
 size_t elpis_b64url_encode(const uint8_t *in, size_t n, char *out, size_t cap);
 int    elpis_b64url_decode(const char *in, size_t n, uint8_t *out, size_t cap,
                            size_t *outn);

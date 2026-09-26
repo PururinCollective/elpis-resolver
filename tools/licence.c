@@ -8,7 +8,9 @@
  *   elpis-licence keygen issuer.key
  *   elpis-licence issue --key issuer.key --org "Example ISP" \
  *                       --edition commercial --days 365 --serial 1001
- *   elpis-licence verify --pub <hex> elpis1.....
+ *   elpis-licence issue --key issuer.key --org "Example ISP" \
+ *                       --mesh-key <instance public key> --days 365
+ *   elpis-licence verify elpis1..... | elpism1.....
  *
  * Keep issuer.key off the build machine and out of the repository.  Anyone
  * holding it can mint licences your binaries will believe.
@@ -108,13 +110,62 @@ static int cmd_keygen(const char *path)
     return 0;
 }
 
+/*
+ * A mesh certificate: the same issuer key, the same --org and --days, and
+ * the instance's public mesh key (from `elpis --mesh-keygen`) in place of
+ * an edition.
+ */
+static int issue_meshcert(const char *keyfile, const char *org,
+                          uint32_t serial, int64_t issued, int64_t expires,
+                          const char *keyhex)
+{
+    elpis_meshcert_t c;
+    uint8_t sk[32], payload[ELPIS_LICENCE_MAX_TOKEN];
+    uint8_t sig[64], signed_buf[ELPIS_LICENCE_MAX_TOKEN + 32];
+    char token[sizeof(char[8]) + 256 + 1 + 128 + 8], b1[256], b2[128], when[32];
+    size_t plen, n = 0, ctxlen = strlen(ELPIS_MESHCERT_CONTEXT);
+    int rc;
+
+    memset(&c, 0, sizeof c);
+    elpis_strlcpy(c.org, org, sizeof c.org);
+    c.serial  = serial;
+    c.issued  = issued;
+    c.expires = expires;
+    if (elpis_hex_decode(keyhex, c.key, sizeof c.key, &n) != ELPIS_OK || n != 32)
+        return die("--mesh-key takes the 64 hex characters elpis --mesh-keygen prints");
+    if ((rc = read_key(keyfile, sk)) != 0)
+        return rc;
+
+    plen = elpis_meshcert_payload(&c, payload, sizeof payload);
+    if (plen == 0)
+        return die("could not build the payload");
+    memcpy(signed_buf, ELPIS_MESHCERT_CONTEXT, ctxlen);
+    memcpy(signed_buf + ctxlen, payload, plen);
+    if (elpis_ed25519_sign(sk, signed_buf, ctxlen + plen, sig) != ELPIS_OK)
+        return die("signing failed");
+    elpis_memzero(sk, sizeof sk);
+    if (elpis_b64url_encode(payload, plen, b1, sizeof b1) == 0 ||
+        elpis_b64url_encode(sig, sizeof sig, b2, sizeof b2) == 0)
+        return die("could not encode the certificate");
+    snprintf(token, sizeof token, "%s.%s.%s", ELPIS_MESHCERT_MAGIC, b1, b2);
+    if (strlen(token) >= ELPIS_LICENCE_MAX_TOKEN)
+        return die("the certificate came out too long; shorten --org");
+
+    elpis_licence_date(c.expires, when, sizeof when);
+    fprintf(stderr, "mesh certificate for \"%s\", serial %lu, key %.16s..., "
+            "expires %s\n", c.org, (unsigned long)c.serial, keyhex, when);
+    fprintf(stderr, "add this line to that instance's elpis.conf:\n\n");
+    printf("mesh-cert: %s\n", token);
+    return 0;
+}
+
 static int cmd_issue(int argc, char **argv)
 {
     elpis_licence_t l;
     uint8_t sk[32], payload[ELPIS_LICENCE_MAX_TOKEN];
     uint8_t sig[64], signed_buf[ELPIS_LICENCE_MAX_TOKEN + 32];
     char token[sizeof(char[7]) + 256 + 1 + 128 + 8], b1[256], b2[128], when[32];
-    const char *keyfile = NULL;
+    const char *keyfile = NULL, *meshkey = NULL;
     size_t plen, ctxlen = strlen(ELPIS_LICENCE_CONTEXT);
     long days = 365;
     int perpetual = 0;
@@ -132,6 +183,7 @@ static int cmd_issue(int argc, char **argv)
         else if (!strcmp(a, "--serial")  && v) { l.serial = (uint32_t)strtoul(v, NULL, 10); i++; }
         else if (!strcmp(a, "--days")    && v) { days = strtol(v, NULL, 10); i++; }
         else if (!strcmp(a, "--perpetual"))    { perpetual = 1; }
+        else if (!strcmp(a, "--mesh-key") && v) { meshkey = v; i++; }
         else if (!strcmp(a, "--edition") && v) {
             if (elpis_edition_from_name(v, &l.edition) != ELPIS_OK)
                 return die("edition must be commercial, community, homelab or evaluation");
@@ -157,6 +209,10 @@ static int cmd_issue(int argc, char **argv)
     if (!perpetual && l.expires <= 0)
         return die("--days puts the expiry before 1970; "
                    "use --perpetual for a licence that never expires");
+
+    if (meshkey != NULL)
+        return issue_meshcert(keyfile, l.org, l.serial, l.issued, l.expires,
+                              meshkey);
 
     if ((rc = read_key(keyfile, sk)) != 0)
         return rc;
@@ -206,6 +262,26 @@ static int cmd_verify(int argc, char **argv)
     if (!elpis_licence_enabled())
         return die("this build has no issuer key, so it cannot check anything");
 
+    if (!strncmp(token, ELPIS_MESHCERT_MAGIC ".", strlen(ELPIS_MESHCERT_MAGIC) + 1)) {
+        elpis_meshcert_t c;
+        char key[65];
+
+        elpis_meshcert_parse(token, (int64_t)time(NULL), &c);
+        elpis_licence_date(c.expires, when, sizeof when);
+        elpis_licence_date(c.issued, issued, sizeof issued);
+        hex_print(c.key, 32, key);
+        printf("  mesh certificate\n");
+        printf("  org       %s\n", c.org);
+        printf("  serial    %lu\n", (unsigned long)c.serial);
+        printf("  key       %s\n", key);
+        printf("  issued    %s\n", issued);
+        printf("  expires   %s%s\n", when, c.expired ? "  (EXPIRED)" : "");
+        printf("  signature %s\n", c.valid ? "valid" : "INVALID");
+        if (!c.valid)
+            printf("            %s\n", c.why);
+        return c.valid && !c.expired ? 0 : 1;
+    }
+
     elpis_licence_parse(token, (int64_t)time(NULL), &l);
     elpis_licence_date(l.expires, when, sizeof when);
     elpis_licence_date(l.issued, issued, sizeof issued);
@@ -232,7 +308,9 @@ int main(int argc, char **argv)
             "        [--days 365]     how long it lasts; negative back-dates it\n"
             "        [--perpetual]    never expires -- use this rather than a huge --days\n"
             "        [--serial N]\n"
-            "  elpis-licence verify <token>\n");
+            "        [--mesh-key HEX] a mesh certificate for that instance key\n"
+            "                         instead of a licence (elpis --mesh-keygen)\n"
+            "  elpis-licence verify <licence or mesh certificate>\n");
         return 2;
     }
     if (!strcmp(argv[1], "keygen")) {

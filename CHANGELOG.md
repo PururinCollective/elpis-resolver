@@ -47,6 +47,18 @@ out inside the Noise sessions and replaced hourly, and a peer answers only the
 addresses of its mesh connections. Measured with warm-up off: a second
 instance answered 60 sites with a median of 0 ms against 214 ms cold.
 
+**A mesh can require licensed instances.** With `mesh-require-licence: yes`,
+each instance holds its own key (`elpis --mesh-keygen`) and a certificate for
+it from the licence issuer (`elpis-licence issue --mesh-key …`). The handshake
+becomes Noise_XXpsk0, in which each side proves it holds the key its certificate
+names, and a peer is let in only with a certificate from this build's issuer,
+unexpired, for our own organisation. A leaked PSK is no longer enough to join;
+a certificate copied from someone's config is refused, even from a build
+patched to present it; another customer of the same issuer stays out. The
+certificate is a separate token from the deployment licence, signed under its
+own context, and the resolver still contains no signing code. See
+[Mesh](docs/mesh.md#requiring-licensed-instances).
+
 **A restart can come back warm.** With `checkpoint:` set to a path, Elpis
 writes down the questions clients ask most, every `checkpoint-interval` and
 never at shutdown, and after a restart resolves them all again, most valuable

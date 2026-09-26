@@ -179,11 +179,11 @@ Every connection is TCP under the Noise protocol framework,
 <- e, ee      responder: its own, and a Diffie-Hellman between the two
 ```
 
-- **Knowing the key is the authentication.** Without it a peer cannot get past
-  the first message, and the attempt is logged as
-  `refused ...: handshake failed (a different mesh-psk?)`, at most once a
-  minute. The instance dialling with the wrong key logs the same hint about
-  its bridge.
+- **Knowing the key is the authentication**, unless the mesh requires
+  licences (below). Without it a peer cannot get past the first message, and
+  the attempt is logged as `refused ...: handshake failed (a different
+  mesh-psk?)`, at most once a minute. The instance dialling with the wrong key
+  logs the same hint about its bridge.
 - **Forward secrecy** comes from the ephemeral keys: each connection has its
   own, and none is kept afterwards.
 - **The post-quantum hedge is the key itself.** Noise mixes the PSK into every
@@ -201,12 +201,79 @@ in constant time. Both are checked against the RFC 7748 and RFC 8439 test
 vectors, and the handshake byte for byte against an independent implementation
 of the Noise specification.
 
+## Requiring licensed instances
+
+On its own, the PSK is the whole of the mesh's security. Anyone who has it is a
+member, and every instance has a copy, so it only takes one leaked copy. With
+`mesh-require-licence: yes`, every instance also has a key of its own, and your
+licence issuer certifies each one for your organisation. A peer then has to
+show a certificate from that issuer, for your organisation, for a key it proves
+in the handshake that it holds.
+
+Setting it up takes a build that carries your issuer key (see
+[Signed licences](licensing.md)), and for each instance:
+
+```bash
+elpis --mesh-keygen | sudo tee /etc/elpis/mesh.key > /dev/null
+```
+
+That writes the instance's private key, which never leaves it, and prints the
+public half. The issuer certifies the public half:
+
+```bash
+elpis-licence issue --key issuer.key --org "Example ISP, AS64500" \
+    --mesh-key 6d3f…a91c --days 365 --serial 3001
+```
+
+and the instance's `elpis.conf` gets:
+
+```
+mesh-require-licence: yes
+mesh-key: /etc/elpis/mesh.key
+mesh-cert: elpism1.AQAAC7kAAAAAardsDQAA…
+```
+
+What it proves, and what it does not:
+
+- **A leaked PSK is no longer enough.** Joining also takes an instance key the
+  issuer certified. Every one of them came from your issuer, so with the issuer
+  key kept safe, nobody can make one.
+- **A copied certificate is useless.** The handshake is `XXpsk0` instead of
+  `NNpsk0`, and each side does a Diffie-Hellman with its private key. A
+  certificate taken from someone's `elpis.conf` names a key the thief does not
+  hold, so the other side refuses it with `its certificate is for a key it did
+  not prove`. This was tried against a build patched to present another
+  instance's certificate, and it never got in.
+- **Other customers of the same issuer stay out.** The organisation on a
+  peer's certificate must match your own, byte for byte: `its certificate is
+  for "Another ISP", not "Example ISP, AS64500"`.
+- **Expiry retires a key.** Unlike a licence, an expired certificate is
+  refused. That is safe to enforce here: the mesh only ever makes answers
+  faster, so a lapsed certificate costs speed and never an answer.
+- **It does not vouch for the binary.** A patched build can drop its own checks,
+  as [licensing.md](licensing.md) explains, but it still cannot prove a key it
+  does not hold. So the certificate is a key the issuer handed out, not a
+  statement about the software.
+
+The mesh key is a key-agreement key (X25519), not a signing key, so the
+resolver still contains no signing code. A certificate is its own token,
+signed under its own context, so a licence can never pass as a certificate, or
+a certificate as a licence. A stock build carries no issuer key, so with
+`mesh-require-licence: yes` it logs that and turns the mesh off. It never runs
+the mesh unchecked.
+
+Handshake messages grow by a certificate each way, and the dialling side
+counts the connection as up only when the other side first answers. That
+answer is what tells it its own certificate was accepted.
+
 ## The protocol
 
 On the wire every message is a two-byte length and then that many bytes. The
-two handshake messages each carry a hello: a version byte, a flags byte (bit 0:
+handshake carries a hello from each side: a version byte, a flags byte (bit 0:
 this instance answers list requests), the port it takes connections on (0 for
-none) and a random 16-byte node id. After the handshake, each message is
+none) and a random 16-byte node id. Under `NNpsk0` the hellos ride in messages
+1 and 2. Under `XXpsk0`, message 1 is empty, and messages 2 and 3 each carry a
+hello, a two-byte length and the sender's certificate. After the handshake, each message is
 encrypted, and inside it is a type byte and a body:
 
 | type | body |

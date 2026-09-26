@@ -33,6 +33,9 @@ void  elpis_mesh_fini(void);
 
 /* --gen-psk: print a new key in the form mesh-psk: files take. */
 int   elpis_mesh_gen_psk(void);
+/* --mesh-keygen: print a new instance key for mesh-key:, and its public half
+ * for the licence issuer to certify. */
+int   elpis_mesh_gen_key(void);
 
 /* ---- exposed for the tests ---------------------------------------- */
 /* 64 hex digits, anywhere in the text; lines starting '#' are comments. */

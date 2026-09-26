@@ -996,7 +996,10 @@ static void usage(const char *argv0)
         "            the shipped systemd unit it is.  With no PASS, reads one\n"
         "            line from stdin so it stays out of your shell history.\n"
         "  --gen-psk print a new key for mesh-psk:, to give every instance\n"
-        "            of a mesh the same copy of.\n",
+        "            of a mesh the same copy of.\n"
+        "  --mesh-keygen\n"
+        "            print a new key for this instance's mesh-key:, and the\n"
+        "            public half for elpis-licence issue --mesh-key.\n",
         ELPIS_VERSION, argv0, ELPIS_SYSCONFDIR, ELPIS_SYSCONFDIR);
 }
 
@@ -1111,6 +1114,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
         else if (!strcmp(a, "--hash-password")) return hash_password(argv[i + 1]);
         else if (!strcmp(a, "--gen-psk")) { elpis_random_init(); return elpis_mesh_gen_psk(); }
+        else if (!strcmp(a, "--mesh-keygen")) { elpis_random_init(); return elpis_mesh_gen_key(); }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option '%s'\n", a); usage(argv[0]); return 2; }
     }

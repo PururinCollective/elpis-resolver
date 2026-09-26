@@ -313,3 +313,93 @@ int elpis_licence_parse(const char *token, int64_t now, elpis_licence_t *out)
         out->expired = 1;
     return ELPIS_OK;
 }
+
+/* ------------------------------------------------------------------ */
+/* Mesh certificates (see elpis/licence.h)                             */
+/* ------------------------------------------------------------------ */
+
+#define MESHCERT_FORMAT 1
+#define MESHCERT_FIXED  54
+
+size_t elpis_meshcert_payload(const elpis_meshcert_t *c, uint8_t *out,
+                              size_t cap)
+{
+    size_t orglen = strlen(c->org);
+
+    if (orglen > ELPIS_LICENCE_MAX_ORG || cap < MESHCERT_FIXED + orglen)
+        return 0;
+    out[0] = MESHCERT_FORMAT;
+    put_u32(out + 1,  c->serial);
+    put_i64(out + 5,  c->issued);
+    put_i64(out + 13, c->expires);
+    memcpy(out + 21, c->key, 32);
+    out[53] = (uint8_t)orglen;
+    memcpy(out + 54, c->org, orglen);
+    return MESHCERT_FIXED + orglen;
+}
+
+static int cert_fail(elpis_meshcert_t *out, const char *why)
+{
+    elpis_strlcpy(out->why, why, sizeof out->why);
+    return ELPIS_ERR;
+}
+
+int elpis_meshcert_parse(const char *token, int64_t now, elpis_meshcert_t *out)
+{
+    const char *p1, *p2;
+    uint8_t payload[ELPIS_LICENCE_MAX_TOKEN];
+    uint8_t sig[80], pk[32], signed_buf[ELPIS_LICENCE_MAX_TOKEN + 32];
+    size_t  plen = 0, slen = 0, ctxlen = strlen(ELPIS_MESHCERT_CONTEXT);
+    size_t  maglen = strlen(ELPIS_MESHCERT_MAGIC);
+    unsigned orglen;
+
+    memset(out, 0, sizeof *out);
+    out->present = 1;
+
+    if (strlen(token) >= ELPIS_LICENCE_MAX_TOKEN)
+        return cert_fail(out, "certificate is too long");
+    if (strncmp(token, ELPIS_MESHCERT_MAGIC, maglen) != 0 || token[maglen] != '.')
+        return cert_fail(out, "not an " ELPIS_MESHCERT_MAGIC " certificate");
+
+    p1 = token + maglen + 1;
+    p2 = strchr(p1, '.');
+    if (p2 == NULL)
+        return cert_fail(out, "certificate has no signature");
+    if (elpis_b64url_decode(p1, (size_t)(p2 - p1), payload, sizeof payload,
+                            &plen) != ELPIS_OK)
+        return cert_fail(out, "payload is not valid base64url");
+    if (elpis_b64url_decode(p2 + 1, strlen(p2 + 1), sig, sizeof sig,
+                            &slen) != ELPIS_OK)
+        return cert_fail(out, "signature is not valid base64url");
+    if (slen != 64)
+        return cert_fail(out, "signature is not 64 bytes");
+    if (plen < MESHCERT_FIXED)
+        return cert_fail(out, "payload is truncated");
+    if (payload[0] != MESHCERT_FORMAT)
+        return cert_fail(out, "certificate is in a format this build does not speak");
+    orglen = payload[53];
+    if (plen != MESHCERT_FIXED + orglen)
+        return cert_fail(out, "payload length does not match its org field");
+
+    /* Described before it is checked, for the log; `valid` stays 0 until
+     * the signature says otherwise. */
+    out->serial  = get_u32(payload + 1);
+    out->issued  = get_i64(payload + 5);
+    out->expires = get_i64(payload + 13);
+    memcpy(out->key, payload + 21, 32);
+    memcpy(out->org, payload + 54, orglen);
+    out->org[orglen] = '\0';
+
+    if (issuer_key(pk) != ELPIS_OK)
+        return cert_fail(out, "this build carries no issuer key, so no certificate can be checked");
+
+    memcpy(signed_buf, ELPIS_MESHCERT_CONTEXT, ctxlen);
+    memcpy(signed_buf + ctxlen, payload, plen);
+    if (!elpis_ed25519_verify(pk, signed_buf, ctxlen + plen, sig))
+        return cert_fail(out, "signature does not match this build's issuer key");
+
+    out->valid = 1;
+    if (out->expires != 0 && now > out->expires)
+        out->expired = 1;
+    return ELPIS_OK;
+}

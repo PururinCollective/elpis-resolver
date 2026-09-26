@@ -36,7 +36,7 @@
 #include "elpis/sock.h"
 #include "elpis/util.h"
 #include "elpis/log.h"
-
+#include "elpis/licence.h"
 #include "elpis/simd.h"
 
 #include <arpa/inet.h>
@@ -45,6 +45,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -59,6 +60,8 @@
 /* A peer that has not read this much of what it asked for is not reading. */
 #define MESH_OUT_MAX         (16u * 1024u * 1024u)
 #define MESH_HANDSHAKE_MS    5000u
+/* The largest handshake message: a hello and a certificate, with keys. */
+#define MESH_HS_MAX          2048u
 #define MESH_IDLE_MS         120000u
 #define MESH_PING_MS         30000u
 /* At startup, how long to wait for the peers' lists before warming. */
@@ -75,7 +78,9 @@
 
 enum { MSG_LIST_REQ = 1, MSG_LIST_PART = 2, MSG_LIST_END = 3, MSG_PEERS = 4,
        MSG_PING = 5, MSG_PONG = 6, MSG_LOOKUP_KEY = 7, MSG_DIGEST = 8 };
-enum { S_CONNECTING, S_HANDSHAKE, S_UP };
+/* S_CONFIRM: a licensed dialler's handshake is done on its side, and it
+ * waits for the first word back to know its certificate was taken. */
+enum { S_CONNECTING, S_HANDSHAKE, S_CONFIRM, S_UP };
 
 /* The hello each handshake message carries: version, flags, the port this
  * instance takes connections on (0 for none), and its node id. */
@@ -90,6 +95,7 @@ typedef struct session {
     unsigned          dead      : 1;
     unsigned          was_up    : 1;
     unsigned          quiet     : 1;   /* its end is no news            */
+    unsigned          loud      : 1;   /* its end is always news        */
     unsigned          asked     : 1;   /* we asked for its list        */
     unsigned          got_list  : 1;
     unsigned          shares    : 1;   /* its hello says it answers    */
@@ -108,6 +114,8 @@ typedef struct session {
     size_t            outlen, outoff, outcap;
     uint64_t          deadline, last_rx, last_ping, last_pex, last_served;
     uint32_t          rtt_ms;          /* 0 until measured               */
+    uint32_t          cert_serial;     /* its certificate, when licensed */
+    char              whybuf[128];
     uint64_t          last_digest;
     /* A digest arriving in parts. */
     uint8_t          *dg;
@@ -140,6 +148,13 @@ static unsigned     g_nsessions;
 static known_t      g_known[MESH_MAX_KNOWN];
 static unsigned     g_nknown;
 static uint64_t     g_t0;
+/*
+ * A licensed mesh (mesh-require-licence): this instance's static key, and
+ * what its certificate says.  The certificate itself is conf.mesh_cert.
+ */
+static int          g_licensed;
+static uint8_t      g_skey[32], g_spub[32];
+static char         g_cert_org[ELPIS_LICENCE_MAX_ORG + 1];
 /* Local service discovery: a socket per family, and the announcement key. */
 static int          g_lsd4 = -1, g_lsd6 = -1;
 /* The port each family's announcement names: that family's listener, or 0
@@ -153,9 +168,15 @@ static elpis_ckpt_list_t g_gather;
 static int          g_gathering;
 static unsigned     g_gather_peers;
 static int          g_gather_local;
-/* One plaintext message and its ciphertext at a time: one thread. */
+/*
+ * One thread, so one buffer each: a message being built (g_plain, then
+ * g_cipher) and a message received (g_rx).  Apart, because handling what
+ * arrives can mean sending something -- a PONG, or everything a session
+ * sends once it is ready -- before the received message has been read.
+ */
 static uint8_t      g_plain[MESH_FRAME_MAX];
 static uint8_t      g_cipher[2u + MESH_FRAME_MAX];
+static uint8_t      g_rx[MESH_FRAME_MAX];
 
 /*
  * What the workers need to ask a peer, kept apart from the sessions (which
@@ -477,7 +498,9 @@ fail:
 /* Setup                                                               */
 /* ------------------------------------------------------------------ */
 
-static int load_psk(const char *path)
+/* A 32-byte key from a file of 64 hex digits, as --gen-psk and
+ * --mesh-keygen write them.  `made_by` names which, for the error. */
+static int load_key32(const char *path, uint8_t out[32], const char *made_by)
 {
     char buf[4096];
     struct stat st;
@@ -490,8 +513,8 @@ static int load_psk(const char *path)
         return ELPIS_ERR;
     }
     if (fstat(fd, &st) == 0 && (st.st_mode & 077) != 0)
-        elpis_warn("mesh: %s can be read by others than its owner; anyone who "
-                   "can read it can join the mesh", path);
+        elpis_warn("mesh: %s can be read by others than its owner, and it "
+                   "is a secret", path);
     n = read(fd, buf, sizeof buf - 1u);
     close(fd);
     if (n < 0) {
@@ -499,12 +522,78 @@ static int load_psk(const char *path)
         return ELPIS_ERR;
     }
     buf[n] = '\0';
-    rc = elpis_mesh_psk_parse(buf, g_psk);
+    rc = elpis_mesh_psk_parse(buf, out);
     elpis_memzero(buf, sizeof buf);
     if (rc != ELPIS_OK)
-        elpis_error("mesh: %s does not hold a key: 64 hex digits, as "
-                    "elpis --gen-psk writes", path);
+        elpis_error("mesh: %s does not hold a key: 64 hex digits, as %s "
+                    "writes", path, made_by);
     return rc;
+}
+
+int elpis_mesh_gen_key(void)
+{
+    uint8_t k[32], pub[32];
+    unsigned i;
+
+    elpis_random_bytes(k, sizeof k);
+    elpis_x25519_base(pub, k);
+    printf("# elpis mesh instance key: this instance's alone, readable by root\n"
+           "# alone.  Point mesh-key: at it.\n");
+    for (i = 0; i < sizeof k; i++)
+        printf("%02x", k[i]);
+    printf("\n");
+    fprintf(stderr, "public key, for the licence issuer to certify:\n\n  ");
+    for (i = 0; i < sizeof pub; i++)
+        fprintf(stderr, "%02x", pub[i]);
+    fprintf(stderr, "\n\n  elpis-licence issue --key issuer.key --org \"...\" "
+            "--mesh-key <that key> --days 365\n");
+    elpis_memzero(k, sizeof k);
+    return 0;
+}
+
+/*
+ * mesh-require-licence: this instance's key, and a certificate for it that
+ * this build's issuer signed, has not expired, and names that same key.
+ * Anything less and there is nothing to show a peer, so the mesh stays off.
+ */
+static int licensed_setup(const elpis_conf_t *c)
+{
+    elpis_meshcert_t cert;
+    char when[32];
+
+    if (!elpis_licence_enabled()) {
+        elpis_error("mesh: mesh-require-licence needs a build that carries the "
+                    "licence issuer's key, and this one has none");
+        return ELPIS_ERR;
+    }
+    if (c->mesh_key_file[0] == '\0' || c->mesh_cert[0] == '\0') {
+        elpis_error("mesh: mesh-require-licence needs mesh-key: (from elpis "
+                    "--mesh-keygen) and mesh-cert: (from the issuer)");
+        return ELPIS_ERR;
+    }
+    if (load_key32(c->mesh_key_file, g_skey, "elpis --mesh-keygen") != ELPIS_OK)
+        return ELPIS_ERR;
+    elpis_x25519_base(g_spub, g_skey);
+    if (elpis_meshcert_parse(c->mesh_cert, elpis_wall_s(), &cert) != ELPIS_OK) {
+        elpis_error("mesh: mesh-cert does not verify: %s", cert.why);
+        return ELPIS_ERR;
+    }
+    elpis_licence_date(cert.expires, when, sizeof when);
+    if (cert.expired) {
+        elpis_error("mesh: mesh-cert expired on %s; the issuer can make a new "
+                    "one for the same key", when);
+        return ELPIS_ERR;
+    }
+    if (memcmp(cert.key, g_spub, 32) != 0) {
+        elpis_error("mesh: mesh-cert was issued for another key than the one "
+                    "in %s", c->mesh_key_file);
+        return ELPIS_ERR;
+    }
+    elpis_strlcpy(g_cert_org, cert.org, sizeof g_cert_org);
+    g_licensed = 1;
+    elpis_info("mesh: licensed to \"%s\" (certificate %lu, expires %s); "
+               "peers must be too", cert.org, (unsigned long)cert.serial, when);
+    return ELPIS_OK;
 }
 
 void elpis_mesh_init(elpis_ctx_t *ctx)
@@ -529,8 +618,15 @@ void elpis_mesh_init(elpis_ctx_t *ctx)
         c->mesh = 0;
         return;
     }
-    if (load_psk(c->mesh_psk_file) != ELPIS_OK) {
+    if (load_key32(c->mesh_psk_file, g_psk, "elpis --gen-psk") != ELPIS_OK) {
         elpis_error("mesh: the mesh is off");
+        c->mesh = 0;
+        return;
+    }
+    if (c->mesh_require_licence && licensed_setup(c) != ELPIS_OK) {
+        elpis_error("mesh: the mesh is off");
+        elpis_memzero(g_psk, sizeof g_psk);
+        elpis_memzero(g_skey, sizeof g_skey);
         c->mesh = 0;
         return;
     }
@@ -621,6 +717,7 @@ void elpis_mesh_fini(void)
     g_nptab = 0;
     pthread_rwlock_unlock(&g_ptab_lock);
     elpis_memzero(g_lqkey, sizeof g_lqkey);
+    elpis_memzero(g_skey, sizeof g_skey);
     elpis_memzero(g_lsd_key, sizeof g_lsd_key);
     elpis_ckpt_list_free(&g_gather);
     elpis_memzero(g_psk, sizeof g_psk);
@@ -666,8 +763,11 @@ static session_t *session_new(int fd, int initiator, const elpis_addr_t *addr)
     s->addr = *addr;
     elpis_addr_str(addr, s->name, sizeof s->name);
     elpis_ckpt_list_init(&s->incoming);
-    elpis_noise_init(&s->hs, initiator, g_psk, (const uint8_t *)MESH_PROLOGUE,
+    elpis_noise_init(&s->hs, g_licensed ? ELPIS_NOISE_XX_PSK0 : ELPIS_NOISE_NN_PSK0,
+                     initiator, g_psk, (const uint8_t *)MESH_PROLOGUE,
                      sizeof MESH_PROLOGUE - 1u);
+    if (g_licensed)
+        elpis_noise_set_static(&s->hs, g_skey);
     s->last_rx = elpis_now_ms();
     s->deadline = s->last_rx + MESH_HANDSHAKE_MS;
     s->next = g_sessions;
@@ -693,6 +793,9 @@ static void session_close(session_t *s, const char *why)
         elpis_debug("mesh: %s: %s", s->name, why);
     else if (s->was_up)
         elpis_info("mesh: %s is gone: %s", s->name, why);
+    else if (!s->initiator && s->state == S_HANDSHAKE && s->loud)
+        /* One that holds the PSK and still is not let in: always news. */
+        elpis_info("mesh: refused %s: %s", s->name, why);
     else if (!s->initiator && s->state == S_HANDSHAKE &&
              now - g_last_refusal >= 60000u) {
         /* Whoever knocks without the key: worth a line, not a line each. */
@@ -823,9 +926,8 @@ static int send_msg(session_t *s, uint8_t type, const uint8_t *body, size_t n)
 {
     if (s->state != S_UP || n + 1u > MESH_PLAIN_MAX)
         return ELPIS_ERR;
-    /* body may already sit in g_plain: a PONG echoes the PING it read */
     if (n > 0)
-        memmove(g_plain + 1, body, n);
+        memcpy(g_plain + 1, body, n);
     g_plain[0] = type;
     elpis_noise_encrypt(&s->tx, g_plain, n + 1u, g_cipher + 2);
     elpis_put16(g_cipher, (uint16_t)(n + 1u + ELPIS_NOISE_TAG));
@@ -1481,13 +1583,84 @@ static const uint8_t *dialler(const session_t *s)
     return s->initiator ? g_node : s->node;
 }
 
+static void session_closef(session_t *s, const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(s->whybuf, sizeof s->whybuf, fmt, ap);
+    va_end(ap);
+    session_close(s, s->whybuf);
+}
+
+/* XX messages 2 and 3: a hello, then u16 length and the certificate. */
+static int write_licensed(session_t *s)
+{
+    uint8_t pl[HELLO_LEN + 2u + ELPIS_LICENCE_MAX_TOKEN];
+    uint8_t out[sizeof pl + 128u];
+    size_t cl = strlen(g_ctx->conf.mesh_cert), olen;
+
+    hello_make(pl);
+    elpis_put16(pl + HELLO_LEN, (uint16_t)cl);
+    memcpy(pl + HELLO_LEN + 2u, g_ctx->conf.mesh_cert, cl);
+    if (elpis_noise_write(&s->hs, pl, HELLO_LEN + 2u + cl, out, sizeof out,
+                          &olen) != ELPIS_OK ||
+        queue_raw_frame(s, out, olen) != ELPIS_OK) {
+        session_close(s, "handshake failed");
+        return ELPIS_ERR;
+    }
+    return ELPIS_OK;
+}
+
+/*
+ * The other side's certificate: signed by this build's issuer, not expired,
+ * for the static key the handshake just proved it holds, and for our own
+ * organisation.  Any one missing and it does not get in.
+ */
+static int check_peer(session_t *s, const uint8_t *pl, size_t n)
+{
+    const uint8_t *rs = elpis_noise_remote_static(&s->hs);
+    char tok[ELPIS_LICENCE_MAX_TOKEN], when[32];
+    elpis_meshcert_t c;
+    size_t cl;
+
+    s->loud = 1;                    /* it got this far: it holds the PSK */
+    cl = n >= HELLO_LEN + 2u ? elpis_get16(pl + HELLO_LEN) : 0u;
+    if (cl == 0 || cl >= sizeof tok || HELLO_LEN + 2u + cl > n) {
+        session_close(s, "no certificate (an instance without "
+                         "mesh-require-licence?)");
+        return ELPIS_ERR;
+    }
+    memcpy(tok, pl + HELLO_LEN + 2u, cl);
+    tok[cl] = '\0';
+    if (elpis_meshcert_parse(tok, elpis_wall_s(), &c) != ELPIS_OK) {
+        session_closef(s, "its certificate does not verify: %s", c.why);
+        return ELPIS_ERR;
+    }
+    if (c.expired) {
+        elpis_licence_date(c.expires, when, sizeof when);
+        session_closef(s, "its certificate expired on %s", when);
+        return ELPIS_ERR;
+    }
+    if (rs == NULL || memcmp(c.key, rs, 32) != 0) {
+        session_close(s, "its certificate is for a key it did not prove");
+        return ELPIS_ERR;
+    }
+    if (strcmp(c.org, g_cert_org) != 0) {
+        session_closef(s, "its certificate is for \"%s\", not \"%s\"",
+                       c.org, g_cert_org);
+        return ELPIS_ERR;
+    }
+    s->cert_serial = c.serial;
+    s->loud = 0;
+    return ELPIS_OK;
+}
+
+static void session_ready(session_t *s);
+
+/* The handshake is done on this side: keys, and what the hello says. */
 static void session_up(session_t *s, const uint8_t *hello, size_t n)
 {
-    const elpis_conf_t *c = &g_ctx->conf;
-    session_t *twin;
-    char id[9];
-    uint64_t now = elpis_now_ms();
-
     if (n < HELLO_LEN || hello[0] != MESH_VERSION) {
         session_close(s, "speaks another version of the mesh");
         return;
@@ -1502,8 +1675,6 @@ static void session_up(session_t *s, const uint8_t *hello, size_t n)
         return;
     }
     elpis_noise_split(&s->hs, &s->tx, &s->rx);
-    s->state = S_UP;
-    s->was_up = 1;
     s->shares = (hello[1] & HELLO_SHARES) ? 1u : 0u;
     if (elpis_get16(hello + 2) != 0) {
         s->listen = s->addr;
@@ -1515,6 +1686,30 @@ static void session_up(session_t *s, const uint8_t *hello, size_t n)
         /* Known by where it takes connections, not by a passing port. */
         elpis_addr_str(&s->listen, s->name, sizeof s->name);
     }
+
+    /*
+     * In XX the dialler writes the last message, so its handshake ends before
+     * the other side has judged its certificate.  It is up when that side
+     * first says something; until then it sends nothing and tells no one.
+     */
+    if (g_licensed && s->initiator) {
+        s->state = S_CONFIRM;
+        s->deadline = elpis_now_ms() + MESH_HANDSHAKE_MS;
+        return;
+    }
+    session_ready(s);
+}
+
+/* Both sides have let each other in. */
+static void session_ready(session_t *s)
+{
+    const elpis_conf_t *c = &g_ctx->conf;
+    session_t *twin;
+    char id[9];
+    uint64_t now = elpis_now_ms();
+
+    s->state = S_UP;
+    s->was_up = 1;
     if (s->initiator) {
         known_t *k = known_find(&s->dial);
         if (k != NULL) {
@@ -1543,8 +1738,13 @@ static void session_up(session_t *s, const uint8_t *hello, size_t n)
     }
 
     hex8(s->node, id);
-    elpis_info("mesh: up with %s (node %s, %s)", s->name, id,
-               s->initiator ? "we dialled" : "it dialled");
+    if (g_licensed)
+        elpis_info("mesh: up with %s (node %s, %s, certificate %lu)", s->name,
+                   id, s->initiator ? "we dialled" : "it dialled",
+                   (unsigned long)s->cert_serial);
+    else
+        elpis_info("mesh: up with %s (node %s, %s)", s->name, id,
+                   s->initiator ? "we dialled" : "it dialled");
     s->last_ping = 0;               /* ping at once: lookups need the RTT */
     ptab_up(s);
     send_lookup_key(s);
@@ -1566,59 +1766,88 @@ static void on_frame(session_t *s, const uint8_t *p, size_t n)
     s->last_rx = elpis_now_ms();
 
     if (s->state == S_HANDSHAKE) {
-        if (n > HELLO_LEN + 64u + ELPIS_NOISE_HS_OVERHEAD ||
-            elpis_noise_read(&s->hs, p, n, g_plain, sizeof g_plain,
+        if (n > MESH_HS_MAX ||
+            elpis_noise_read(&s->hs, p, n, g_rx, sizeof g_rx,
                              &plen) != ELPIS_OK) {
-            /* The one thing a wrong PSK looks like from either end. */
-            session_close(s, "handshake failed (a different mesh-psk?)");
+            /* What a wrong PSK looks like from either end -- and so does a
+             * licensed mesh meeting one that is not. */
+            session_close(s, g_licensed
+                ? "handshake failed (a different mesh-psk, or an instance "
+                  "without mesh-require-licence?)"
+                : "handshake failed (a different mesh-psk, or an instance "
+                  "with mesh-require-licence?)");
             return;
         }
-        if (!s->initiator) {
-            hello_make(hello);
-            if (elpis_noise_write(&s->hs, hello, sizeof hello, out, sizeof out,
-                                  &olen) != ELPIS_OK ||
-                queue_raw_frame(s, out, olen) != ELPIS_OK) {
-                session_close(s, "handshake failed");
-                return;
+        if (!g_licensed) {
+            /* NN: message 1 carries the initiator's hello, 2 the responder's. */
+            if (!s->initiator) {
+                hello_make(hello);
+                if (elpis_noise_write(&s->hs, hello, sizeof hello, out,
+                                      sizeof out, &olen) != ELPIS_OK ||
+                    queue_raw_frame(s, out, olen) != ELPIS_OK) {
+                    session_close(s, "handshake failed");
+                    return;
+                }
+                /* Out now: if this turns out to be us, our dialling side
+                 * has to read it to learn so. */
+                flush(s);
             }
-            /* Out now: if this turns out to be us, our dialling side has
-             * to read it to learn so. */
-            flush(s);
+            session_up(s, g_rx, plen);
+            return;
         }
-        session_up(s, g_plain, plen);
+        /*
+         * XX: message 1 carries nothing; 2 and 3 each carry a hello and the
+         * certificate for the static key that message has just proved.
+         */
+        if (!s->initiator && s->hs.step == 1) {
+            if (write_licensed(s) == ELPIS_OK)
+                flush(s);
+            return;
+        }
+        if (check_peer(s, g_rx, plen) != ELPIS_OK)
+            return;
+        if (s->initiator && write_licensed(s) != ELPIS_OK)
+            return;
+        session_up(s, g_rx, plen);
         return;
     }
 
-    if (s->state != S_UP)
+    if (s->state != S_UP && s->state != S_CONFIRM)
         return;
     if (n < 1u + ELPIS_NOISE_TAG ||
-        elpis_noise_decrypt(&s->rx, p, n, g_plain) != ELPIS_OK) {
+        elpis_noise_decrypt(&s->rx, p, n, g_rx) != ELPIS_OK) {
         session_close(s, "a message that does not decrypt");
         return;
     }
+    if (s->state == S_CONFIRM) {
+        /* The first word back: it took our certificate. */
+        session_ready(s);
+        if (s->dead)
+            return;
+    }
     plen = n - ELPIS_NOISE_TAG;
 
-    switch (g_plain[0]) {
+    switch (g_rx[0]) {
     case MSG_LIST_REQ:
-        send_list(s, plen >= 5u ? elpis_get32(g_plain + 1) : 0u);
+        send_list(s, plen >= 5u ? elpis_get32(g_rx + 1) : 0u);
         break;
     case MSG_LIST_PART:
-        recv_list_part(s, g_plain + 1, plen - 1u);
+        recv_list_part(s, g_rx + 1, plen - 1u);
         break;
     case MSG_LIST_END:
         recv_list_end(s);
         break;
     case MSG_PEERS:
-        recv_peers(s, g_plain + 1, plen - 1u);
+        recv_peers(s, g_rx + 1, plen - 1u);
         break;
     case MSG_PING:
         if (plen >= 9u)
-            send_msg(s, MSG_PONG, g_plain + 1, 8);
+            send_msg(s, MSG_PONG, g_rx + 1, 8);
         break;
     case MSG_PONG:
         if (plen >= 9u) {
-            uint64_t sent = ((uint64_t)elpis_get32(g_plain + 1) << 32) |
-                            elpis_get32(g_plain + 5);
+            uint64_t sent = ((uint64_t)elpis_get32(g_rx + 1) << 32) |
+                            elpis_get32(g_rx + 5);
             uint64_t now = elpis_now_us();
             if (sent <= now && now - sent < 60000000u) {
                 /* Rounded up, so a LAN's fraction of a millisecond is 1 and
@@ -1631,10 +1860,10 @@ static void on_frame(session_t *s, const uint8_t *p, size_t n)
         break;
     case MSG_LOOKUP_KEY:
         if (plen >= 37u)
-            ptab_key(s->node, elpis_get32(g_plain + 1), g_plain + 5);
+            ptab_key(s->node, elpis_get32(g_rx + 1), g_rx + 5);
         break;
     case MSG_DIGEST:
-        recv_digest(s, g_plain + 1, plen - 1u);
+        recv_digest(s, g_rx + 1, plen - 1u);
         break;
     default:
         break;                      /* a later version's message */
@@ -1666,8 +1895,11 @@ static void on_readable(session_t *s)
         n = recv(s->fd, s->in + s->inlen, s->incap - s->inlen, 0);
         if (n == 0) {
             session_close(s, s->state == S_UP ? "closed"
+                             : g_licensed
+                             ? "closed during the handshake (a different "
+                               "mesh-psk, or it refused our certificate?)"
                              : "closed during the handshake (a different "
-                               "mesh-psk?)");
+                               "mesh-psk, or a mesh that requires licences?)");
             return;
         }
         if (n < 0) {
@@ -1715,8 +1947,10 @@ static void on_connected(session_t *s)
     }
     s->state = S_HANDSHAKE;
     hello_make(hello);
-    if (elpis_noise_write(&s->hs, hello, sizeof hello, out, sizeof out,
-                          &olen) != ELPIS_OK ||
+    /* A licensed mesh says nothing in message 1: its hello goes with the
+     * certificate, once there is a key to send them under. */
+    if (elpis_noise_write(&s->hs, hello, g_licensed ? 0 : sizeof hello, out,
+                          sizeof out, &olen) != ELPIS_OK ||
         queue_raw_frame(s, out, olen) != ELPIS_OK) {
         session_close(s, "handshake failed");
         return;
@@ -1909,7 +2143,9 @@ static void timers(uint64_t now)
         if (s->state != S_UP) {
             if (now >= s->deadline)
                 session_close(s, s->state == S_CONNECTING ? "no answer"
-                                                           : "handshake timed out");
+                                 : s->state == S_CONFIRM
+                                 ? "it did not take our certificate"
+                                 : "handshake timed out");
             continue;
         }
         if (now - s->last_rx >= MESH_IDLE_MS) {

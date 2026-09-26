@@ -100,6 +100,11 @@ typedef struct {
     uint8_t      mesh_share;               /* answer peers' list requests */
     uint8_t      mesh_lsd;                 /* find peers on the segment   */
     uint8_t      mesh_lookup;              /* ask peers' caches on a miss */
+    /* Licensed meshes: every peer proves a key the licence issuer certified
+     * for this organisation (mesh.c, licence.h). */
+    uint8_t      mesh_require_licence;
+    char         mesh_key_file[512];       /* this instance's X25519 key */
+    char         mesh_cert[ELPIS_LICENCE_MAX_TOKEN];
     uint32_t     mesh_lookup_rtt;          /* ms: the farthest peer asked */
     uint32_t     mesh_share_min_hits;
     uint32_t     mesh_max_peers;

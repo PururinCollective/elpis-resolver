@@ -423,6 +423,24 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("mesh-share")) return want_bool(&p, key, val, &c->mesh_share);
     if (KEY("mesh-lsd"))   return want_bool(&p, key, val, &c->mesh_lsd);
     if (KEY("mesh-lookup")) return want_bool(&p, key, val, &c->mesh_lookup);
+    if (KEY("mesh-require-licence") || KEY("mesh-require-license"))
+        return want_bool(&p, key, val, &c->mesh_require_licence);
+    if (KEY("mesh-key")) {
+        if (val[0] != '/' || strlen(val) >= sizeof c->mesh_key_file) {
+            elpis_error("%s:%u: 'mesh-key' takes an absolute path", src, lineno);
+            return ELPIS_ERR;
+        }
+        elpis_strlcpy(c->mesh_key_file, val, sizeof c->mesh_key_file);
+        return ELPIS_OK;
+    }
+    if (KEY("mesh-cert")) {
+        if (strlen(val) >= sizeof c->mesh_cert) {
+            perr(&p, key, "(too long)");
+            return ELPIS_ERR;
+        }
+        elpis_strlcpy(c->mesh_cert, val, sizeof c->mesh_cert);
+        return ELPIS_OK;
+    }
     if (KEY("mesh-lookup-rtt")) {
         uint32_t v;
         if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
@@ -864,6 +882,8 @@ void elpis_conf_dump(const elpis_conf_t *c)
         if (c->mesh_lookup)
             elpis_info("  mesh-lookup: peers within %u ms",
                        (unsigned)c->mesh_lookup_rtt);
+        if (c->mesh_require_licence)
+            elpis_info("  mesh-require-licence: every peer shows a certified key");
     }
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "

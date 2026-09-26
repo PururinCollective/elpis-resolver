@@ -50,10 +50,37 @@ a date passed would be a far worse failure than anything this protects against.
 | setting | without a licence |
 |---|---|
 | `identity-name:` | ignored with a warning; the probe answers at its default name |
+| `mesh-require-licence: yes` | the mesh stays off; without it the mesh runs on its PSK alone |
 
 Everything else works the same either way. A licence never changes how a query
 is resolved, and nothing is withheld that affects whether the resolver answers
-correctly — see the note on enforcement above.
+correctly — see the note on enforcement above. The mesh is no exception: it
+only makes answers arrive sooner, and `mesh-require-licence` only decides which
+instances may join it.
+
+## Mesh certificates
+
+A mesh that requires licensed instances needs a certificate for each instance's
+mesh key. It is a sibling of the licence, issued by the same tool with the same
+issuer key:
+
+```bash
+./bin/elpis-licence issue --key issuer.key --org "Example ISP, AS64500" \
+    --mesh-key <public key from elpis --mesh-keygen> --days 365 --serial 3001
+```
+
+```
+mesh certificate for "Example ISP, AS64500", serial 3001, key b8477a58911ecbd6..., expires 2026-10-26
+add this line to that instance's elpis.conf:
+
+mesh-cert: elpism1.AQAAC7kAAAAAardsDQAAAABq3vkN...
+```
+
+`elpis-licence verify` reads either kind. A certificate is its own token
+(`elpism1`), signed under its own context string (`elpis-mesh-cert-v1`), so the
+issuer's signature on one can never be passed off as the other. Unlike a
+licence, an expired certificate is refused: see [Mesh](mesh.md) for what
+that does and why it is safe.
 
 A lapsed licence keeps what it unlocked. Expiry already does not stop the
 resolver resolving, and quietly moving a name that somebody's monitoring points

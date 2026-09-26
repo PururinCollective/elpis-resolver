@@ -2464,8 +2464,10 @@ static void noise_pair(elpis_noise_hs_t *i, elpis_noise_hs_t *r,
                        const uint8_t psk_i[32], const uint8_t psk_r[32])
 {
     static const char prologue[] = "elpis mesh 1";
-    elpis_noise_init(i, 1, psk_i, (const uint8_t *)prologue, sizeof prologue - 1u);
-    elpis_noise_init(r, 0, psk_r, (const uint8_t *)prologue, sizeof prologue - 1u);
+    elpis_noise_init(i, ELPIS_NOISE_NN_PSK0, 1, psk_i, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    elpis_noise_init(r, ELPIS_NOISE_NN_PSK0, 0, psk_r, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
 }
 
 static void test_noise(void)
@@ -2742,6 +2744,179 @@ static void test_mesh(void)
           "mesh-psk wants an absolute path");
 }
 
+/*
+ * XXpsk0, byte for byte against the same independent reference, then the
+ * property it exists for: each side learns the other's static key, and a
+ * side that does not hold its key's private half cannot finish.
+ */
+static void test_noise_xx(void)
+{
+    static const char prologue[] = "elpis mesh 2";
+    uint8_t psk[32], ei[32], er[32], si[32], sr[32], pubw[32];
+    uint8_t m1[256], m2[256], m3[256], want[256], got[256], t[64];
+    size_t n1, n2, n3, nw, np;
+    elpis_noise_hs_t i, r;
+    elpis_noise_cs_t itx, irx, rtx, rrx;
+    unsigned k;
+
+    section("noise XXpsk0");
+    for (k = 0; k < 32; k++)
+        psk[k] = (uint8_t)(0x20 + k);
+    unhex("893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b0569da977c464a", ei, 32);
+    unhex("bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b", er, 32);
+    unhex("e61ef9919cde45dd5f82166404bd08e38bceb5dfdfded0a34c8df7ed542214d1", si, 32);
+    unhex("4a3acbfdb163dec651dfa3194dece676d437029c62a408b4c5ea9114246e4893", sr, 32);
+
+    elpis_noise_init(&i, ELPIS_NOISE_XX_PSK0, 1, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    elpis_noise_init(&r, ELPIS_NOISE_XX_PSK0, 0, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    elpis_noise_set_ephemeral(&i, ei);
+    elpis_noise_set_ephemeral(&r, er);
+    elpis_noise_set_static(&i, si);
+    elpis_noise_set_static(&r, sr);
+
+    CHECK(elpis_noise_write(&i, NULL, 0, m1, sizeof m1, &n1) == ELPIS_OK &&
+          elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_OK && np == 0,
+          "message 1");
+    nw = unhex("ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944"
+               "b6de638e1294685c5c6ab372032a7240", want, sizeof want);
+    CHECK(n1 == nw && !memcmp(m1, want, nw), "message 1 matches the reference");
+
+    CHECK(elpis_noise_write(&r, (const uint8_t *)"responder hello", 15, m2,
+                            sizeof m2, &n2) == ELPIS_OK, "message 2 written");
+    nw = unhex("95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f144808843"
+               "0be2aa05319e4078681b79cef1314a99373f93b2fe9b13c5a02e9a2aa21fb3c3"
+               "630b24e3665c5a62fac51ce64a81610e7d18fc40f86f296070a86b692a9bab63"
+               "8df72a4a47d1374814151a81c1ce2f", want, sizeof want);
+    CHECK(n2 == nw && !memcmp(m2, want, nw), "message 2 matches the reference");
+    CHECK(elpis_noise_remote_static(&i) == NULL, "no static key known before it arrives");
+    CHECK(elpis_noise_read(&i, m2, n2, got, sizeof got, &np) == ELPIS_OK &&
+          np == 15 && !memcmp(got, "responder hello", 15), "the initiator reads message 2");
+    unhex("31e0303fd6418d2f8c0e78b91f22e8caed0fbe48656dcf4767e4834f701b8f62", pubw, 32);
+    CHECK(elpis_noise_remote_static(&i) != NULL &&
+          !memcmp(elpis_noise_remote_static(&i), pubw, 32),
+          "and learns the responder's static key");
+
+    CHECK(elpis_noise_write(&i, (const uint8_t *)"initiator hello", 15, m3,
+                            sizeof m3, &n3) == ELPIS_OK, "message 3 written");
+    nw = unhex("54fbc159cf8e2d6f7a5bbcf526b7c0b093d1c3d942cbd3d82c7875f51f052d0e"
+               "8b8962cfc1d4b04c9aff694dec8a1afd7edab88cf53ad43baaf0fadfc585ae88"
+               "c90d38483ba22cb684b33aaaf02ec7", want, sizeof want);
+    CHECK(n3 == nw && !memcmp(m3, want, nw), "message 3 matches the reference");
+    CHECK(elpis_noise_read(&r, m3, n3, got, sizeof got, &np) == ELPIS_OK &&
+          np == 15 && !memcmp(got, "initiator hello", 15), "the responder reads message 3");
+    unhex("6bc3822a2aa7f4e6981d6538692b3cdf3e6df9eea6ed269eb41d93c22757b75a", pubw, 32);
+    CHECK(elpis_noise_remote_static(&r) != NULL &&
+          !memcmp(elpis_noise_remote_static(&r), pubw, 32),
+          "and learns the initiator's");
+    CHECK(elpis_noise_done(&i) && elpis_noise_done(&r), "three messages and done");
+
+    elpis_noise_split(&i, &itx, &irx);
+    elpis_noise_split(&r, &rtx, &rrx);
+    elpis_noise_encrypt(&itx, (const uint8_t *)"first transport message", 23, t);
+    nw = unhex("32904245b018e374cb798d2bf3852b3aae0d675d0cea1f84d2626a8eb6e1d7ee"
+               "bee954d3fe16e2", want, sizeof want);
+    CHECK(nw == 39 && !memcmp(t, want, nw) &&
+          elpis_noise_decrypt(&rrx, t, 39, got) == ELPIS_OK,
+          "transport keys match the reference");
+
+    /*
+     * Claiming a static key without its private half.  An initiator that
+     * sends someone else's public key but computes with its own secret gets
+     * a different se, so message 3 does not open.
+     */
+    elpis_noise_init(&i, ELPIS_NOISE_XX_PSK0, 1, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    elpis_noise_init(&r, ELPIS_NOISE_XX_PSK0, 0, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    elpis_noise_set_static(&i, si);
+    elpis_noise_set_static(&r, sr);
+    elpis_noise_write(&i, NULL, 0, m1, sizeof m1, &n1);
+    elpis_noise_read(&r, m1, n1, got, sizeof got, &np);
+    elpis_noise_write(&r, NULL, 0, m2, sizeof m2, &n2);
+    elpis_noise_read(&i, m2, n2, got, sizeof got, &np);
+    unhex("31e0303fd6418d2f8c0e78b91f22e8caed0fbe48656dcf4767e4834f701b8f62",
+          i.s_pub, 32);             /* the responder's public key, not ours */
+    elpis_noise_write(&i, NULL, 0, m3, sizeof m3, &n3);
+    CHECK(elpis_noise_read(&r, m3, n3, got, sizeof got, &np) == ELPIS_ERR,
+          "a static key claimed without its private half is refused");
+
+    elpis_noise_init(&i, ELPIS_NOISE_XX_PSK0, 1, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    CHECK(elpis_noise_write(&i, NULL, 0, m1, sizeof m1, &n1) == ELPIS_OK &&
+          elpis_noise_overhead(&i) == 0, "not this side's turn after message 1");
+    elpis_noise_init(&r, ELPIS_NOISE_NN_PSK0, 0, psk, (const uint8_t *)prologue,
+                     sizeof prologue - 1u);
+    CHECK(elpis_noise_read(&r, m1, n1, got, sizeof got, &np) == ELPIS_ERR,
+          "an NN responder refuses an XX initiator");
+}
+
+/*
+ * Mesh certificates, signed here with the test issuer -- RFC 8032's
+ * published vector 1, which this binary is built to trust.
+ */
+static int cert_make(const elpis_meshcert_t *c, const char *context,
+                     char *out, size_t cap)
+{
+    uint8_t sk[32], payload[ELPIS_LICENCE_MAX_TOKEN], sig[64];
+    uint8_t signed_buf[ELPIS_LICENCE_MAX_TOKEN + 32];
+    char b1[256], b2[128];
+    size_t plen, ctxlen = strlen(context);
+
+    hexbytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+             sk, 32);
+    plen = elpis_meshcert_payload(c, payload, sizeof payload);
+    if (plen == 0)
+        return ELPIS_ERR;
+    memcpy(signed_buf, context, ctxlen);
+    memcpy(signed_buf + ctxlen, payload, plen);
+    if (elpis_ed25519_sign(sk, signed_buf, ctxlen + plen, sig) != ELPIS_OK ||
+        elpis_b64url_encode(payload, plen, b1, sizeof b1) == 0 ||
+        elpis_b64url_encode(sig, sizeof sig, b2, sizeof b2) == 0)
+        return ELPIS_ERR;
+    snprintf(out, cap, "%s.%s.%s", ELPIS_MESHCERT_MAGIC, b1, b2);
+    return ELPIS_OK;
+}
+
+static void test_meshcert(void)
+{
+    elpis_meshcert_t c, got;
+    char tok[400];
+    int64_t now = 1790000000;
+    unsigned k;
+
+    section("mesh certificates");
+    memset(&c, 0, sizeof c);
+    elpis_strlcpy(c.org, "Example ISP, AS64500", sizeof c.org);
+    c.serial = 2001;
+    c.issued = now - 86400;
+    c.expires = now + 86400;
+    for (k = 0; k < 32; k++)
+        c.key[k] = (uint8_t)(0xC0 + k);
+
+    CHECK(cert_make(&c, ELPIS_MESHCERT_CONTEXT, tok, sizeof tok) == ELPIS_OK &&
+          strlen(tok) < 255, "a certificate fits a DNS character-string (%u)",
+          (unsigned)strlen(tok));
+    CHECK(elpis_meshcert_parse(tok, now, &got) == ELPIS_OK && got.valid &&
+          !got.expired && got.serial == 2001 && !memcmp(got.key, c.key, 32) &&
+          !strcmp(got.org, c.org), "it verifies, and says what it was issued for");
+    CHECK(elpis_meshcert_parse(tok, now + 2 * 86400, &got) == ELPIS_OK &&
+          got.valid && got.expired, "and says so once it has expired");
+
+    tok[strlen(ELPIS_MESHCERT_MAGIC) + 12] ^= 1;    /* inside the payload */
+    CHECK(elpis_meshcert_parse(tok, now, &got) == ELPIS_ERR && !got.valid,
+          "a changed payload does not verify");
+
+    /* Domain separation: the issuer's signature over the same bytes as a
+     * licence is not a certificate. */
+    CHECK(cert_make(&c, ELPIS_LICENCE_CONTEXT, tok, sizeof tok) == ELPIS_OK &&
+          elpis_meshcert_parse(tok, now, &got) == ELPIS_ERR && !got.valid,
+          "a signature made under the licence context is refused");
+    CHECK(elpis_meshcert_parse("elpis1.AAAA.BBBB", now, &got) == ELPIS_ERR,
+          "and a licence token is not a certificate");
+}
+
 /* ================================================================== */
 int main(void)
 {
@@ -2775,6 +2950,8 @@ int main(void)
     test_mesh_crypto();
     test_noise();
     test_mesh();
+    test_noise_xx();
+    test_meshcert();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
