@@ -976,6 +976,20 @@ static int hash_password(const char *plain)
     return 0;
 }
 
+/*
+ * -V: the version, and the licence issuer key this build carries.  The key is
+ * the one thing a rebuild can lose without a word -- an empty key is only a
+ * different key -- so it is printed where a script can compare it
+ * (contrib/elpis-update.sh does).
+ */
+static void print_version(void)
+{
+    const char *k = elpis_licence_issuer();
+
+    printf("elpis %s\n", ELPIS_VERSION);
+    printf("licence issuer: %s\n", k[0] != '\0' ? k : "none");
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -987,7 +1001,7 @@ static void usage(const char *argv0)
         "  -d        stay in the foreground and log to stderr\n"
         "  -t        check the configuration and exit\n"
         "  -v        increase log verbosity (repeatable)\n"
-        "  -V        print the version and exit\n"
+        "  -V        print the version and the licence issuer key, and exit\n"
         "  -h        this message\n"
         "\n"
         "  --hash-password [PASS]\n"
@@ -1111,7 +1125,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-d"))                           foreground = 1;
         else if (!strcmp(a, "-t"))                           testonly = 1;
         else if (!strcmp(a, "-v"))                           verbose++;
-        else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
+        else if (!strcmp(a, "-V")) { print_version(); return 0; }
         else if (!strcmp(a, "--hash-password")) return hash_password(argv[i + 1]);
         else if (!strcmp(a, "--gen-psk")) { elpis_random_init(); return elpis_mesh_gen_psk(); }
         else if (!strcmp(a, "--mesh-keygen")) { elpis_random_init(); return elpis_mesh_gen_key(); }

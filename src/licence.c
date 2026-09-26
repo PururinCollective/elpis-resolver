@@ -225,6 +225,11 @@ int elpis_licence_enabled(void)
     return ELPIS_LICENCE_ISSUER[0] != '\0';
 }
 
+const char *elpis_licence_issuer(void)
+{
+    return ELPIS_LICENCE_ISSUER;
+}
+
 static int issuer_key(uint8_t pk[32])
 {
     size_t n = 0;

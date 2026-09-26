@@ -108,6 +108,21 @@ Pass these on the make command line, for example `make OPT="-O2"`.
 Keep `-fno-strict-aliasing` when you replace `OPT`. It is in the default,
 and it is what the code is built and tested with.
 
+Settings every build of a tree should get go in `local.mk` at the top of it,
+one `NAME = value` a line. make reads it on every run and git ignores it, so
+it survives `git pull`, and it reaches builds that do not have your shell's
+environment: `sudo make install`, and [elpis-update](../contrib/elpis-update.sh)
+running as root. A value on the make command line still wins.
+
+```
+LICENCE_ISSUER = 6cd740f1...dd6315
+```
+
+That matters most for `LICENCE_ISSUER`. Set in `.bashrc` alone, it is gone
+under sudo, and the build that results carries no issuer key and rejects every
+licence, with nothing to say so. `elpis -V` prints the key a binary carries,
+or `none`.
+
 ## Tuning for your CPU
 
 The default build targets the generic baseline of its architecture, so the

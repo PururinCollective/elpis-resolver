@@ -5,6 +5,7 @@
 
 # Local overrides
 /elpis.local.conf
+/local.mk
 core
 core.*
 

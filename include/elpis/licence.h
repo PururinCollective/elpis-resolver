@@ -74,6 +74,8 @@ int         elpis_edition_from_name(const char *s, elpis_edition_t *out);
 
 /* True when this build carries an issuer key and can check a licence. */
 int elpis_licence_enabled(void);
+/* That key, as the 64 hex digits it was built with; "" when there is none. */
+const char *elpis_licence_issuer(void);
 
 /*
  * Decode and verify a token.  Fills `out` either way: on failure `valid` is 0

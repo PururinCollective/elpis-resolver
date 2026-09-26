@@ -1,6 +1,13 @@
 # Elpis Resolver -- portable C99 recursive DNS resolver
 # SPDX-License-Identifier: see LICENSE
 
+# Settings of your own for every build: LICENCE_ISSUER above all, which a
+# build under sudo, or by contrib/elpis-update.sh as root, would otherwise lose
+# with your shell's environment -- quietly, since an empty issuer is just a
+# different issuer.  One `NAME = value` per line; git ignores the file, so a
+# pull leaves it alone.  A value on the make command line still wins.
+-include local.mk
+
 PROG      := elpis
 # Build outputs land in bin/, which is ignored by git, so a working tree stays
 # clean across `git pull` and the usual `make clean && make`.

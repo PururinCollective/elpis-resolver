@@ -14,6 +14,16 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**A build keeps its licence issuer key.** `LICENCE_ISSUER` set only in a
+shell's environment was lost under `sudo make install` and by `elpis-update`,
+which runs as root, and the result silently rejected every licence. make now
+reads `local.mk` at the top of the tree, which git ignores, so the setting
+reaches every build. `elpis -V` prints the issuer key a binary carries, or
+`none`, and `elpis-update` will not install a build whose key differs from the
+one it replaces: it puts the old binary back and restarts nothing, unless
+`ALLOW_ISSUER_CHANGE=yes`. It now also puts the old binary back when a build
+fails or rejects the config. See [Compiling](docs/COMPILING.md#build-variables).
+
 **A Mesh Network window on the status page.** Four tabs: **General** (this
 instance, how peers are let in, lists, lookups and its cache digest),
 **Trackers** (each bridge's status and last error, peer exchange and local

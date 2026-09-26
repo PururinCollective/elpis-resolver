@@ -112,7 +112,25 @@ public half in [include/elpis/licence.h](../include/elpis/licence.h):
 ```
 
 and rebuild the binaries you distribute. `make LICENCE_ISSUER=<hex>` does the
-same for a one-off build.
+same for a one-off build. For a tree you build from again and again, such as a
+server that pulls updates, put it in `local.mk` at the top of the tree instead,
+where git leaves it alone and a build under sudo still finds it:
+
+```bash
+echo 'LICENCE_ISSUER = 6cd740f1...dd6315' > local.mk
+```
+
+`elpis -V` says which key a binary carries:
+
+```
+elpis 2.0.2
+licence issuer: 6cd740f1...dd6315
+```
+
+[elpis-update](../contrib/elpis-update.sh) checks it too: a new build that
+carries a different key from the one it replaces, usually none because the
+setting did not reach it, is not installed. The old binary stays and nothing is
+restarted.
 
 **`issuer.key` is the whole system.** Anyone holding it can mint licences every
 binary you have shipped will believe, and the only remedy is a new key, which
