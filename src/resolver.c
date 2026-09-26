@@ -25,7 +25,8 @@
 #include "elpis/simd.h"
 
 static void task_finish(elpis_task_t *t);
-static void cache_store_answer(elpis_task_t *t);
+static int  cache_store_answer(elpis_task_t *t);
+static int  entry_src(const elpis_task_t *t);
 static void note_refresh_outcome(elpis_task_t *t);
 
 /* ================================================================== */
@@ -1322,6 +1323,7 @@ static void peer_verify_start(elpis_task_t *t)
     r->qclass      = t->qclass;
     r->prefetch    = 1;
     r->peer_verify = 1;
+    r->peer_src    = t->peer_src;
     r->client_do   = t->client_do;
     r->client_cd   = t->client_cd;
     elpis_stat_inc(&t->w->stats.prefetches, 1);
@@ -1384,6 +1386,9 @@ int elpis_task_peer_answer(elpis_task_t *t, const elpis_msg_t *m)
             (void)accept_rr(t, secs[i], m, &rr);
         }
     }
+    if (t->peer_src == ELPIS_MSRC_OWN)
+        t->peer_src = ELPIS_MSRC_PEER_ANY;
+    t->peer_answer = 1;
     peer_verify_start(t);
     t->rcode = ELPIS_RC_NOERROR;
     t->sec = ELPIS_SEC_INSECURE;    /* not ours to vouch for: no AD */
@@ -2403,10 +2408,22 @@ static void task_finish(elpis_task_t *t)
      * name whose prebuilt response has expired permanently on the slow path,
      * reassembling the same records on every query.
      */
-    if (t->rcode == ELPIS_RC_NOERROR && t->sec != ELPIS_SEC_BOGUS)
-        cache_store_answer(t);
-    else if (t->prefetch)
+    if (t->rcode == ELPIS_RC_NOERROR && t->sec != ELPIS_SEC_BOGUS) {
+        /*
+         * Checking a peer's answer: ours replacing it confirms it; nothing
+         * worth storing counts as nothing found.  It is the peer's
+         * answer the verdict is on, so only while it is still there.
+         */
+        int was_peers = t->peer_verify && entry_src(t) == (int)t->peer_src;
+        if (cache_store_answer(t)) {
+            if (was_peers)
+                elpis_mesh_verdict(t->peer_src, 1);
+        } else if (t->peer_verify) {
+            note_refresh_outcome(t);
+        }
+    } else if (t->prefetch || t->peer_verify) {
         note_refresh_outcome(t);
+    }
 
     /*
      * Completion callbacks run for parent-less tasks too: priming and cache
@@ -2463,6 +2480,34 @@ static void task_finish(elpis_task_t *t)
     elpis_task_free(t);
 }
 
+/* The message cache's key for the task's question. */
+static void task_mkey(const elpis_task_t *t, uint8_t folded[ELPIS_MAX_NAME],
+                      elpis_mkey_t *k)
+{
+    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
+    elpis_simd_lower(folded, folded, t->orig_qname.len);
+
+    k->qname    = folded;
+    k->qnamelen = t->orig_qname.len;
+    k->qtype    = t->orig_qtype;
+    k->qclass   = t->qclass;
+    k->kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
+                            (t->client_cd ? ELPIS_MK_CD : 0u));
+    elpis_mkey_hash(k);
+}
+
+/* Where the cached entry for the task's question came from; -1: none. */
+static int entry_src(const elpis_task_t *t)
+{
+    uint8_t folded[ELPIS_MAX_NAME];
+    elpis_mstate_t st;
+    elpis_mkey_t k;
+
+    task_mkey(t, folded, &k);
+    return elpis_mcache_seed_ex(t->w->ctx->mcache, &k, 0, &st) ? (int)st.src
+                                                               : -1;
+}
+
 /*
  * A background refresh finished without producing anything cacheable.  Tell
  * the message cache, so it can wait longer before the next attempt and, if an
@@ -2473,43 +2518,40 @@ static void note_refresh_outcome(elpis_task_t *t)
     elpis_mkey_t k;
     uint8_t folded[ELPIS_MAX_NAME];
 
-    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
-    elpis_simd_lower(folded, folded, t->orig_qname.len);
-
-    k.qname    = folded;
-    k.qnamelen = t->orig_qname.len;
-    k.qtype    = t->orig_qtype;
-    k.qclass   = t->qclass;
-    k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
-                           (t->client_cd ? ELPIS_MK_CD : 0u));
-    elpis_mkey_hash(&k);
+    task_mkey(t, folded, &k);
 
     /*
      * Our own resolution of what a peer answered came back with no answer --
      * a bogus signature, a name that is gone.  The peer's answer is not ours
      * to keep serving on its say-so: drop it, and the next query resolves
-     * for real.
+     * for real.  Only if it is still that peer's: an answer of our own that
+     * has taken its place in the meantime stays.
      */
     if (t->peer_verify) {
         static ELPIS_TLS uint64_t last_note;
         uint64_t now = elpis_cached_now_ms();
-        char nb[ELPIS_MAX_NAME * 4];
+        char nb[ELPIS_MAX_NAME * 4], peer[64];
+        /* NOERROR here is an answer with nothing in it worth keeping. */
+        const char *why = t->rcode == ELPIS_RC_NOERROR
+                              ? "nothing to keep" : elpis_rcode_name(t->rcode);
 
-        elpis_mcache_del(t->w->ctx->mcache, &k);
+        if (!elpis_mcache_del_src(t->w->ctx->mcache, &k, t->peer_src))
+            return;
+        elpis_mesh_verdict(t->peer_src, 0);
         elpis_meshq_distrust(elpis_mesh_qhash(folded, t->orig_qname.len,
                                               t->orig_qtype,
                                               t->client_do ? ELPIS_MK_DO : 0u));
-        if (elpis_tm_enabled)
+        if (elpis_tm_enabled) {
+            elpis_mesh_src_name(t->peer_src, peer, sizeof peer);
             elpis_mesh_event(ELPIS_MESH_EV_DROPPED, 0,
                              elpis_name_str(&t->orig_qname, nb, sizeof nb),
-                             t->orig_qtype, "", 0, 0,
-                             elpis_rcode_name(t->rcode));
+                             t->orig_qtype, peer, 0, 0, why);
+        }
         if (now - last_note >= 60000u) {
             last_note = now;
             elpis_info("mesh: a peer's answer for %s %s was not confirmed "
                        "here (%s); dropped", elpis_name_str(&t->orig_qname,
-                       nb, sizeof nb), elpis_type_name(t->orig_qtype),
-                       elpis_rcode_name(t->rcode));
+                       nb, sizeof nb), elpis_type_name(t->orig_qtype), why);
         }
         return;
     }
@@ -2545,7 +2587,7 @@ static void note_refresh_outcome(elpis_task_t *t)
  * carried RRSIGs, so the first such client got a clean answer and everyone
  * after it was served signatures it had not asked for, out of the cache.
  */
-static void cache_store_answer(elpis_task_t *t)
+static int cache_store_answer(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
     const elpis_conf_t *c = &w->ctx->conf;
@@ -2559,24 +2601,24 @@ static void cache_store_answer(elpis_task_t *t)
     /* Background refreshes and warm-ups must land in the cache too; that is
      * their job. */
     if (!t->has_client && !t->prefetch && !t->warmup && t->parent == NULL)
-        return;
+        return 0;
     if (t->ans.n == 0 && t->rcode == ELPIS_RC_NOERROR)
-        return;
+        return 0;
 
     ttl = elpis_rrlist_min_ttl(&t->ans, 0);
     if (ttl == 0)
-        return;
+        return 0;
 
     elpis_bld_init(&b, w->txbuf, ELPIS_MAX_MSG, w->ctab, 1);
     elpis_bld_track_ttl(&b, w->ttl_off, w->ttl_val, 4096);
     if (elpis_bld_header(&b, 0, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA)) != ELPIS_OK)
-        return;
+        return 0;
 
     memcpy(folded, t->orig_qname.d, t->orig_qname.len);
     elpis_simd_lower(folded, folded, t->orig_qname.len);
     if (elpis_bld_question_raw(&b, folded, t->orig_qname.len,
                                t->orig_qtype, t->qclass) != ELPIS_OK)
-        return;
+        return 0;
     qend = b.len;
 
     for (i = 0; i < t->ans.n; i++) {
@@ -2589,11 +2631,11 @@ static void cache_store_answer(elpis_task_t *t)
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;
         if (elpis_bld_rr_begin(&b, &on, rr->type, rr->klass, rr->ttl, &rdpos) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_bytes(&b, elpis_trr_rd(&t->ans, i), rr->rdlen) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_rr_end(&b, rdpos) != ELPIS_OK)
-            return;
+            return 0;
         elpis_bld_count(&b, ELPIS_SEC_ANSWER, 1);
     }
     ns_off = b.len;
@@ -2608,11 +2650,11 @@ static void cache_store_answer(elpis_task_t *t)
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;
         if (elpis_bld_rr_begin(&b, &on, rr->type, rr->klass, rr->ttl, &rdpos) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_bytes(&b, elpis_trr_rd(&t->ans, i), rr->rdlen) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_rr_end(&b, rdpos) != ELPIS_OK)
-            return;
+            return 0;
         elpis_bld_count(&b, ELPIS_SEC_AUTHORITY, 1);
     }
     ar_off = b.len;
@@ -2627,17 +2669,17 @@ static void cache_store_answer(elpis_task_t *t)
         if (elpis_trr_get_name(&t->ans, i, &on) != ELPIS_OK)
             continue;
         if (elpis_bld_rr_begin(&b, &on, rr->type, rr->klass, rr->ttl, &rdpos) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_bytes(&b, elpis_trr_rd(&t->ans, i), rr->rdlen) != ELPIS_OK)
-            return;
+            return 0;
         if (elpis_bld_rr_end(&b, rdpos) != ELPIS_OK)
-            return;
+            return 0;
         elpis_bld_count(&b, ELPIS_SEC_ADDITIONAL, 1);
     }
 
     elpis_bld_finish(&b);
     if (b.overflow)
-        return;
+        return 0;
 
     k.qname    = folded;
     k.qnamelen = t->orig_qname.len;
@@ -2647,10 +2689,12 @@ static void cache_store_answer(elpis_task_t *t)
                            (t->client_cd ? ELPIS_MK_CD : 0));
     elpis_mkey_hash(&k);
 
-    elpis_mcache_store(w->ctx->mcache, &k, w->txbuf, b.len, qend,
-                       w->ttl_off, w->ttl_val, b.nttl, ns_off, ar_off,
-                       t->rcode,
-                       (uint16_t)(t->sec == ELPIS_SEC_SECURE ? ELPIS_FLAG_AD : 0),
-                       t->sec, ttl, c->serve_stale,
-                       (uint32_t)(elpis_cached_now_ms() - t->start_ms));
+    return elpis_mcache_store(w->ctx->mcache, &k, w->txbuf, b.len, qend,
+                              w->ttl_off, w->ttl_val, b.nttl, ns_off, ar_off,
+                              t->rcode,
+                              (uint16_t)(t->sec == ELPIS_SEC_SECURE ? ELPIS_FLAG_AD : 0),
+                              t->sec, ttl, c->serve_stale,
+                              (uint32_t)(elpis_cached_now_ms() - t->start_ms),
+                              t->peer_answer ? t->peer_src : ELPIS_MSRC_OWN)
+           == ELPIS_OK;
 }

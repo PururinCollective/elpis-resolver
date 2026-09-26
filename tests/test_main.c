@@ -1918,15 +1918,16 @@ static void test_task_ceiling(void)
  * A minimal cached answer for `name`: the question and one A record, the
  * way cache_store_answer() lays a response out for the message cache.
  */
-static int mc_put(elpis_cache_t *mc, const char *name, uint16_t qtype,
-                  uint16_t qclass, uint8_t kflags, unsigned rcode,
-                  uint32_t cost_ms)
+static int mc_put_ex(elpis_cache_t *mc, const char *name, uint16_t qtype,
+                     uint16_t qclass, uint8_t kflags, unsigned rcode,
+                     uint32_t cost_ms, elpis_sec_t sec, uint32_t ttl,
+                     uint8_t src)
 {
     elpis_name_t n;
     elpis_mkey_t k;
     uint8_t wire[512];
     size_t len, qend;
-    uint32_t toff, tval = 300;
+    uint32_t toff, tval = ttl;
 
     if (elpis_name_from_text(&n, name) != ELPIS_OK)
         return ELPIS_ERR;
@@ -1957,8 +1958,15 @@ static int mc_put(elpis_cache_t *mc, const char *name, uint16_t qtype,
     k.kflags   = kflags;
     elpis_mkey_hash(&k);
     return elpis_mcache_store(mc, &k, wire, len, qend, &toff, &tval, 1, len,
-                              len, rcode, 0, ELPIS_SEC_INSECURE, 300, 0,
-                              cost_ms);
+                              len, rcode, 0, sec, ttl, 0, cost_ms, src);
+}
+
+static int mc_put(elpis_cache_t *mc, const char *name, uint16_t qtype,
+                  uint16_t qclass, uint8_t kflags, unsigned rcode,
+                  uint32_t cost_ms)
+{
+    return mc_put_ex(mc, name, qtype, qclass, kflags, rcode, cost_ms,
+                     ELPIS_SEC_INSECURE, 300, ELPIS_MSRC_OWN);
 }
 
 static void mc_key(elpis_mkey_t *k, elpis_name_t *n, const char *name,
@@ -2856,6 +2864,271 @@ static void test_noise_xx(void)
  * Mesh certificates, signed here with the test issuer -- RFC 8032's
  * published vector 1, which this binary is built to trust.
  */
+
+/* ================================================================== */
+/*
+ * A response as a peer hands one over: the question and one record in the
+ * answer section, or with `soa` set none and the zone's SOA in authority
+ * (NODATA).  `flags` carries the rcode and TC.
+ */
+static size_t am_make(uint8_t *buf, size_t cap, const char *qname,
+                      uint16_t qtype, uint16_t flags, const char *owner,
+                      uint16_t rtype, uint16_t rclass, uint32_t ttl, int soa)
+{
+    static const uint8_t v4[4] = { 192, 0, 2, 1 };
+    static const uint8_t v6[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 1 };
+    elpis_bld_t b;
+    elpis_name_t q, o, t;
+    size_t rdpos;
+
+    elpis_name_from_text(&q, qname);
+    elpis_bld_init(&b, buf, cap, NULL, 0);
+    elpis_bld_header(&b, 0, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA | flags));
+    elpis_bld_question(&b, &q, qtype, ELPIS_CLASS_IN);
+    if (!soa) {
+        elpis_name_from_text(&o, owner);
+        elpis_bld_rr_begin(&b, &o, rtype, rclass, ttl, &rdpos);
+        if (rtype == ELPIS_T_AAAA)
+            elpis_bld_bytes(&b, v6, sizeof v6);
+        else if (rtype == ELPIS_T_CNAME) {
+            elpis_name_from_text(&t, "target.example.net.");
+            elpis_bld_name_raw(&b, &t);
+        } else
+            elpis_bld_bytes(&b, v4, sizeof v4);
+        elpis_bld_rr_end(&b, rdpos);
+        elpis_bld_count(&b, ELPIS_SEC_ANSWER, 1);
+    } else {
+        elpis_name_from_text(&o, owner);
+        elpis_bld_rr_begin(&b, &o, ELPIS_T_SOA, rclass, ttl, &rdpos);
+        elpis_name_from_text(&t, "ns.example.");
+        elpis_bld_name_raw(&b, &t);
+        elpis_name_from_text(&t, "hostmaster.example.");
+        elpis_bld_name_raw(&b, &t);
+        elpis_bld_u32(&b, 1);
+        elpis_bld_u32(&b, 7200);
+        elpis_bld_u32(&b, 900);
+        elpis_bld_u32(&b, 1209600);
+        elpis_bld_u32(&b, 300);
+        elpis_bld_rr_end(&b, rdpos);
+        elpis_bld_count(&b, ELPIS_SEC_AUTHORITY, 1);
+    }
+    elpis_bld_finish(&b);
+    return b.overflow ? 0 : b.len;
+}
+
+static void mc_count_src7(const elpis_mview_t *v, void *arg)
+{
+    if (v->src == 7)
+        (*(unsigned *)arg)++;
+}
+
+static int am_store(elpis_cache_t *mc, const elpis_conf_t *cf,
+                    const char *qname, uint16_t qtype, uint16_t flags,
+                    const char *owner, uint16_t rtype, uint16_t rclass,
+                    uint32_t ttl, int soa, uint8_t kflags)
+{
+    uint8_t buf[1024];
+    size_t n = am_make(buf, sizeof buf, qname, qtype, flags, owner, rtype,
+                       rclass, ttl, soa);
+    return elpis_mesh_answer_store(mc, cf, buf, n, kflags, 7);
+}
+
+static void test_mesh_answers(void)
+{
+    elpis_cache_t *a, *b;
+    elpis_conf_t cf;
+    elpis_mserve_t info;
+    elpis_mstate_t st;
+    elpis_mkey_t k;
+    elpis_name_t n;
+    elpis_msg_t m;
+    uint8_t buf[ELPIS_MESH_ANSWER_MAX], out[1024];
+    size_t len = 0, olen = 0;
+    int drop = 0;
+
+    section("mesh answers");
+    elpis_conf_defaults(&cf);
+    a = elpis_mcache_new(4u * 1024u * 1024u, 4);
+    b = elpis_mcache_new(4u * 1024u * 1024u, 4);
+    CHECK(a != NULL && b != NULL, "two message caches");
+    if (a == NULL || b == NULL)
+        return;
+
+    /* What may be handed over. */
+    mc_put_ex(a, "plain.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 300, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "signed.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_SECURE, 300, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "unchecked.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_UNCHECKED, 300, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "second.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 300, 3);
+    mc_put_ex(a, "short.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 8, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "gone.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NXDOMAIN, 40, ELPIS_SEC_INSECURE, 300, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "mail.example.", ELPIS_T_MX, ELPIS_CLASS_IN, 0,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 300, ELPIS_MSRC_OWN);
+    mc_put_ex(a, "plain.example.", ELPIS_T_A, ELPIS_CLASS_IN, ELPIS_MK_CD,
+              ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 300, ELPIS_MSRC_OWN);
+
+    mc_key(&k, &n, "plain.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_OK,
+          "our own unsigned answer goes to a peer");
+    CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_RESPONSE, &drop) == ELPIS_OK &&
+          m.hdr.ancount == 1 && m.qtype == ELPIS_T_A &&
+          !(m.hdr.flags & ELPIS_FLAG_AD),
+          "as a whole response, without AD");
+    mc_key(&k, &n, "signed.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "a signed one does not");
+    mc_key(&k, &n, "unchecked.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor one never validated");
+    mc_key(&k, &n, "second.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor one a peer gave us");
+    mc_key(&k, &n, "short.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor one about to expire");
+    mc_key(&k, &n, "gone.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor an NXDOMAIN");
+    mc_key(&k, &n, "mail.example.", ELPIS_T_MX, 0);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor a type other than A, AAAA and HTTPS");
+    mc_key(&k, &n, "plain.example.", ELPIS_T_A, ELPIS_MK_CD);
+    CHECK(elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len) == ELPIS_ENOTFOUND,
+          "nor one asked with CD");
+
+    /* Across, and served as the peer's. */
+    mc_key(&k, &n, "plain.example.", ELPIS_T_A, 0);
+    elpis_mesh_answer_export(a, &k, buf, sizeof buf, &len);
+    CHECK(elpis_mesh_answer_store(b, &cf, buf, len, 0, 7) == ELPIS_OK,
+          "the peer's answer is taken");
+    CHECK(elpis_mcache_seed_ex(b, &k, 0, &st) == 1 && st.src == 7 &&
+          st.ttl_left > 0 && st.ttl_left < 300,
+          "marked as the peer's, a second less to live");
+    memset(&info, 0, sizeof info);
+    CHECK(elpis_mcache_serve(b, &k, 1, n.d, ELPIS_FLAG_QR, sizeof out, 3600,
+                             30, 0, out, sizeof out, &olen, &info) == ELPIS_OK &&
+          info.src == 7 && info.sec == ELPIS_SEC_INSECURE &&
+          !(elpis_get16(out + 2) & ELPIS_FLAG_AD),
+          "served without AD");
+    CHECK(info.want_prefetch, "the first client served it starts its check");
+    CHECK(elpis_mcache_serve(b, &k, 1, n.d, ELPIS_FLAG_QR, sizeof out, 3600,
+                             30, 0, out, sizeof out, &olen, &info) == ELPIS_OK &&
+          !info.want_prefetch, "and the next one, straight after, does not");
+    CHECK(elpis_mesh_answer_store(b, &cf, buf, len, 0, 8) == ELPIS_EREFUSED,
+          "a second peer's answer for it is not taken");
+    CHECK(elpis_mcache_del_src(b, &k, 8) == 0 &&
+          elpis_mcache_seed_ex(b, &k, 0, &st) == 1 && st.src == 7,
+          "nor can a check on another peer's answer drop it");
+
+    /* Our own replaces it, and a check finding nothing then drops nothing. */
+    mc_put(b, "plain.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+           ELPIS_RC_NOERROR, 40);
+    CHECK(elpis_mcache_seed_ex(b, &k, 0, &st) == 1 && st.src == ELPIS_MSRC_OWN,
+          "our own answer replaces the peer's");
+    CHECK(elpis_mcache_del_src(b, &k, 7) == 0 &&
+          elpis_mcache_seed_ex(b, &k, 0, &st) == 1,
+          "and a failed check on the peer's leaves ours");
+    CHECK(elpis_mesh_answer_store(b, &cf, buf, len, 0, 7) == ELPIS_EREFUSED,
+          "a peer's never replaces a live one of ours");
+    CHECK(mc_put_ex(b, "plain.example.", ELPIS_T_A, ELPIS_CLASS_IN, 0,
+                    ELPIS_RC_NOERROR, 40, ELPIS_SEC_INSECURE, 300, 9)
+              == ELPIS_EREFUSED &&
+          elpis_mcache_seed_ex(b, &k, 0, &st) == 1 && st.src == ELPIS_MSRC_OWN,
+          "not even stored straight into the cache");
+    mc_key(&k, &n, "second.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mcache_del_src(a, &k, 3) == 1 &&
+          elpis_mcache_seed_ex(a, &k, 0, &st) == 0,
+          "a failed check drops the peer's answer");
+
+    /* What a received answer has to be. */
+    CHECK(am_store(b, &cf, "www.Site.Example.", ELPIS_T_A, 0,
+                   "www.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_OK,
+          "an A record");
+    mc_key(&k, &n, "www.site.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mcache_seed_ex(b, &k, 0, &st) == 1 && st.src == 7,
+          "kept under the folded name");
+    CHECK(am_store(b, &cf, "v6.site.example.", ELPIS_T_AAAA, 0,
+                   "v6.site.example.", ELPIS_T_AAAA, ELPIS_CLASS_IN, 300, 0,
+                   ELPIS_MK_DO) == ELPIS_OK,
+          "an AAAA, for a client that sets DO");
+    CHECK(am_store(b, &cf, "cdn.site.example.", ELPIS_T_A, 0,
+                   "cdn.site.example.", ELPIS_T_CNAME, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_OK,
+          "a CNAME for an A");
+    CHECK(am_store(b, &cf, "nohttps.site.example.", ELPIS_T_HTTPS, 0,
+                   "site.example.", 0, ELPIS_CLASS_IN, 300, 1, 0) == ELPIS_OK,
+          "NODATA, with the zone's SOA");
+    CHECK(am_store(b, &cf, "long.site.example.", ELPIS_T_A, 0,
+                   "long.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 86400, 0, 0)
+              == ELPIS_OK, "a long TTL");
+    mc_key(&k, &n, "long.site.example.", ELPIS_T_A, 0);
+    CHECK(elpis_mcache_seed_ex(b, &k, 0, &st) == 1 &&
+          st.ttl_left <= ELPIS_MESH_ANSWER_TTL_MAX,
+          "stands in for ours %u s at most (%u)",
+          (unsigned)ELPIS_MESH_ANSWER_TTL_MAX, (unsigned)st.ttl_left);
+
+    CHECK(am_store(b, &cf, "nx.site.example.", ELPIS_T_A, ELPIS_RC_NXDOMAIN,
+                   "site.example.", 0, ELPIS_CLASS_IN, 300, 1, 0) == ELPIS_EFORMAT,
+          "never an NXDOMAIN");
+    CHECK(am_store(b, &cf, "sf.site.example.", ELPIS_T_A, ELPIS_RC_SERVFAIL,
+                   "sf.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor a SERVFAIL");
+    CHECK(am_store(b, &cf, "empty.site.example.", ELPIS_T_A, 0,
+                   "empty.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 1, 0)
+              != ELPIS_EFORMAT, "(control: NODATA for an A is fine)");
+    CHECK(am_store(b, &cf, "mx.site.example.", ELPIS_T_MX, 0,
+                   "mx.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor an MX question");
+    CHECK(am_store(b, &cf, "tc.site.example.", ELPIS_T_A, ELPIS_FLAG_TC,
+                   "tc.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor a truncated one");
+    CHECK(am_store(b, &cf, "brief.site.example.", ELPIS_T_A, 0,
+                   "brief.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 3, 0, 0)
+              == ELPIS_EFORMAT, "nor one about to expire");
+    CHECK(am_store(b, &cf, "other.site.example.", ELPIS_T_A, 0,
+                   "elsewhere.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor one whose answer is for another name");
+    CHECK(am_store(b, &cf, "mx2.site.example.", ELPIS_T_A, 0,
+                   "mx2.site.example.", ELPIS_T_MX, ELPIS_CLASS_IN, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor one with records of another type");
+    CHECK(am_store(b, &cf, "ch.site.example.", ELPIS_T_A, 0,
+                   "ch.site.example.", ELPIS_T_A, ELPIS_CLASS_CH, 300, 0, 0)
+              == ELPIS_EFORMAT, "nor another class");
+    {
+        /* NOERROR, no records, no SOA: not NODATA, just nothing. */
+        size_t l = am_make(buf, sizeof buf, "bare.site.example.", ELPIS_T_A,
+                           0, "site.example.", 0, ELPIS_CLASS_IN, 300, 1);
+        elpis_put16(buf + 8, 0);
+        CHECK(elpis_mesh_answer_store(b, &cf, buf, l, 0, 7) == ELPIS_EFORMAT,
+              "nor an empty answer without an SOA");
+        l = am_make(buf, sizeof buf, "cd.site.example.", ELPIS_T_A, 0,
+                    "cd.site.example.", ELPIS_T_A, ELPIS_CLASS_IN, 300, 0);
+        CHECK(elpis_mesh_answer_store(b, &cf, buf, l, ELPIS_MK_CD, 7) ==
+                  ELPIS_EFORMAT, "nor one for a CD question");
+        CHECK(elpis_mesh_answer_store(b, &cf, buf, l, 0, ELPIS_MSRC_OWN) ==
+                  ELPIS_EFORMAT, "and never stored as our own");
+        CHECK(elpis_mesh_answer_store(b, &cf, buf, l - 2u, 0, 7) ==
+                  ELPIS_EFORMAT, "nor a cut-off message");
+    }
+
+    {
+        unsigned peers = 0;
+        elpis_mcache_walk(b, mc_count_src7, &peers);
+        CHECK(peers == 6, "the walk shows whose each entry is (%u of the "
+              "peer's)", peers);
+    }
+
+    elpis_cache_free(a);
+    elpis_cache_free(b);
+}
+
 static int cert_make(const elpis_meshcert_t *c, const char *context,
                      char *out, size_t cap)
 {
@@ -2950,6 +3223,7 @@ int main(void)
     test_mesh_crypto();
     test_noise();
     test_mesh();
+    test_mesh_answers();
     test_noise_xx();
     test_meshcert();
 

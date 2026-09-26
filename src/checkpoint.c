@@ -861,6 +861,7 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
 
     while (s->credit >= unit && s->next < l->n) {
         const elpis_ckpt_ent_t *e = &l->ent[s->next];
+        elpis_mstate_t st;
         elpis_mkey_t k;
         elpis_name_t n;
         elpis_task_t *t;
@@ -870,7 +871,9 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
             break;
 
         ent_key_m(l, e, &k);
-        if (elpis_mcache_seed(w->ctx->mcache, &k, warmup_pop(e))) {
+        st.src = ELPIS_MSRC_OWN;
+        if (elpis_mcache_seed_ex(w->ctx->mcache, &k, warmup_pop(e), &st) &&
+            st.src == ELPIS_MSRC_OWN) {
             s->next += s->stride;       /* a client, or a job before, got there first */
             s->cached++;
             continue;
@@ -887,6 +890,12 @@ static void warmup_tick(elpis_loop_t *lp, elpis_timer_t *tm)
         t->qclass    = ELPIS_CLASS_IN;
         t->warmup    = 1;
         t->warm_pop  = warmup_pop(e);
+        /* A mesh peer's answer is standing in: this resolution is the check
+         * on it, and replaces it or drops it (resolver.c). */
+        if (st.src != ELPIS_MSRC_OWN) {
+            t->peer_verify = 1;
+            t->peer_src    = st.src;
+        }
         t->client_do = (e->kflags & ELPIS_MK_DO) ? 1u : 0u;
         t->client_cd = (e->kflags & ELPIS_MK_CD) ? 1u : 0u;
         t->done_cb   = warmup_done;

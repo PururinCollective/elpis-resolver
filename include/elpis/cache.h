@@ -68,11 +68,23 @@ void *elpis_cache_peek_begin(elpis_cache_t *c, uint64_t hash, const void *key,
  */
 typedef void (*elpis_cache_carry_fn)(void *entry, const void *old);
 void  elpis_cache_set_carry(elpis_cache_t *c, elpis_cache_carry_fn fn);
+/*
+ * Also under the write lock, before the carry: non-zero when the entry
+ * already there should stay and the new one be dropped instead.
+ */
+typedef int (*elpis_cache_keep_fn)(const void *old, const void *entry);
+void  elpis_cache_set_keep(elpis_cache_t *c, elpis_cache_keep_fn fn);
 
 /* Takes ownership of `entry` (whose header is already filled in).  Replaces
- * any existing entry with the same key. */
+ * any existing entry with the same key, unless the keep hook says otherwise:
+ * then `entry` is freed and ELPIS_EREFUSED returned. */
 int   elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key);
 int   elpis_cache_remove(elpis_cache_t *c, uint64_t hash, const void *key);
+/* Remove the entry for `key` only if `pred` says so, judged under the write
+ * lock: ELPIS_OK when it went, ELPIS_ENOTFOUND otherwise. */
+typedef int (*elpis_cache_pred_fn)(const void *entry, const void *arg);
+int   elpis_cache_remove_if(elpis_cache_t *c, uint64_t hash, const void *key,
+                            elpis_cache_pred_fn pred, const void *arg);
 void  elpis_cache_flush(elpis_cache_t *c);
 
 /* Remove expired entries; `budget` bounds the work per call. */

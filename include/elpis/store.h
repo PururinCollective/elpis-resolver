@@ -46,9 +46,21 @@ typedef struct {
     unsigned truncated : 1;
     unsigned dropped_ar: 1;
     unsigned dropped_ns: 1;
-    unsigned want_prefetch : 1; /* nearly expired; refresh it      */
+    unsigned want_prefetch : 1; /* nearly expired, or a peer's: refresh it */
+    uint8_t  src;               /* ELPIS_MSRC_OWN, or the peer it came from */
     uint16_t ancount, nscount, arcount;
 } elpis_mserve_t;
+
+/*
+ * Where an entry came from.  Own is this instance's own resolution; anything
+ * else is a mesh peer's answer (mesh.c), not yet confirmed here, and the
+ * number says which peer.  A peer's answer is never served stale, and the
+ * first client it is served to starts a refresh that replaces it with our own
+ * or, if that finds nothing, drops it.  It never replaces a live answer of
+ * our own, and it is never passed on to another peer.
+ */
+#define ELPIS_MSRC_OWN      0u
+#define ELPIS_MSRC_PEER_ANY 255u    /* a peer's, not known which */
 
 elpis_cache_t *elpis_mcache_new(uint64_t bytes, unsigned shards);
 
@@ -100,7 +112,8 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms);
+                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms,
+                       uint8_t src);
 
 /*
  * Popularity: how many times clients asked, the miss that stored an entry
@@ -121,8 +134,28 @@ uint8_t  elpis_pop_from_hits(uint64_t hits);
  * entry for `k`, 0 when there is none.
  */
 int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop);
+/* The same, and where the entry came from and how long it has left. */
+typedef struct {
+    uint8_t  src;
+    uint32_t ttl_left;          /* seconds; 0 once it is stale     */
+} elpis_mstate_t;
+int elpis_mcache_seed_ex(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop,
+                         elpis_mstate_t *st);
 /* Drop the entry for `k`, if there is one. */
 void elpis_mcache_del(elpis_cache_t *c, const elpis_mkey_t *k);
+/* Drop it only if it is still the one `src` gave: 1 when it went. */
+int  elpis_mcache_del_src(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t src);
+
+/*
+ * The whole response for `k` as it stands, for handing to a peer: id 0, the
+ * question in its folded form, TTLs counted down, no AD (the far side judges
+ * that for itself).  Not a lookup: no hit is counted, no popularity bumped,
+ * no refresh asked for.  ELPIS_ENOTFOUND when there is no live entry,
+ * ELPIS_ETRUNC when it does not fit in `outcap`.
+ */
+int elpis_mcache_export(elpis_cache_t *c, const elpis_mkey_t *k,
+                        uint8_t *out, size_t outcap, size_t *outlen,
+                        elpis_mserve_t *info);
 
 /* What elpis_mcache_walk() shows of each entry. */
 typedef struct {
@@ -134,6 +167,8 @@ typedef struct {
     uint16_t       ancount;
     uint32_t       ttl_left;    /* seconds; 0 once it is stale     */
     uint8_t        pop;
+    uint8_t        src;         /* ELPIS_MSRC_OWN, or a peer's     */
+    uint8_t        sec;         /* elpis_sec_t                     */
     uint16_t       cost_ms;
 } elpis_mview_t;
 

@@ -606,6 +606,15 @@ static void json_mesh(buf_t *b)
     bputs(b, ",\"found\":");  bputu(b, v.found);
     bputs(b, ",\"used\":");   bputu(b, v.used);
     bputs(b, ",\"served\":"); bputu(b, v.served);
+    bputs(b, "},\"answers\":{\"on\":"); bputb(b, v.answers);
+    bputs(b, ",\"asked\":");    bputu(b, v.answers_asked);
+    bputs(b, ",\"in\":");       bputu(b, v.answers_in);
+    bputs(b, ",\"had\":");      bputu(b, v.answers_had);
+    bputs(b, ",\"rejected\":"); bputu(b, v.answers_rejected);
+    bputs(b, ",\"out\":");      bputu(b, v.answers_out);
+    bputs(b, ",\"ok\":");       bputu(b, v.answers_ok);
+    bputs(b, ",\"bad\":");      bputu(b, v.answers_bad);
+    bputs(b, ",\"purged\":");   bputu(b, v.answers_purged);
 
     bputs(b, "},\"peers\":[");
     for (i = 0; i < v.npeers; i++) {
@@ -629,6 +638,10 @@ static void json_mesh(buf_t *b)
         bputs(b, ",\"used\":");  bputu(b, p->used);
         bputs(b, ",\"served\":"); bputu(b, p->served);
         bputs(b, ",\"dbits\":"); bputu(b, p->digest_bits);
+        bputs(b, ",\"ain\":");   bputu(b, p->answers_in);
+        bputs(b, ",\"aout\":");  bputu(b, p->answers_out);
+        bputs(b, ",\"aok\":");   bputu(b, p->answers_ok);
+        bputs(b, ",\"abad\":");  bputu(b, p->answers_bad);
         bputs(b, "}");
     }
     bputs(b, "],\"known\":[");

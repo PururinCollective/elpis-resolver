@@ -5,10 +5,14 @@
  * A restarted instance with no checkpoint, or one just spun up, asks the
  * instances it can reach for the questions their clients ask most, merges
  * those with its own checkpoint if it has one, and warms the lot before its
- * clients ask.  Names only, never answers: every name is resolved and
- * validated here as usual, so the worst a peer can do is spend some of this
- * instance's warm-up on names nobody here wanted.  It is how an operator with
- * a no-log policy gets a warm restart without writing anything to disk.
+ * clients ask.  Every name is resolved and validated here as usual, so the
+ * worst a peer's list can do is spend some of this instance's warm-up on
+ * names nobody here wanted.  It is how an operator with a no-log policy gets
+ * a warm restart without writing anything to disk.
+ *
+ * With mesh-share-answers, a nearby peer also hands over its answers to the
+ * unsigned names on its list, which stand in, without AD, until the warm-up
+ * or the first client to be served one resolves it here (meshans.c).
  *
  * Peers are found through the bridges named in mesh-peer:, through the peers
  * those know (peer exchange), and on the local segment by multicast.  Every
@@ -79,6 +83,7 @@ typedef struct {
     uint32_t     key_id;
     uint32_t     rtt_ms;
     uint8_t      node[16];      /* for elpis_mesh_tally()               */
+    uint8_t      src;           /* how the message cache marks its answers */
 } elpis_mesh_pick_t;
 
 /* The question as the digests hash it: folded name, type, DO/CD bits. */
@@ -91,6 +96,51 @@ int      elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out);
 #define ELPIS_MESH_T_FOUND 1u
 #define ELPIS_MESH_T_USED  2u
 void     elpis_mesh_tally(const uint8_t node[16], unsigned what);
+
+/*
+ * A peer's answer checked here (resolver.c): `ok` when our own replaced it,
+ * 0 when ours found nothing and it was dropped.  `src` is the peer as the
+ * message cache marks its answers (ELPIS_MSRC_*).  A peer whose answers fail
+ * too often has the rest of them dropped and is sent no more questions.
+ * Any thread.
+ */
+void     elpis_mesh_verdict(uint8_t src, int ok);
+/* The peer behind `src` -- the last to have that number -- by address, for
+ * the status page. */
+void     elpis_mesh_src_name(uint8_t src, char *out, size_t cap);
+
+/* ---- answers with a list (meshans.c) ------------------------------- */
+/*
+ * The largest answer handed over, and the least time it must have left when
+ * sent, and when it arrives.  Short: a CDN's answers live for seconds, and
+ * one with ten left still covers the first moments after a restart, which
+ * are what it is for.
+ */
+#define ELPIS_MESH_ANSWER_MAX        4096u
+#define ELPIS_MESH_ANSWER_MIN_TTL    10u
+#define ELPIS_MESH_ANSWER_MIN_TTL_IN 5u
+/* The longest a peer's answer stands in for ours. */
+#define ELPIS_MESH_ANSWER_TTL_MAX    600u
+/* The most answers asked of one peer. */
+#define ELPIS_MESH_ANSWERS_MAX       4096u
+
+/* The types an answer is shared for: A, AAAA and HTTPS. */
+int  elpis_mesh_answer_type(uint16_t qtype);
+/*
+ * Our answer for `k`, if it may go to a peer: our own, proved unsigned,
+ * NOERROR (records, or NODATA), not asked with CD, and with a while left.
+ * ELPIS_ENOTFOUND for anything else.
+ */
+int  elpis_mesh_answer_export(elpis_cache_t *mc, const elpis_mkey_t *k,
+                              uint8_t *out, size_t cap, size_t *len);
+/*
+ * A peer's answer (`kflags`: the DO bit its key had), checked and stored as
+ * `src`'s: ELPIS_OK when it went in, ELPIS_EREFUSED when there is a live
+ * answer already, ELPIS_EFORMAT when it is not one we take.
+ */
+int  elpis_mesh_answer_store(elpis_cache_t *mc, const elpis_conf_t *c,
+                             const uint8_t *wire, size_t len, uint8_t kflags,
+                             uint8_t src);
 
 /*
  * A lookup datagram: u32 key id, a 12-byte nonce, then the sealed
@@ -126,6 +176,8 @@ int      elpis_mesh_lq_open(const uint8_t key[32], const uint8_t *dg, size_t n,
 #define ELPIS_MESH_F_KEY    0x040u     /* we hold its lookup key         */
 #define ELPIS_MESH_F_DIGEST 0x080u     /* we hold its cache digest       */
 #define ELPIS_MESH_F_SHARES 0x100u     /* it answers list requests       */
+#define ELPIS_MESH_F_ANSWERS 0x200u    /* we asked it for answers        */
+#define ELPIS_MESH_F_REFUSED 0x400u    /* too many of them failed        */
 
 #define ELPIS_MESH_VIEW_PEERS 64u
 #define ELPIS_MESH_VIEW_KNOWN 48u
@@ -145,6 +197,9 @@ typedef struct {
     uint64_t asked, found, used;       /* our lookups to it              */
     uint64_t served;                   /* its lookups we answered        */
     uint32_t digest_bits;
+    /* Answers with its list: stored here, and how the checks went. */
+    uint64_t answers_in, answers_ok, answers_bad;
+    uint64_t answers_out;              /* ours it got                    */
 } elpis_mesh_peer_view_t;
 
 /* An address to dial, and where the mesh is with it. */
@@ -175,7 +230,7 @@ typedef struct {
     unsigned nlisten;
     char     listen[ELPIS_MESH_MAX_LISTEN][64];
     unsigned nbridges;
-    int      share, lookup, gathering;
+    int      share, lookup, gathering, answers;
     uint32_t share_min_hits, lookup_rtt, max_peers;
     /* discovery */
     int      lsd, lsd4, lsd6;          /* configured, and joined per family */
@@ -189,6 +244,9 @@ typedef struct {
     uint32_t digest_bits, digest_entries, digest_age_s;
     uint32_t lq_key_age_s;
     uint64_t asked, found, used, served;
+    /* answers with lists */
+    uint64_t answers_asked, answers_in, answers_had, answers_rejected;
+    uint64_t answers_out, answers_ok, answers_bad, answers_purged;
     unsigned npeers;
     elpis_mesh_peer_view_t  peers[ELPIS_MESH_VIEW_PEERS];
     unsigned nknown;
@@ -208,6 +266,9 @@ void elpis_mesh_view(elpis_mesh_view_t *out);
 #define ELPIS_MESH_EV_LIST_OUT 4u      /* we sent ours                   */
 #define ELPIS_MESH_EV_WARM    5u       /* a warm-up finished             */
 #define ELPIS_MESH_EV_DROPPED 6u       /* a peer's answer not confirmed  */
+#define ELPIS_MESH_EV_ANSWERS_IN  7u   /* a peer's answers arrived       */
+#define ELPIS_MESH_EV_ANSWERS_OUT 8u   /* we sent ours                   */
+#define ELPIS_MESH_EV_REFUSED 9u       /* a peer's answers are no longer taken */
 
 #define ELPIS_MESH_R_USED     1u       /* its answer reached the client  */
 #define ELPIS_MESH_R_LATE     2u       /* it had it; ours came first     */

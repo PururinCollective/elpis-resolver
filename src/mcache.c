@@ -36,7 +36,7 @@ typedef struct {
      * padding, so an entry is no bigger for them.
      */
     uint8_t  pop;
-    uint8_t  pad;
+    uint8_t  src;          /* ELPIS_MSRC_OWN, or the mesh peer it came from */
     uint16_t cost_ms;
     /*
      * Trailing payload, in this order:
@@ -102,13 +102,30 @@ static void ment_carry(void *entry, const void *old)
         e->cost_ms = o->cost_ms;
 }
 
+/*
+ * A peer's answer stands in until this instance has its own, and never in
+ * place of one: over a live entry of our own it is dropped.  One of our own
+ * always goes in, and so does a peer's over another peer's or over one of
+ * ours that has run out.
+ */
+static int ment_keep(const void *old, const void *entry)
+{
+    const ment_t *o = (const ment_t *)old;
+    const ment_t *e = (const ment_t *)entry;
+
+    return e->src != ELPIS_MSRC_OWN && o->src == ELPIS_MSRC_OWN &&
+           elpis_cached_now_s() - o->stored < o->ttl;
+}
+
 elpis_cache_t *elpis_mcache_new(uint64_t bytes, unsigned shards)
 {
     elpis_cache_t *c;
 
     c = elpis_cache_new("msg-cache", bytes, shards, ment_free, ment_eq);
-    if (c != NULL)
+    if (c != NULL) {
         elpis_cache_set_carry(c, ment_carry);
+        elpis_cache_set_keep(c, ment_keep);
+    }
     return c;
 }
 
@@ -181,7 +198,8 @@ uint8_t elpis_pop_from_hits(uint64_t hits)
     return v;
 }
 
-int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop)
+int elpis_mcache_seed_ex(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop,
+                         elpis_mstate_t *st)
 {
     unsigned shard;
     ment_t *e;
@@ -192,13 +210,33 @@ int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop)
     /* The same benign race as the bump itself: at worst a count is lost. */
     if (e->pop < pop)
         e->pop = pop > ELPIS_POP_MAX ? (uint8_t)ELPIS_POP_MAX : pop;
+    if (st != NULL) {
+        uint32_t elapsed = elpis_cached_now_s() - e->stored;
+        st->src = e->src;
+        st->ttl_left = elapsed >= e->ttl ? 0u : e->ttl - elapsed;
+    }
     elpis_cache_read_end(c, shard);
     return 1;
+}
+
+int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop)
+{
+    return elpis_mcache_seed_ex(c, k, pop, NULL);
 }
 
 void elpis_mcache_del(elpis_cache_t *c, const elpis_mkey_t *k)
 {
     (void)elpis_cache_remove(c, k->hash, k);
+}
+
+static int ment_from(const void *entry, const void *arg)
+{
+    return ((const ment_t *)entry)->src == *(const uint8_t *)arg;
+}
+
+int elpis_mcache_del_src(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t src)
+{
+    return elpis_cache_remove_if(c, k->hash, k, ment_from, &src) == ELPIS_OK;
 }
 
 typedef struct {
@@ -224,6 +262,8 @@ static void mwalk_one(const void *entry, void *arg)
         v.ttl_left = elapsed >= e->ttl ? 0u : e->ttl - elapsed;
     }
     v.pop      = e->pop;
+    v.src      = e->src;
+    v.sec      = e->sec;
     v.cost_ms  = e->cost_ms;
     w->fn(&v, w->arg);
 }
@@ -273,14 +313,30 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
     rem = remaining_ttl(e, now, &elapsed);
     if (rem == 0 && elapsed > e->ttl + serve_stale)
         goto out;          /* too stale even for RFC 8767 */
+    /* Serving stale is for an answer we once had and cannot get again; a
+     * peer's we never confirmed is not that. */
+    if (rem == 0 && e->src != ELPIS_MSRC_OWN)
+        goto out;
 
     memset(info, 0, sizeof *info);
     info->rcode = e->rcode;
     info->sec   = (elpis_sec_t)e->sec;
     info->ttl   = rem;
     info->stale = (rem == 0) ? 1u : 0u;
+    info->src   = e->src;
 
     pop_bump(e);
+
+    /*
+     * A peer's answer: the first client to get it starts the refresh that
+     * checks it, whatever prefetch is set to.  A few seconds between tries,
+     * so a check still running is not started twice over.
+     */
+    if (e->src != ELPIS_MSRC_OWN &&
+        (e->prefetch_at == 0 || now - e->prefetch_at >= 5u)) {
+        e->prefetch_at = now;
+        info->want_prefetch = 1;
+    }
 
     /*
      * Ask for a refresh when the entry is stale or nearly so.  The timestamp
@@ -425,7 +481,8 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms)
+                       uint32_t ttl, uint32_t max_stale, uint32_t cost_ms,
+                       uint8_t src)
 {
     ment_t *e;
     size_t bloblen, sz;
@@ -520,8 +577,65 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
 
     memcpy(ment_blob(e), wire + qend, bloblen);
     e->cost_ms = (uint16_t)(cost_ms > 0xFFFFu ? 0xFFFFu : cost_ms);
+    e->src     = src;
 
     return elpis_cache_insert(c, e, k);
+}
+
+int elpis_mcache_export(elpis_cache_t *c, const elpis_mkey_t *k,
+                        uint8_t *out, size_t outcap, size_t *outlen,
+                        elpis_mserve_t *info)
+{
+    unsigned shard, i;
+    ment_t *e;
+    uint32_t elapsed, rem;
+    const uint32_t *toff, *tval;
+    size_t qoff, total;
+    int rc = ELPIS_ENOTFOUND;
+
+    e = (ment_t *)elpis_cache_peek_begin(c, k->hash, k, &shard);
+    if (e == NULL)
+        return ELPIS_ENOTFOUND;
+    rem = remaining_ttl(e, elpis_cached_now_s(), &elapsed);
+    if (rem == 0)
+        goto out;
+    qoff = ELPIS_HDR_LEN + (size_t)e->qnamelen + 4u;
+    total = qoff + e->bloblen;
+    if (total > outcap) {
+        rc = ELPIS_ETRUNC;
+        goto out;
+    }
+
+    elpis_put16(out, 0);
+    elpis_put16(out + 2, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA |
+                                    (e->rcode & ELPIS_RCODE_MASK)));
+    elpis_put16(out + 4,  1);
+    elpis_put16(out + 6,  e->ancount);
+    elpis_put16(out + 8,  e->nscount);
+    elpis_put16(out + 10, e->arcount);
+    memcpy(out + ELPIS_HDR_LEN, ment_qname(e), e->qnamelen);
+    elpis_put16(out + ELPIS_HDR_LEN + e->qnamelen, e->qtype);
+    elpis_put16(out + ELPIS_HDR_LEN + e->qnamelen + 2u, e->qclass);
+    memcpy(out + qoff, ment_blob(e), e->bloblen);
+    toff = ment_ttloff(e);
+    tval = ment_ttlval(e);
+    for (i = 0; i < e->nttl; i++)
+        elpis_put32(out + qoff + toff[i],
+                    tval[i] > elapsed ? tval[i] - elapsed : 1u);
+
+    memset(info, 0, sizeof *info);
+    info->rcode   = e->rcode;
+    info->sec     = (elpis_sec_t)e->sec;
+    info->ttl     = rem;
+    info->src     = e->src;
+    info->ancount = e->ancount;
+    info->nscount = e->nscount;
+    info->arcount = e->arcount;
+    *outlen = total;
+    rc = ELPIS_OK;
+out:
+    elpis_cache_read_end(c, shard);
+    return rc;
 }
 
 /*

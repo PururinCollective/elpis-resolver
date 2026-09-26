@@ -60,6 +60,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->mesh_share         = 1;
     c->mesh_lsd           = 1;
     c->mesh_lookup        = 0;
+    c->mesh_share_answers = 0;
     c->mesh_lookup_rtt    = 10;
     c->mesh_share_min_hits = 5;
     c->mesh_max_peers     = 16;
@@ -423,6 +424,8 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("mesh-share")) return want_bool(&p, key, val, &c->mesh_share);
     if (KEY("mesh-lsd"))   return want_bool(&p, key, val, &c->mesh_lsd);
     if (KEY("mesh-lookup")) return want_bool(&p, key, val, &c->mesh_lookup);
+    if (KEY("mesh-share-answers"))
+        return want_bool(&p, key, val, &c->mesh_share_answers);
     if (KEY("mesh-require-licence") || KEY("mesh-require-license"))
         return want_bool(&p, key, val, &c->mesh_require_licence);
     if (KEY("mesh-key")) {
@@ -881,6 +884,10 @@ void elpis_conf_dump(const elpis_conf_t *c)
                    (int)c->mesh_lsd, (unsigned)c->mesh_max_peers);
         if (c->mesh_lookup)
             elpis_info("  mesh-lookup: peers within %u ms",
+                       (unsigned)c->mesh_lookup_rtt);
+        if (c->mesh_share_answers)
+            elpis_info("  mesh-share-answers: unsigned answers with lists, "
+                       "from and to peers within %u ms",
                        (unsigned)c->mesh_lookup_rtt);
         if (c->mesh_require_licence)
             elpis_info("  mesh-require-licence: every peer shows a certified key");

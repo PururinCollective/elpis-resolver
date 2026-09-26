@@ -100,6 +100,7 @@ typedef struct {
     uint8_t      mesh_share;               /* answer peers' list requests */
     uint8_t      mesh_lsd;                 /* find peers on the segment   */
     uint8_t      mesh_lookup;              /* ask peers' caches on a miss */
+    uint8_t      mesh_share_answers;       /* answers with lists, unsigned */
     /* Licensed meshes: every peer proves a key the licence issuer certified
      * for this organisation (mesh.c, licence.h). */
     uint8_t      mesh_require_licence;

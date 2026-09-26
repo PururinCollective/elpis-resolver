@@ -42,6 +42,7 @@ struct elpis_cache {
     elpis_cache_free_fn  freefn;
     elpis_cache_eq_fn    eqfn;
     elpis_cache_carry_fn carryfn;
+    elpis_cache_keep_fn  keepfn;
     uint64_t             bytes_max;
 };
 
@@ -375,6 +376,11 @@ void elpis_cache_set_carry(elpis_cache_t *c, elpis_cache_carry_fn fn)
     c->carryfn = fn;
 }
 
+void elpis_cache_set_keep(elpis_cache_t *c, elpis_cache_keep_fn fn)
+{
+    c->keepfn = fn;
+}
+
 int elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key)
 {
     elpis_chdr_t *h = hdr_of(entry);
@@ -388,6 +394,11 @@ int elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key)
 
     old = find_slot(c, s, h->hash, key, &idx);
     if (old != NULL) {
+        if (c->keepfn != NULL && c->keepfn(old, entry)) {
+            pthread_rwlock_unlock(&s->lock);
+            c->freefn(entry);
+            return ELPIS_EREFUSED;
+        }
         if (c->carryfn != NULL)
             c->carryfn(entry, old);
         s->bytes -= hdr_of(old)->size;
@@ -453,6 +464,25 @@ int elpis_cache_insert(elpis_cache_t *c, void *entry, const void *key)
     s->inserts++;
     pthread_rwlock_unlock(&s->lock);
     return ELPIS_OK;
+}
+
+int elpis_cache_remove_if(elpis_cache_t *c, uint64_t hash, const void *key,
+                         elpis_cache_pred_fn pred, const void *arg)
+{
+    unsigned si = shard_of(c, hash);
+    shard_t *s = &c->sh[si];
+    uint32_t idx;
+    void *e;
+    int rc = ELPIS_ENOTFOUND;
+
+    pthread_rwlock_wrlock(&s->lock);
+    e = find_slot(c, s, hash, key, &idx);
+    if (e != NULL && pred(e, arg)) {
+        slot_drop(c, s, idx);
+        rc = ELPIS_OK;
+    }
+    pthread_rwlock_unlock(&s->lock);
+    return rc;
 }
 
 int elpis_cache_remove(elpis_cache_t *c, uint64_t hash, const void *key)

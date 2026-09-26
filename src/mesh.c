@@ -20,6 +20,12 @@
  *   PEERS      u8 count, then per peer: u8 4 or 6, the address, u16 port,
  *              and its node id
  *   PING/PONG  u64 token
+ *   LOOKUP_KEY u32 key id, the key: for lookups (see meshq.c)
+ *   DIGEST     a Bloom filter of the cache, in parts
+ *   INFO       host name, version and build, each u8 length and text
+ *   ANSWERS_REQ  u32 most answers wanted
+ *   ANSWERS    entries: u8 DO bit, u16 length, a DNS response
+ *   ANSWERS_END  u32 entries sent
  *
  * A message of a type this version does not know is skipped, so a later one
  * can add more.
@@ -80,7 +86,8 @@
 
 enum { MSG_LIST_REQ = 1, MSG_LIST_PART = 2, MSG_LIST_END = 3, MSG_PEERS = 4,
        MSG_PING = 5, MSG_PONG = 6, MSG_LOOKUP_KEY = 7, MSG_DIGEST = 8,
-       MSG_INFO = 9 };
+       MSG_INFO = 9, MSG_ANSWERS_REQ = 10, MSG_ANSWERS = 11,
+       MSG_ANSWERS_END = 12 };
 /* S_CONFIRM: a licensed dialler's handshake is done on its side, and it
  * waits for the first word back to know its certificate was taken. */
 enum { S_CONNECTING, S_HANDSHAKE, S_CONFIRM, S_UP };
@@ -104,6 +111,13 @@ typedef struct session {
     unsigned          shares    : 1;   /* its hello says it answers    */
     unsigned          has_listen: 1;
     unsigned          has_want  : 1;   /* we dialled a known node id    */
+    /* Answers with its list: asked for, all in, and ours sent to it; and
+     * whether too many of its answers failed their check here. */
+    unsigned          answers_asked : 1;
+    unsigned          answers_done  : 1;
+    unsigned          answers_served: 1;
+    unsigned          refused   : 1;
+    uint8_t           src;             /* how the message cache marks its answers */
     elpis_addr_t      addr;            /* the far end of the socket     */
     elpis_addr_t      dial;            /* what we dialled, as initiator */
     elpis_addr_t      listen;          /* where it takes connections    */
@@ -127,6 +141,7 @@ typedef struct session {
     uint64_t          up_ms;
     uint64_t          rx_bytes, tx_bytes;
     uint64_t          names_in, names_out, served;
+    uint64_t          answers_in, answers_had, answers_rejected, answers_out;
     uint64_t          last_digest;
     /* A digest arriving in parts. */
     uint8_t          *dg;
@@ -158,6 +173,8 @@ static uint64_t     g_pex_sent, g_pex_heard, g_pex_learned;
 static uint64_t     g_lists_asked, g_lists_in, g_names_in, g_lists_out, g_names_out;
 static uint64_t     g_digests_sent, g_digests_in;
 static uint32_t     g_digest_entries;
+static uint64_t     g_answers_asked, g_answers_in, g_answers_had;
+static uint64_t     g_answers_rejected, g_answers_out, g_answers_purged;
 static uint8_t      g_psk[32];
 static uint8_t      g_node[16];
 static int          g_lfd[ELPIS_MESH_MAX_LISTEN];
@@ -216,6 +233,8 @@ typedef struct {
     uint8_t     *bloom;
     uint32_t     bloom_bits;
     uint8_t      bloom_k;
+    uint8_t      src;              /* the session's, for its answers    */
+    unsigned     refused : 1;      /* its answers failed too often      */
     /* Workers count their lookups to it here, atomically, under the read
      * lock: for the status page only. */
     uint64_t     asked, found, used;
@@ -1294,8 +1313,11 @@ static void ptab_up(const session_t *s)
         memset(&g_ptab[i], 0, sizeof g_ptab[i]);
         memcpy(g_ptab[i].node, s->node, 16);
     }
-    if (i >= 0)
+    if (i >= 0) {
         g_ptab[i].addr = s->listen;
+        g_ptab[i].src = s->src;
+        g_ptab[i].refused = s->refused;
+    }
     pthread_rwlock_unlock(&g_ptab_lock);
 }
 
@@ -1366,7 +1388,8 @@ int elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out)
     pthread_rwlock_rdlock(&g_ptab_lock);
     for (i = 0; i < g_nptab; i++) {
         const ptab_t *p = &g_ptab[i];
-        if (!p->has_key || p->bloom == NULL || p->rtt_ms == 0 || p->rtt_ms > max)
+        if (!p->has_key || p->bloom == NULL || p->rtt_ms == 0 ||
+            p->rtt_ms > max || p->refused)
             continue;
         if (!elpis_bloom_test(p->bloom, p->bloom_bits, p->bloom_k, qhash))
             continue;
@@ -1378,6 +1401,7 @@ int elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out)
         out->addr   = g_ptab[best].addr;
         out->key_id = g_ptab[best].key_id;
         out->rtt_ms = g_ptab[best].rtt_ms;
+        out->src    = g_ptab[best].src;
         memcpy(out->key, g_ptab[best].key, 32);
     }
     pthread_rwlock_unlock(&g_ptab_lock);
@@ -1395,6 +1419,316 @@ void elpis_mesh_tally(const uint8_t node[16], unsigned what)
                                                         &g_ptab[i].asked,
                            1, __ATOMIC_RELAXED);
     pthread_rwlock_unlock(&g_ptab_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/* Answers with a list                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * How the message cache marks a peer's answers: a number for each session,
+ * 1 to 254 (ELPIS_MSRC_PEER_ANY is 255), the next one each time, so one
+ * given up is not handed out again for a long while.  The verdicts on each
+ * number's answers are counted here, by the workers that checked them.
+ */
+#define MESH_SRC_IDS        254u
+/* A peer's answers are taken no more once this many failed their check,
+ * and more than a quarter of those checked. */
+#define MESH_REFUSE_MIN_BAD 10u
+
+static struct {
+    uint64_t ok, bad;
+} g_verdict[256];
+static uint64_t        g_ans_ok, g_ans_bad;
+static pthread_mutex_t g_src_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_src_name[256][64];
+static uint8_t         g_src_last;
+/* Instances whose answers are refused, for as long as this one runs. */
+static uint8_t         g_refused[MESH_MAX_SESSIONS][16];
+static unsigned        g_nrefused;
+
+static uint8_t src_alloc(const session_t *s)
+{
+    unsigned tries;
+
+    for (tries = 0; tries < MESH_SRC_IDS; tries++) {
+        const session_t *o;
+        uint8_t id = (uint8_t)(g_src_last % MESH_SRC_IDS + 1u);
+
+        g_src_last = id;
+        for (o = g_sessions; o != NULL; o = o->next)
+            if (o != s && !o->dead && o->src == id)
+                break;
+        if (o != NULL)
+            continue;
+        __atomic_store_n(&g_verdict[id].ok, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_verdict[id].bad, 0, __ATOMIC_RELAXED);
+        pthread_mutex_lock(&g_src_lock);
+        elpis_strlcpy(g_src_name[id], s->name, sizeof g_src_name[id]);
+        pthread_mutex_unlock(&g_src_lock);
+        return id;
+    }
+    return (uint8_t)ELPIS_MSRC_PEER_ANY;   /* 64 sessions at most: never */
+}
+
+void elpis_mesh_verdict(uint8_t src, int ok)
+{
+    if (src == ELPIS_MSRC_OWN)
+        return;
+    __atomic_add_fetch(ok ? &g_verdict[src].ok : &g_verdict[src].bad, 1,
+                       __ATOMIC_RELAXED);
+    __atomic_add_fetch(ok ? &g_ans_ok : &g_ans_bad, 1, __ATOMIC_RELAXED);
+}
+
+void elpis_mesh_src_name(uint8_t src, char *out, size_t cap)
+{
+    pthread_mutex_lock(&g_src_lock);
+    elpis_strlcpy(out, g_src_name[src], cap);
+    pthread_mutex_unlock(&g_src_lock);
+}
+
+static int node_refused(const uint8_t node[16])
+{
+    unsigned i;
+    for (i = 0; i < g_nrefused; i++)
+        if (memcmp(g_refused[i], node, 16) == 0)
+            return 1;
+    return 0;
+}
+
+static void ptab_refuse(const uint8_t node[16])
+{
+    int i;
+    pthread_rwlock_wrlock(&g_ptab_lock);
+    if ((i = ptab_find(node)) >= 0)
+        g_ptab[i].refused = 1;
+    pthread_rwlock_unlock(&g_ptab_lock);
+}
+
+/*
+ * A peer asked for our answers along with our list.  The same names the list
+ * carries -- asked often enough to share, best first -- and of those the
+ * answers elpis_mesh_answer_export() lets go: our own, proved unsigned,
+ * NOERROR, with a while to live.  An empty end when we keep them to
+ * ourselves, or have sent this session its answers already.
+ */
+static void send_answers(session_t *s, uint32_t want)
+{
+    const elpis_conf_t *c = &g_ctx->conf;
+    elpis_ckpt_list_t l;
+    uint8_t body[MESH_PLAIN_MAX];
+    uint8_t ans[ELPIS_MESH_ANSWER_MAX];
+    uint8_t end[4];
+    size_t used = 0, alen;
+    unsigned i, sent = 0;
+
+    elpis_ckpt_list_init(&l);
+    if (want > ELPIS_MESH_ANSWERS_MAX)
+        want = ELPIS_MESH_ANSWERS_MAX;
+    if (c->mesh_share && c->mesh_share_answers && !s->answers_served &&
+        want > 0) {
+        s->answers_served = 1;
+        /* More names than answers: signed ones and other types drop out. */
+        if (elpis_ckpt_collect(g_ctx->mcache, c->mesh_share_min_hits,
+                               want * 4u, &l) != ELPIS_OK)
+            elpis_ckpt_list_free(&l);
+    }
+
+    for (i = 0; i < l.n && sent < want; i++) {
+        const elpis_ckpt_ent_t *e = &l.ent[i];
+        elpis_mkey_t k;
+
+        k.qname    = elpis_ckpt_name(&l, e);
+        k.qnamelen = e->namelen;
+        k.qtype    = e->qtype;
+        k.qclass   = ELPIS_CLASS_IN;
+        k.kflags   = e->kflags;
+        elpis_mkey_hash(&k);
+        if (elpis_mesh_answer_export(g_ctx->mcache, &k, ans, sizeof ans,
+                                     &alen) != ELPIS_OK)
+            continue;
+        if (used + 3u + alen > sizeof body - 1u) {
+            if (send_msg(s, MSG_ANSWERS, body, used) != ELPIS_OK)
+                goto out;
+            used = 0;
+        }
+        body[used] = e->kflags;
+        elpis_put16(body + used + 1, (uint16_t)alen);
+        memcpy(body + used + 3, ans, alen);
+        used += 3u + alen;
+        sent++;
+    }
+    if (used > 0 && send_msg(s, MSG_ANSWERS, body, used) != ELPIS_OK)
+        goto out;
+    elpis_put32(end, sent);
+    send_msg(s, MSG_ANSWERS_END, end, sizeof end);
+    if (sent > 0) {
+        elpis_info("mesh: sent %u answers to %s", sent, s->name);
+        g_answers_out += sent;
+        s->answers_out += sent;
+        elpis_mesh_event(ELPIS_MESH_EV_ANSWERS_OUT, 0,
+                         "our answers to the unsigned names on our list", 0,
+                         s->name, 0, sent, NULL);
+    }
+out:
+    elpis_ckpt_list_free(&l);
+}
+
+/*
+ * Ask a peer for its answers as well, once its round trip is known: only one
+ * within mesh-lookup-rtt, which in practice is the same site and the same way
+ * out to the internet.  A CDN answers by where the resolver asking it is, and
+ * a far peer's answer would send clients the wrong way.  Only a peer whose
+ * list we asked for, and so only in the startup window.
+ */
+static void ask_answers(session_t *s)
+{
+    const elpis_conf_t *c = &g_ctx->conf;
+    uint8_t want[4];
+
+    if (!c->mesh_share_answers || !s->asked || s->answers_asked ||
+        s->refused || s->rtt_ms == 0 || s->rtt_ms > c->mesh_lookup_rtt ||
+        elpis_now_ms() - g_t0 >= MESH_ASK_WINDOW_MS)
+        return;
+    elpis_put32(want, ELPIS_MESH_ANSWERS_MAX);
+    if (send_msg(s, MSG_ANSWERS_REQ, want, sizeof want) == ELPIS_OK) {
+        s->answers_asked = 1;
+        g_answers_asked++;
+    }
+}
+
+/* Its answers go into the cache as they arrive, each checked, each its. */
+static void recv_answers(session_t *s, const uint8_t *p, size_t n)
+{
+    size_t off = 0;
+
+    if (!s->answers_asked || s->answers_done || s->refused)
+        return;
+    elpis_clock_tick();             /* the TTL arithmetic reads it */
+    while (off + 3u <= n) {
+        uint8_t kf = p[off];
+        size_t l = elpis_get16(p + off + 1);
+        int rc;
+
+        if (off + 3u + l > n)
+            break;
+        rc = elpis_mesh_answer_store(g_ctx->mcache, &g_ctx->conf, p + off + 3,
+                                     l, kf, s->src);
+        if (rc == ELPIS_OK) {
+            s->answers_in++;
+            g_answers_in++;
+        } else if (rc == ELPIS_EREFUSED) {
+            s->answers_had++;
+            g_answers_had++;
+        } else {
+            s->answers_rejected++;
+            g_answers_rejected++;
+        }
+        off += 3u + l;
+    }
+}
+
+static void recv_answers_end(session_t *s)
+{
+    char note[48];
+
+    if (!s->answers_asked || s->answers_done)
+        return;
+    s->answers_done = 1;
+    if (s->answers_in + s->answers_had + s->answers_rejected == 0) {
+        elpis_info("mesh: %s had no answers to share", s->name);
+        return;
+    }
+    elpis_info("mesh: %llu answers from %s, served until checked here "
+               "(%llu already here, %llu not taken)",
+               (unsigned long long)s->answers_in, s->name,
+               (unsigned long long)s->answers_had,
+               (unsigned long long)s->answers_rejected);
+    snprintf(note, sizeof note, "%llu not taken",
+             (unsigned long long)s->answers_rejected);
+    elpis_mesh_event(ELPIS_MESH_EV_ANSWERS_IN, 0,
+                     "its answers to unsigned names, until checked here", 0,
+                     s->name, 0,
+                     s->answers_in > 0xFFFFFFFFu ? 0xFFFFFFFFu
+                                                 : (uint32_t)s->answers_in,
+                     s->answers_rejected ? note : NULL);
+}
+
+typedef struct {
+    elpis_ckpt_list_t l;
+    uint8_t           src;
+} purge_t;
+
+static void purge_one(const elpis_mview_t *v, void *arg)
+{
+    purge_t *p = (purge_t *)arg;
+
+    if (v->src == p->src && v->qclass == ELPIS_CLASS_IN)
+        (void)elpis_ckpt_list_add(&p->l, v->qname, v->qnamelen, v->qtype,
+                                  v->kflags, 0, 0);
+}
+
+/* Drop every answer of `src`'s still waiting for its check. */
+static unsigned purge_answers(uint8_t src)
+{
+    purge_t p;
+    unsigned i, n = 0;
+
+    elpis_ckpt_list_init(&p.l);
+    p.src = src;
+    elpis_mcache_walk(g_ctx->mcache, purge_one, &p);
+    for (i = 0; i < p.l.n; i++) {
+        const elpis_ckpt_ent_t *e = &p.l.ent[i];
+        elpis_mkey_t k;
+
+        k.qname    = elpis_ckpt_name(&p.l, e);
+        k.qnamelen = e->namelen;
+        k.qtype    = e->qtype;
+        k.qclass   = ELPIS_CLASS_IN;
+        k.kflags   = e->kflags;
+        elpis_mkey_hash(&k);
+        if (elpis_mcache_del_src(g_ctx->mcache, &k, src))
+            n++;
+    }
+    elpis_ckpt_list_free(&p.l);
+    return n;
+}
+
+/*
+ * Too many of a peer's answers failed their check here: at least
+ * MESH_REFUSE_MIN_BAD, and more than a quarter of those checked.  An honest
+ * peer's fail only when a name breaks between its resolution and ours.  The
+ * rest of its answers, not yet checked, are dropped, and it is asked for no
+ * more, nor sent lookups.  Its list still counts: every name on it is
+ * resolved here anyway.
+ */
+static void check_verdicts(session_t *s)
+{
+    uint64_t ok, bad;
+    unsigned dropped;
+    char note[64];
+
+    if (s->refused || s->src == ELPIS_MSRC_OWN)
+        return;
+    ok  = __atomic_load_n(&g_verdict[s->src].ok, __ATOMIC_RELAXED);
+    bad = __atomic_load_n(&g_verdict[s->src].bad, __ATOMIC_RELAXED);
+    if (bad < MESH_REFUSE_MIN_BAD || bad * 4u <= ok + bad)
+        return;
+    s->refused = 1;
+    if (g_nrefused < MESH_MAX_SESSIONS && !node_refused(s->node))
+        memcpy(g_refused[g_nrefused++], s->node, 16);
+    ptab_refuse(s->node);
+    dropped = purge_answers(s->src);
+    g_answers_purged += dropped;
+    elpis_warn("mesh: %llu of %llu answers from %s failed their check here; "
+               "taking no more of its answers, and dropped the %u not yet "
+               "checked", (unsigned long long)bad,
+               (unsigned long long)(ok + bad), s->name, dropped);
+    snprintf(note, sizeof note, "%llu of %llu failed",
+             (unsigned long long)bad, (unsigned long long)(ok + bad));
+    elpis_mesh_event(ELPIS_MESH_EV_REFUSED, 0,
+                     "its answers: too many failed their check here", 0,
+                     s->name, 0, dropped, note);
 }
 
 static void send_lookup_key(session_t *s)
@@ -1440,7 +1774,8 @@ static void lq_rotate(uint64_t now)
 static int digest_eligible(const elpis_mview_t *v)
 {
     return v->qclass == ELPIS_CLASS_IN && v->rcode == ELPIS_RC_NOERROR &&
-           !(v->kflags & ELPIS_MK_CD) && v->ttl_left >= 3u;
+           !(v->kflags & ELPIS_MK_CD) && v->ttl_left >= 3u &&
+           v->src == ELPIS_MSRC_OWN;
 }
 
 typedef struct {
@@ -1582,6 +1917,7 @@ static void lq_serve(int fd)
         size_t ptlen, rlen = 0;
         elpis_addr_t from;
         elpis_mserve_t info;
+        elpis_mstate_t st;
         elpis_msg_t m;
         elpis_mkey_t k;
         uint32_t id;
@@ -1617,12 +1953,15 @@ static void lq_serve(int fd)
         k.qclass   = ELPIS_CLASS_IN;
         k.kflags   = (uint8_t)(pt[1] & ELPIS_MK_DO);    /* never CD */
         elpis_mkey_hash(&k);
+        /* Only our own answers: one a peer gave us is not passed on. */
         if (g_ctx->conf.mesh_share &&
+            (!elpis_mcache_seed_ex(g_ctx->mcache, &k, 0, &st) ||
+             st.src == ELPIS_MSRC_OWN) &&
             elpis_mcache_serve(g_ctx->mcache, &k, 0, m.qname.d, ELPIS_FLAG_QR,
                                sizeof ans - ELPIS_MESH_LQ_HDR -
                                    ELPIS_MESH_LQ_OVERHEAD,
                                0, 0, 0, ans, sizeof ans, &rlen, &info) == ELPIS_OK &&
-            info.rcode == ELPIS_RC_NOERROR &&
+            info.rcode == ELPIS_RC_NOERROR && info.src == ELPIS_MSRC_OWN &&
             (info.ancount > 0 || info.nscount > 0) &&
             !info.truncated && !info.stale && info.ttl >= 3u)
             found = 1;
@@ -1945,6 +2284,8 @@ static void session_ready(session_t *s)
             if (g_known[i].has_node && !memcmp(g_known[i].node, s->node, 16))
                 s->via |= g_known[i].via;
     }
+    s->src = src_alloc(s);
+    s->refused = node_refused(s->node) ? 1u : 0u;
     ptab_up(s);
     send_lookup_key(s);
 
@@ -2057,6 +2398,7 @@ static void on_frame(session_t *s, const uint8_t *p, size_t n)
                 uint32_t ms = (uint32_t)((now - sent + 999u) / 1000u);
                 s->rtt_ms = s->rtt_ms ? (s->rtt_ms * 3u + ms + 3u) / 4u : ms;
                 ptab_rtt(s->node, s->rtt_ms);
+                ask_answers(s);
             }
         }
         break;
@@ -2069,6 +2411,15 @@ static void on_frame(session_t *s, const uint8_t *p, size_t n)
         break;
     case MSG_INFO:
         recv_info(s, g_rx + 1, plen - 1u);
+        break;
+    case MSG_ANSWERS_REQ:
+        send_answers(s, plen >= 5u ? elpis_get32(g_rx + 1) : 0u);
+        break;
+    case MSG_ANSWERS:
+        recv_answers(s, g_rx + 1, plen - 1u);
+        break;
+    case MSG_ANSWERS_END:
+        recv_answers_end(s);
         break;
     default:
         break;                      /* a later version's message */
@@ -2383,6 +2734,7 @@ static void timers(uint64_t now)
         }
         if (now - s->last_pex >= MESH_PEX_EVERY_MS)
             send_peers(s);
+        check_verdicts(s);
         /*
          * A digest every half minute, to the peers near enough to ask us --
          * the RTT is the same both ways -- and only while answering them.
@@ -2512,6 +2864,7 @@ static void publish_view(uint64_t now)
     v->nbridges = c->n_mesh_peer;
     v->share = c->mesh_share;
     v->lookup = c->mesh_lookup;
+    v->answers = c->mesh_share_answers;
     v->gathering = g_gathering;
     v->share_min_hits = c->mesh_share_min_hits;
     v->lookup_rtt = c->mesh_lookup_rtt;
@@ -2546,6 +2899,14 @@ static void publish_view(uint64_t now)
     v->found  = g_ctx->stats.peer_found;
     v->used   = g_ctx->stats.peer_used;
     v->served = g_ctx->stats.peer_served;
+    v->answers_asked = g_answers_asked;
+    v->answers_in = g_answers_in;
+    v->answers_had = g_answers_had;
+    v->answers_rejected = g_answers_rejected;
+    v->answers_out = g_answers_out;
+    v->answers_ok = __atomic_load_n(&g_ans_ok, __ATOMIC_RELAXED);
+    v->answers_bad = __atomic_load_n(&g_ans_bad, __ATOMIC_RELAXED);
+    v->answers_purged = g_answers_purged;
 
     pthread_rwlock_rdlock(&g_ptab_lock);
     for (s = g_sessions; s != NULL && v->npeers < ELPIS_MESH_VIEW_PEERS; s = s->next) {
@@ -2561,7 +2922,9 @@ static void publish_view(uint64_t now)
         p->port = s->has_listen ? elpis_addr_port(&s->listen) : 0;
         hex8(s->node, p->node);
         p->flags = s->via | (s->shares ? ELPIS_MESH_F_SHARES : 0u) |
-                   (g_licensed ? ELPIS_MESH_F_CERT : 0u);
+                   (g_licensed ? ELPIS_MESH_F_CERT : 0u) |
+                   (s->answers_asked ? ELPIS_MESH_F_ANSWERS : 0u) |
+                   (s->refused ? ELPIS_MESH_F_REFUSED : 0u);
         p->rtt_ms = s->rtt_ms;
         p->up_s = (now - s->up_ms) / 1000u;
         p->cert_serial = s->cert_serial;
@@ -2570,6 +2933,14 @@ static void publish_view(uint64_t now)
         p->names_in = s->names_in;
         p->names_out = s->names_out;
         p->served = s->served;
+        p->answers_in = s->answers_in;
+        p->answers_out = s->answers_out;
+        if (s->src != ELPIS_MSRC_OWN) {
+            p->answers_ok = __atomic_load_n(&g_verdict[s->src].ok,
+                                            __ATOMIC_RELAXED);
+            p->answers_bad = __atomic_load_n(&g_verdict[s->src].bad,
+                                             __ATOMIC_RELAXED);
+        }
         if ((t = ptab_find(s->node)) >= 0) {
             const ptab_t *e = &g_ptab[t];
             if (e->has_key)

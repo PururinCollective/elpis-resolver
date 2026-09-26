@@ -201,10 +201,14 @@ struct elpis_task {
     /*
      * Mesh lookups (meshq.c): a peer's cache has been asked about this; the
      * lookup still in flight; and, on a refresh, that it re-resolves what a
-     * peer answered, so a disagreement drops the peer's answer.
+     * peer answered, so a disagreement drops the peer's answer.  peer_answer:
+     * the answer this task holds is a peer's.  peer_src: which peer, as the
+     * message cache records it (ELPIS_MSRC_*), for both.
      */
     unsigned        peer_asked : 1;
     unsigned        peer_verify : 1;
+    unsigned        peer_answer : 1;
+    uint8_t         peer_src;
     void           *peerq;
     unsigned        dns64_tried : 1;
     unsigned        dns64_synth : 1;

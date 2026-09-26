@@ -21,9 +21,13 @@ static void tcp_close(elpis_tcpconn_t *c);
 static void tcp_resolved(elpis_tcpconn_t *c);
 static void fail_note(const elpis_task_t *t);
 
-/* Kick off a background refresh of the name just served from cache. */
+/*
+ * Kick off a background refresh of the name just served from cache.  When
+ * what was served is a mesh peer's answer (`src`), the refresh is the check
+ * on it: ours replaces it, and finding nothing drops it (resolver.c).
+ */
 static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
-                                 uint8_t kflags)
+                                 uint8_t kflags, uint8_t src)
 {
     elpis_task_t *t;
 
@@ -47,6 +51,10 @@ static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
      */
     t->client_do = (kflags & ELPIS_MK_DO) ? 1u : 0u;
     t->client_cd = (kflags & ELPIS_MK_CD) ? 1u : 0u;
+    if (src != ELPIS_MSRC_OWN) {
+        t->peer_verify = 1;
+        t->peer_src    = src;
+    }
     elpis_stat_inc(&w->stats.prefetches, 1);
     elpis_task_start(t);
 }
@@ -563,7 +571,7 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
      * entry being served stale forever.
      */
     if (info.want_prefetch)
-        elpis_prefetch_start(w, m, kflags);
+        elpis_prefetch_start(w, m, kflags, info.src);
     return 1;
 }
 

@@ -727,7 +727,9 @@ var MESH_FLAGS = [
   [0x020, 'C', 'its certificate checked out'],
   [0x040, 'K', 'we hold its lookup key'],
   [0x080, 'D', 'we hold its cache digest'],
-  [0x100, 'S', 'it shares its list of names']
+  [0x100, 'S', 'it shares its list of names'],
+  [0x200, 'A', 'we asked it for its answers too'],
+  [0x400, 'R', 'its answers are refused: too many failed their check']
 ];
 var MESH_TABS = [['general','General'], ['trackers','Trackers'],
                  ['peers','Peers'], ['content','Content']];
@@ -763,7 +765,7 @@ function meshOff(m){
 }
 
 function meshGeneral(m){
-  var L = m.lookups || {}, li = m.lists || {}, dg = m.digest || {};
+  var L = m.lookups || {}, li = m.lists || {}, dg = m.digest || {}, A = m.answers || {};
   var sec = m.licensed ?
     "certificate " + m.cert + ", " + esc(m.org) :
     "pre-shared key only";
@@ -802,6 +804,18 @@ function meshGeneral(m){
       "<b>they had it</b><span>" + num(L.found) + " (" + pct(L.found, L.asked) + ")</span>" +
       "<b>theirs came first</b><span>" + num(L.used) + " (" + pct(L.used, L.asked) + ")</span>" +
       "<b>answered for peers</b><span>" + num(L.served) + "</span>" +
+    "</div></div>" +
+    "<div><h4>Answers with lists</h4><div class='kv'>" +
+      "<b>sharing answers</b><span>" + onoff(A.on) + "</span>" +
+      "<b>with peers within</b><span>" + num(m.rtt) + " ms</span>" +
+      "<b>peers asked</b><span>" + num(A.asked) + "</span>" +
+      "<b>taken</b><span>" + num(A['in']) + "</span>" +
+      "<b>already here</b><span>" + num(A.had) + "</span>" +
+      "<b>not taken</b><span>" + num(A.rejected) + "</span>" +
+      "<b>confirmed here</b><span>" + num(A.ok) + "</span>" +
+      "<b>dropped</b><span>" + num(A.bad) + (A.purged ? " (and " + num(A.purged) +
+        " from refused peers)" : "") + "</span>" +
+      "<b>sent to peers</b><span>" + num(A.out) + "</span>" +
     "</div></div>" +
     "<div><h4>Our cache digest</h4><div class='kv'>" +
       "<b>names in it</b><span>" + (dg.bits ? num(dg.entries) : dim('none built yet')) + "</span>" +
@@ -875,9 +889,10 @@ function meshPeers(m){
           "<th>flags</th><th>version</th><th class='n'>round trip</th>" +
           "<th class='n'>connected</th><th class='n'>asked / used</th>" +
           "<th class='n'>answered</th><th class='n'>names in / out</th>" +
+          "<th class='n'>answers in / out</th>" +
           "<th class='n'>&#8595; / &#8593;</th></tr>";
   if (!p.length)
-    h += "<tr><td colspan='11' style='color:var(--dim)'>no peer connected</td></tr>";
+    h += "<tr><td colspan='12' style='color:var(--dim)'>no peer connected</td></tr>";
   p.forEach(function(x){
     h += "<tr><td title='node " + esc(x.node) + "'>" + (x.host ? esc(x.host) : dim(esc(x.node))) +
          "</td><td>" + esc(x.addr) + "</td><td class='n'>" + (x.port || dim('-')) +
@@ -887,6 +902,8 @@ function meshPeers(m){
          "</td><td class='n'>" + num(x.asked) + ' / ' + num(x.used) +
          "</td><td class='n'>" + num(x.served) +
          "</td><td class='n'>" + num(x.nin) + ' / ' + num(x.nout) +
+         "</td><td class='n' title='of its answers: " + num(x.aok) +
+           " confirmed here, " + num(x.abad) + " dropped'>" + num(x.ain) + ' / ' + num(x.aout) +
          "</td><td class='n'>" + bytes(x.rx) + ' / ' + bytes(x.tx) + "</td></tr>";
   });
   return h + "</table><div class='legend'>" + MESH_FLAGS.map(function(x){
@@ -895,12 +912,13 @@ function meshPeers(m){
 }
 
 var MESH_KIND = { 1:'asked a peer', 2:'a peer asked', 3:'list received',
-                  4:'list sent', 5:'warm-up done', 6:'not confirmed' };
+                  4:'list sent', 5:'warm-up done', 6:'not confirmed',
+                  7:'answers received', 8:'answers sent', 9:'answers refused' };
 var MESH_RES  = { 1:["used: it came first", 'on'], 2:["had it; ours came first", ''],
                   3:["did not have it", 'warn'], 4:["no reply before ours", ''],
                   5:["answered", 'on'], 6:["not in our cache", ''] };
 var MESH_FILT = [['all','All'], ['asked','Asked'], ['served','Answered'],
-                 ['lists','Lists and warm-ups']];
+                 ['lists','Lists, answers, warm-ups']];
 
 /* Events carry the peer's address; the Peers table knows its name. */
 function meshPeerName(m, addr){
@@ -934,17 +952,22 @@ function meshContent(m, def){
       res = "<span class='pill " + MESH_RES[e.r][1] + "'>" + MESH_RES[e.r][0] + "</span>";
     else if (e.k === 6)
       res = "<span class='pill bad'>dropped: ours said " + esc(e.note) + "</span>";
+    else if (e.k === 9)
+      res = "<span class='pill bad'>" + esc(e.note) + "</span>" +
+            (e.n ? ' ' + num(e.n) + ' dropped' : '');
     else if (e.n)
-      res = num(e.n) + ' names';
+      res = num(e.n) + (e.k === 7 || e.k === 8 ? ' answers' : ' names') +
+            (e.note ? ', ' + esc(e.note) : '');
     if (e.k === 1 || e.k === 5) took = ms(e.us);
     h += "<tr><td>" + new Date(e.at * 1000).toLocaleTimeString() + "</td><td>" +
          MESH_KIND[e.k] + "</td><td title='" + esc(e.name) + "'>" + esc(e.name) +
          "</td><td>" + esc(e.type) + "</td><td>" + (e.peer ? meshPeerName(m, e.peer) : dim('-')) +
          "</td><td>" + res + "</td><td class='n'>" + took + "</td></tr>";
   });
-  return h + "</table><div class='legend'>Names travel between your own " +
-    "instances only. This list is the last 256 exchanges, kept in memory while " +
-    "this page is on and never written anywhere.</div>";
+  return h + "</table><div class='legend'>Names, and with mesh-share-answers " +
+    "the answers to unsigned ones, travel between your own instances only. This " +
+    "list is the last 256 exchanges, kept in memory while this page is on and " +
+    "never written anywhere.</div>";
 }
 
 function viewOf(id){
@@ -1192,7 +1215,7 @@ var VIEWS = [
       "</div>";
   }},
 
-{ id:'mesh', title:'Mesh Network', w:880, h:480, nofit: true,
+{ id:'mesh', title:'Mesh Network', w:980, h:480, nofit: true,
   icon:"<svg viewBox='0 0 24 24'><circle cx='5' cy='6' r='2'/><circle cx='19' cy='6' r='2'/>" +
        "<circle cx='12' cy='18' r='2'/><circle cx='12' cy='10' r='1.5'/>" +
        "<path d='M7 6h10M6 8l5 8M18 8l-5 8M6.5 7.2l4.2 2.1M17.5 7.2l-4.2 2.1M12 11.5V16'/></svg>",

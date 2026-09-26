@@ -30,11 +30,12 @@ those know. One that starts asks the others for the questions their clients ask
 most, merges them with its checkpoint if there is one, and warms the lot.
 Measured with three instances: the only one with clients, restarted with no
 checkpoint, was warm four and a half seconds later, its slowest answer 158 ms
-against 1,065 ms cold. Names only, never answers, and only names asked
-`mesh-share-min-hits` times. Connections are Noise_NNpsk0 over TCP, keyed by
-one PSK from `elpis --gen-psk`: X25519 for forward secrecy, ChaCha20-Poly1305,
-and the PSK mixed into every key, so recorded traffic stays safe from a future
-quantum computer while the key does. See [Mesh](docs/mesh.md).
+against 1,065 ms cold. Lists carry names only, unless `mesh-share-answers` is
+on (below), and only names asked `mesh-share-min-hits` times. Connections are
+Noise_NNpsk0 over TCP, keyed by one PSK from `elpis --gen-psk`: X25519 for
+forward secrecy, ChaCha20-Poly1305, and the PSK mixed into every key, so
+recorded traffic stays safe from a future quantum computer while the key does.
+See [Mesh](docs/mesh.md).
 
 **Instances on one network segment find each other.** With the mesh on,
 `mesh-lsd: yes` (the default) has each instance announce itself by multicast,
@@ -56,6 +57,26 @@ Lookups are UDP sealed with ChaCha20-Poly1305 under per-instance keys handed
 out inside the Noise sessions and replaced hourly, and a peer answers only the
 addresses of its mesh connections. Measured with warm-up off: a second
 instance answered 60 sites with a median of 0 ms against 214 ms cold.
+
+**A restart can take a nearby peer's answers, not only its names.** With
+`mesh-share-answers: yes` on both ends, a restarting instance also asks a peer
+within `mesh-lookup-rtt` for its answers to the names on its list, and serves
+them from the moment they arrive, a few milliseconds after the connection is
+up, instead of after its warm-up reaches each name. Only A, AAAA and HTTPS
+answers the peer's own validator proved unsigned are handed over, so a signed
+name still waits for this instance's answer and AD is never missing where it
+would have been; only NOERROR (records, or NODATA with the SOA), never CD,
+never stale, and only answers the peer resolved itself. Each goes out without
+AD and stands in for ten minutes at most. The warm-up, or the first client
+served it, resolves it here: ours replaces it, and if ours finds nothing it is
+dropped. A peer with more than a quarter of its checked answers failing (ten or
+more) has the rest dropped and is asked for nothing more. Measured on 60 sites
+one second after a restart, the 90th percentile went from 171 ms with names
+only to 24 ms, and from 305 ms to 52 ms with the warm-up slowed to stand in for
+a longer list; all 145 answers taken were confirmed. Off by default. Mesh
+lookups now also pass on only an instance's own answers, never one it got from
+another peer and has not confirmed. See
+[Mesh](docs/mesh.md#answers-with-the-list).
 
 **A mesh can require licensed instances.** With `mesh-require-licence: yes`,
 each instance holds its own key (`elpis --mesh-keygen`) and a certificate for

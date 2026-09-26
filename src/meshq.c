@@ -177,6 +177,7 @@ void elpis_meshq_ask(elpis_task_t *t)
         return;
     }
     q->task = t;
+    t->peer_src = pick.src;         /* whose answer it is, if it is used */
     q->key_id = pick.key_id;
     q->to = pick.addr;
     memcpy(q->node, pick.node, 16);

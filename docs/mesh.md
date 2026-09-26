@@ -97,11 +97,11 @@ different key, on the same segment, was never dialled and never logged.
 
 ## What travels, and when
 
-**Lists carry names, never answers.** Each list entry is a question and two
-numbers: how often it is asked, and how long it took to resolve cold.
-Everything received is resolved and validated on the receiving instance like
-any client query, so the worst a peer can do is spend some of your warm-up on
-names nobody here wanted. (Answers travel only with `mesh-lookup:`, below.)
+**Lists carry names.** Each list entry is a question and two numbers: how
+often it is asked, and how long it took to resolve cold. Everything received is
+resolved and validated on the receiving instance like any client query, so the
+worst a list can do is spend some of your warm-up on names nobody here wanted.
+Answers travel only with `mesh-lookup:` and `mesh-share-answers:`, below.
 
 **Only popular names.** A name goes on a list only after clients asked for it
 `mesh-share-min-hits` times (5 by default), so one person's one-off lookups
@@ -139,7 +139,8 @@ client. A lookup can make an answer sooner and never later.
 - **Only answers a client could be given:** A, AAAA and HTTPS questions, never
   with CD set, and only NOERROR, with records or without (NODATA). Never
   NXDOMAIN, never stale, and never with under three seconds to live; a second
-  is taken off for the trip.
+  is taken off for the trip. Only the peer's own answers, too: one it got from
+  another peer and has not confirmed yet is never passed on.
 - **Trust, then verify.** A peer's answer goes to the client without AD,
   because this instance did not validate it. The same question is then
   resolved here at once, and this instance's own answer replaces the peer's in
@@ -168,6 +169,73 @@ The remaining tail is answers that had gone stale on the first instance, which
 peers never share. Under real traffic a busy instance keeps those refreshed.
 The mesh log line `mesh lookups: asked=… found=… used=… answered-for-peers=…`
 (SIGUSR1) shows how often it pays.
+
+## Answers with the list
+
+With `mesh-share-answers: yes` on both ends, a restarting instance asks a
+nearby peer for its answers as well as its names. They go into the cache as
+they arrive, a few milliseconds after the connection comes up, so a client
+asking in the first seconds gets the peer's answer at once instead of waiting
+for the warm-up to reach its name. Most names are unsigned, so this covers
+most of what a restart would otherwise have to wait for.
+
+- **Only unsigned answers.** A peer hands over an answer only if its own
+  validator proved it unsigned, so DNSSEC could not have protected it anyway.
+  A signed name gets no stand-in and waits for this instance's own answer, so
+  a validating client sees AD exactly where it would have without the mesh. A
+  name that fails validation, such as dnscheck.tools' `badsig` ones, is never
+  a NOERROR answer, so it is never handed over either.
+- **Only what a browser waits on:** A, AAAA and HTTPS, and only NOERROR, with
+  records or as NODATA with the zone's SOA. Never NXDOMAIN, never for a
+  question asked with CD, and never with under ten seconds left.
+- **Only first-hand answers.** A peer hands over only answers it resolved
+  itself. One it got from another peer and has not confirmed is never passed
+  on, by a list or by a lookup, so one bad answer cannot spread through the
+  mesh.
+- **Only from a near peer.** Answers are asked for once the connection's round
+  trip is known to be within `mesh-lookup-rtt`, which in practice means the
+  same site and the same way out to the internet. A CDN answers according to
+  where the resolver asking it is, and a far peer's answer would send your
+  clients to the wrong servers. A peer further away still sends its names.
+- **Checked, then replaced.** A peer's answer goes out without AD, stands in
+  for ten minutes at most, and is never served stale. The warm-up resolves the
+  same names here, and the first client served a peer's answer also starts a
+  check at once. Our own answer replaces the peer's. If ours finds nothing, the
+  peer's is dropped and the question is not asked of peers for ten minutes. A
+  peer's answer never replaces a live answer of our own.
+- **A peer whose answers keep failing is cut off.** Once ten of a peer's
+  answers have failed their check, and they are more than a quarter of those
+  checked, the rest of its answers are dropped, and it is asked for no more
+  answers and sent no more lookups for as long as this instance runs. The log
+  says so:
+  `mesh: 12 of 40 answers from 192.0.2.7:7878 failed their check here; ...`.
+  An honest peer's answer fails only when a name breaks between its
+  resolution and ours.
+
+The check cannot catch a wrong address for a name that does resolve. Two honest
+answers from a CDN often share no address, so a different answer is no sign of
+a forged one, and a forged address lasts until the warm-up or a client's check
+replaces it. That is the same trust `mesh-lookup` gives a peer one name at a
+time, here given to a whole list at once. Turn it on only among instances you
+run, and add `mesh-require-licence` if the PSK might travel further than you
+would like.
+
+Measured on one host. One instance resolved the 60 sites; a second, with it as
+its bridge and no checkpoint, was restarted and asked for all 60 one second
+after it started. With answers it took 145 of the first instance's, and every
+one was confirmed by its own resolution afterwards. The second pair of rows
+slows the warm-up to 20 names a second, so that the 180 questions take nine
+seconds, as a list of 1,800 would at the default `warm-rate`:
+
+| 60 sites (A, AAAA and HTTPS at once) | median | 90th percentile | slowest | within 5 ms |
+|---|---|---|---|---|
+| names only | 0 ms | 171 ms | 901 ms | 51 |
+| names and answers | 0 ms | 24 ms | 651 ms | 52 |
+| names only, warm-up at 20 a second | 22 ms | 305 ms | 903 ms | 26 |
+| names and answers, warm-up at 20 a second | 0 ms | 52 ms | 743 ms | 46 |
+
+The rest of the slow ones are signed names, which get no stand-in by design,
+and CDN answers that had under ten seconds left on the first instance.
 
 ## Encryption
 
@@ -206,7 +274,10 @@ of the Noise specification.
 The status page's **Mesh Network** window shows the mesh as this instance
 sees it, in four tabs: General, Trackers (bridges, peer exchange and local
 discovery), Peers (host name, address, port, how each was found, version) and
-Content (the recent names asked and answered, lists and warm-ups). Peers send
+Content (the recent names asked and answered, lists, answers and warm-ups).
+General counts the answers taken from peers, confirmed and dropped; Peers shows
+each peer's, flags `A` for a peer asked for its answers and `R` for one whose
+answers are refused. Peers send
 each other their host name and version for it, in a message older versions
 skip. Content keeps the last 256 exchanges in memory, and only while the status
 page is on: it is the same kind of information as the Top names window, and
@@ -297,6 +368,9 @@ encrypted, and inside it is a type byte and a body:
 | 7 `LOOKUP_KEY` | u32 key id, 32-byte key: the key to seal lookups to the sender with |
 | 8 `DIGEST` | u32 sequence, u32 bits, u8 probes, u32 total bytes, u32 offset, then that part of the Bloom filter |
 | 9 `INFO` | three strings, each a length byte and its bytes: host name, version, build |
+| 10 `ANSWERS_REQ` | u32: the most answers wanted |
+| 11 `ANSWERS` | entries: u8 DO bit, u16 length, a DNS response with its question |
+| 12 `ANSWERS_END` | u32: how many entries were sent |
 
 A message of an unknown type is skipped, so a later version can add more. A
 connection that sends nothing for two minutes is closed; `PING` goes every
