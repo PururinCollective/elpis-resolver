@@ -187,10 +187,33 @@ ProxyPassReverse /winbox/ http://127.0.0.1:8082/
 RedirectMatch 301 ^/winbox$ /winbox/
 ```
 
-The trailing slash goes on both sides of `ProxyPass` here too: that is what
-strips the prefix. `ProxyPass /winbox/` does not match `/winbox` with no
-slash, so the redirect sends it there. Put these before any broader
+`ProxyPass /winbox/` does not match `/winbox` with no slash, so the redirect
+sends it there; nginx does that on its own. Put these before any broader
 `ProxyPass /` in the same host, because Apache takes the first match.
+
+**Mind the trailing slash.** On a sub-path it goes on both sides: the path the
+proxy matches, and the address it forwards to. With it on one side only, the
+page still loads at `/winbox`, so the setup looks right, but every call the
+page makes arrives at Elpis under the wrong path and login fails with the
+right password:
+
+| proxy config | `/winbox/api/login` arrives as | what you see |
+|---|---|---|
+| `ProxyPass /winbox/ http://127.0.0.1:8082/` | `/api/login` | works |
+| `ProxyPass /winbox http://127.0.0.1:8082/` | `//api/login` | page loads, login fails |
+| `location /winbox/` + `proxy_pass http://127.0.0.1:8082/;` | `/api/login` | works |
+| `location /winbox` + `proxy_pass http://127.0.0.1:8082/;` | `//api/login` | page loads, login fails |
+| `location /winbox/` + `proxy_pass http://127.0.0.1:8082;` | `/winbox/api/login` | nothing loads |
+
+To check a proxy without a browser, ask for the session through it:
+
+```bash
+curl https://host/winbox/api/session
+```
+
+`{"ok":false}` means the path arrived right (false because curl is not logged
+in). `not found` means it reached Elpis under the wrong path: look at the
+slashes.
 
 The page finds its API relative to wherever it was loaded from, so
 `https://host/winbox/` talks to `https://host/winbox/api/...` and nothing in
