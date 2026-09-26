@@ -196,6 +196,11 @@ int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop)
     return 1;
 }
 
+void elpis_mcache_del(elpis_cache_t *c, const elpis_mkey_t *k)
+{
+    (void)elpis_cache_remove(c, k->hash, k);
+}
+
 typedef struct {
     elpis_mcache_visit_fn fn;
     void *arg;
@@ -213,6 +218,11 @@ static void mwalk_one(const void *entry, void *arg)
     v.qtype    = e->qtype;
     v.qclass   = e->qclass;
     v.rcode    = e->rcode;
+    v.ancount  = e->ancount;
+    {
+        uint32_t elapsed = elpis_cached_now_s() - e->stored;
+        v.ttl_left = elapsed >= e->ttl ? 0u : e->ttl - elapsed;
+    }
     v.pop      = e->pop;
     v.cost_ms  = e->cost_ms;
     w->fn(&v, w->arg);

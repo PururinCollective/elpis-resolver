@@ -121,6 +121,8 @@ uint8_t  elpis_pop_from_hits(uint64_t hits);
  * entry for `k`, 0 when there is none.
  */
 int elpis_mcache_seed(elpis_cache_t *c, const elpis_mkey_t *k, uint8_t pop);
+/* Drop the entry for `k`, if there is one. */
+void elpis_mcache_del(elpis_cache_t *c, const elpis_mkey_t *k);
 
 /* What elpis_mcache_walk() shows of each entry. */
 typedef struct {
@@ -129,6 +131,8 @@ typedef struct {
     uint8_t        kflags;
     uint16_t       qtype, qclass;
     unsigned       rcode;
+    uint16_t       ancount;
+    uint32_t       ttl_left;    /* seconds; 0 once it is stale     */
     uint8_t        pop;
     uint16_t       cost_ms;
 } elpis_mview_t;

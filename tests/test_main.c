@@ -2653,9 +2653,82 @@ static void test_mesh(void)
               "an IPv6 link-local address is never passed on");
     }
 
+    /*
+     * Lookups.  The digest's filter: nothing added is ever missed, and at
+     * ten bits an entry the false positives stay near the one in a hundred
+     * it is sized for.
+     */
+    {
+        static uint8_t bits[1u << 14];          /* 2^17 bits */
+        const uint32_t nbits = 1u << 17;
+        unsigned i, missed = 0, fp = 0;
+        uint8_t name[32];
+
+        memset(bits, 0, sizeof bits);
+        for (i = 0; i < nbits / 10u; i++) {
+            int l = snprintf((char *)name + 1, sizeof name - 1, "n%u", i);
+            name[0] = (uint8_t)l;
+            name[l + 1] = 0;
+            elpis_bloom_set(bits, nbits, 7,
+                            elpis_mesh_qhash(name, (uint8_t)(l + 2), ELPIS_T_A, 0));
+        }
+        for (i = 0; i < nbits / 10u; i++) {
+            int l = snprintf((char *)name + 1, sizeof name - 1, "n%u", i);
+            name[0] = (uint8_t)l;
+            name[l + 1] = 0;
+            if (!elpis_bloom_test(bits, nbits, 7,
+                                  elpis_mesh_qhash(name, (uint8_t)(l + 2),
+                                                   ELPIS_T_A, 0)))
+                missed++;
+            /* The same names under another type were never added. */
+            if (elpis_bloom_test(bits, nbits, 7,
+                                 elpis_mesh_qhash(name, (uint8_t)(l + 2),
+                                                  ELPIS_T_AAAA, 0)))
+                fp++;
+        }
+        CHECK(missed == 0, "the digest never misses a name it holds (%u)", missed);
+        CHECK(fp < (nbits / 10u) / 40u,
+              "and wrongly claims under 2.5%% of the rest (%u of %u)",
+              fp, nbits / 10u);
+        CHECK(elpis_mesh_qhash(name, 4, ELPIS_T_A, ELPIS_MK_DO) !=
+              elpis_mesh_qhash(name, 4, ELPIS_T_A, 0) &&
+              elpis_mesh_qhash(name, 4, ELPIS_T_A, ELPIS_MK_CD) ==
+              elpis_mesh_qhash(name, 4, ELPIS_T_A, 0),
+              "the DO bit is part of the question, CD is not");
+    }
+    {
+        uint8_t key[32], other[32], pt[64], dg[128], back[128];
+        size_t n, got;
+        unsigned i;
+
+        for (i = 0; i < 32; i++) {
+            key[i] = (uint8_t)i;
+            other[i] = (uint8_t)(i ^ 0x55);
+        }
+        for (i = 0; i < sizeof pt; i++)
+            pt[i] = (uint8_t)(i * 7);
+        n = elpis_mesh_lq_seal(key, 0x01020304u, pt, sizeof pt, dg);
+        CHECK(n == sizeof pt + ELPIS_MESH_LQ_OVERHEAD && elpis_get32(dg) == 0x01020304u,
+              "a lookup is its key id, a nonce and the sealed message");
+        CHECK(elpis_mesh_lq_open(key, dg, n, back, &got) == ELPIS_OK &&
+              got == sizeof pt && !memcmp(back, pt, sizeof pt),
+              "and opens under its key");
+        CHECK(elpis_mesh_lq_open(other, dg, n, back, &got) == ELPIS_ERR,
+              "but not under another");
+        dg[0] ^= 1;
+        CHECK(elpis_mesh_lq_open(key, dg, n, back, &got) == ELPIS_ERR,
+              "and the key id cannot be changed on the way");
+        dg[0] ^= 1;
+        dg[20] ^= 1;
+        CHECK(elpis_mesh_lq_open(key, dg, n, back, &got) == ELPIS_ERR,
+              "nor anything else");
+    }
+
     elpis_conf_defaults(&cf);
     CHECK(!cf.mesh && cf.mesh_share && cf.mesh_share_min_hits == 5 &&
           cf.mesh_lsd && cf.mesh_max_peers == 16, "the mesh is off by default");
+    CHECK(!cf.mesh_lookup && cf.mesh_lookup_rtt == 10,
+          "lookups are off by default, and within 10 ms when on");
     elpis_strlcpy(line, "mesh-peer: 192.0.2.6", sizeof line);
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
           cf.n_mesh_peer == 1 && elpis_addr_port(&cf.mesh_peer[0]) == 7878,

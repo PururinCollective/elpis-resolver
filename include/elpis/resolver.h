@@ -198,6 +198,14 @@ struct elpis_task {
      */
     unsigned        warmup : 1;
     uint8_t         warm_pop;       /* the count the warmed entry starts at */
+    /*
+     * Mesh lookups (meshq.c): a peer's cache has been asked about this; the
+     * lookup still in flight; and, on a refresh, that it re-resolves what a
+     * peer answered, so a disagreement drops the peer's answer.
+     */
+    unsigned        peer_asked : 1;
+    unsigned        peer_verify : 1;
+    void           *peerq;
     unsigned        dns64_tried : 1;
     unsigned        dns64_synth : 1;
     unsigned        revalidate : 1;   /* cache hit whose status is unknown */
@@ -372,6 +380,21 @@ int  elpis_prime_start(elpis_worker_t *w);
 int  elpis_tld_warm_start(elpis_worker_t *w);
 /* This worker's share of warming the checkpoint's names (checkpoint.c). */
 int  elpis_warmup_start(elpis_worker_t *w, unsigned nworkers);
+
+/* ---- mesh lookups (meshq.c) ---- */
+/* On a client miss: ask the nearest peer that probably has it, if any. */
+void elpis_meshq_ask(elpis_task_t *t);
+/* The task is going: forget its lookup. */
+void elpis_meshq_cancel(elpis_task_t *t);
+/* A peer's answer to this question was not confirmed here: do not ask
+ * peers about it for a while (elpis_mesh_qhash() of the question). */
+void elpis_meshq_distrust(uint64_t qhash);
+/*
+ * A peer answered while the task was still resolving (resolver.c).  The
+ * answer goes to the client and a refresh re-resolves it here; ELPIS_OK when
+ * it was used, and the task is then gone.
+ */
+int  elpis_task_peer_answer(elpis_task_t *t, const elpis_msg_t *m);
 int  elpis_axfr_root(elpis_ctx_t *ctx);
 int  elpis_probe_roots(elpis_ctx_t *ctx);
 /* Find our public addresses and network, through our own recursion. */

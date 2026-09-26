@@ -99,6 +99,8 @@ typedef struct {
     unsigned     n_mesh_peer;
     uint8_t      mesh_share;               /* answer peers' list requests */
     uint8_t      mesh_lsd;                 /* find peers on the segment   */
+    uint8_t      mesh_lookup;              /* ask peers' caches on a miss */
+    uint32_t     mesh_lookup_rtt;          /* ms: the farthest peer asked */
     uint32_t     mesh_share_min_hits;
     uint32_t     mesh_max_peers;
 

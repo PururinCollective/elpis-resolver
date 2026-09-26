@@ -34,6 +34,19 @@ an HMAC tag under a key derived from the PSK: another mesh on the same network
 is ignored without a word. Measured on one host, an instance with no bridge was
 found and warm 4.5 seconds after starting.
 
+**A miss can be answered by a nearby instance.** With `mesh-lookup: yes`, a
+client question that misses the cache is also sent to the nearest peer within
+`mesh-lookup-rtt` whose cache digest (a Bloom filter each instance sends every
+half minute) says it has the answer, while resolution goes on as usual;
+whichever answers first goes to the client. A, AAAA and HTTPS only, NOERROR
+only (records or NODATA), never CD. The peer's answer carries no AD and is
+resolved again here straight away: our own answer replaces it, and one we
+cannot confirm is dropped and not asked of peers again for ten minutes.
+Lookups are UDP sealed with ChaCha20-Poly1305 under per-instance keys handed
+out inside the Noise sessions and replaced hourly, and a peer answers only the
+addresses of its mesh connections. Measured with warm-up off: a second
+instance answered 60 sites with a median of 0 ms against 214 ms cold.
+
 **A restart can come back warm.** With `checkpoint:` set to a path, Elpis
 writes down the questions clients ask most, every `checkpoint-interval` and
 never at shutdown, and after a restart resolves them all again, most valuable

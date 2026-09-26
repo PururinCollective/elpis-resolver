@@ -67,6 +67,13 @@ void elpis_stats_report(elpis_ctx_t *ctx)
                (unsigned long long)s->tcp_queries,
                (unsigned long long)s->truncated,
                (unsigned long long)s->dns64_synth);
+    if (s->peer_asked || s->peer_served)
+        elpis_info("  mesh lookups: asked=%llu found=%llu used=%llu "
+                   "answered-for-peers=%llu",
+                   (unsigned long long)s->peer_asked,
+                   (unsigned long long)s->peer_found,
+                   (unsigned long long)s->peer_used,
+                   (unsigned long long)s->peer_served);
     if (s->cookie_ok || s->cookie_bad)
         elpis_info("  cookies verified=%llu rejected=%llu",
                    (unsigned long long)s->cookie_ok,

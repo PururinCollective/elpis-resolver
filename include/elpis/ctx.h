@@ -38,6 +38,12 @@ typedef struct {
     uint64_t races;
     /* Queries answered SERVFAIL at once because max-pending was reached. */
     uint64_t overload;
+    /*
+     * Mesh lookups (meshq.c): misses a peer was asked about, the ones it had,
+     * the ones its answer reached the client first, and questions this
+     * instance answered for its peers.
+     */
+    uint64_t peer_asked, peer_found, peer_used, peer_served;
 } elpis_stats_t;
 
 /*

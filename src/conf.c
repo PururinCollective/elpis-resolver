@@ -59,6 +59,8 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->mesh               = 0;
     c->mesh_share         = 1;
     c->mesh_lsd           = 1;
+    c->mesh_lookup        = 0;
+    c->mesh_lookup_rtt    = 10;
     c->mesh_share_min_hits = 5;
     c->mesh_max_peers     = 16;
     c->web                = 0;
@@ -420,6 +422,13 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     }
     if (KEY("mesh-share")) return want_bool(&p, key, val, &c->mesh_share);
     if (KEY("mesh-lsd"))   return want_bool(&p, key, val, &c->mesh_lsd);
+    if (KEY("mesh-lookup")) return want_bool(&p, key, val, &c->mesh_lookup);
+    if (KEY("mesh-lookup-rtt")) {
+        uint32_t v;
+        if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
+        c->mesh_lookup_rtt = ELPIS_CLAMP(v, 1u, 1000u);
+        return ELPIS_OK;
+    }
     if (KEY("mesh-share-min-hits")) {
         uint32_t v;
         if (want_u32(&p, key, val, &v) != 0) return ELPIS_ERR;
@@ -852,6 +861,9 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  mesh-share=%d (min hits %u), mesh-lsd=%d, mesh-max-peers=%u",
                    (int)c->mesh_share, (unsigned)c->mesh_share_min_hits,
                    (int)c->mesh_lsd, (unsigned)c->mesh_max_peers);
+        if (c->mesh_lookup)
+            elpis_info("  mesh-lookup: peers within %u ms",
+                       (unsigned)c->mesh_lookup_rtt);
     }
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "

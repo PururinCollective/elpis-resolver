@@ -15,6 +15,7 @@
  * bailiwick of the zone that supplied it.
  */
 #include "elpis/resolver.h"
+#include "elpis/mesh.h"
 #include "elpis/rdata.h"
 #include "elpis/deleg.h"
 #include "elpis/infra.h"
@@ -214,6 +215,8 @@ void elpis_task_free(elpis_task_t *t)
     elpis_timer_del(t->w->loop, &t->deadline);
     elpis_timer_del(t->w->loop, &t->kick);
     elpis_val_free(t);
+    if (t->peerq != NULL)
+        elpis_meshq_cancel(t);
     elpis_rrlist_free(&t->ans);
     if (t->live_prev != NULL) t->live_prev->live_next = t->live_next;
     else                      t->w->tasks = t->live_next;
@@ -1296,6 +1299,101 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
                             rd, (uint16_t)rdlen);
 }
 
+/*
+ * A nearby peer's cache answered before our own resolution finished
+ * (meshq.c).  The client gets the peer's answer now, and a refresh starts at
+ * once to resolve the same question here, which replaces the entry with this
+ * instance's own answer -- or, when it finds none, drops the peer's.
+ *
+ * Until then the answer carries no AD: this instance did not validate it,
+ * and AD is a claim that it did.  Only NOERROR is taken -- records, or none
+ * with the SOA that says so (NODATA), never NXDOMAIN -- and only with three
+ * seconds or more to live, a second taken off for the trip.
+ */
+static void peer_verify_start(elpis_task_t *t)
+{
+    elpis_task_t *r = elpis_task_new(t->w);
+
+    if (r == NULL)
+        return;
+    r->qname = t->orig_qname;
+    elpis_name_lower(&r->qname);
+    r->qtype       = t->orig_qtype;
+    r->qclass      = t->qclass;
+    r->prefetch    = 1;
+    r->peer_verify = 1;
+    r->client_do   = t->client_do;
+    r->client_cd   = t->client_cd;
+    elpis_stat_inc(&t->w->stats.prefetches, 1);
+    elpis_task_start(r);
+}
+
+int elpis_task_peer_answer(elpis_task_t *t, const elpis_msg_t *m)
+{
+    static const elpis_section_t secs[3] = {
+        ELPIS_SEC_ANSWER, ELPIS_SEC_AUTHORITY, ELPIS_SEC_ADDITIONAL
+    };
+    elpis_name_t q, want;
+    elpis_rr_iter_t it;
+    elpis_rr_t rr;
+    uint32_t minttl = 0xFFFFFFFFu;
+    unsigned i;
+    int rc, drop = 0;
+
+    /* Too late: our own answer is in, or being checked. */
+    if (t->state == ELPIS_TS_DEAD || t->state == ELPIS_TS_FINISH ||
+        t->state == ELPIS_TS_VALIDATE)
+        return ELPIS_ERR;
+    q = m->qname;
+    want = t->orig_qname;
+    elpis_name_lower(&q);
+    elpis_name_lower(&want);
+    if (!elpis_name_eq(&q, &want) || m->qtype != t->orig_qtype ||
+        m->qclass != t->qclass || elpis_msg_rcode(m) != ELPIS_RC_NOERROR ||
+        (m->hdr.ancount == 0 && m->hdr.nscount == 0))
+        return ELPIS_ERR;
+
+    /* Every record checked before anything changes: a bad one leaves our
+     * own resolution running as if nothing had arrived. */
+    for (i = 0; i < 3; i++) {
+        elpis_rr_iter(&it, m, secs[i]);
+        while ((rc = elpis_rr_next(&it, &rr, &drop)) == ELPIS_OK) {
+            if (rr.type == ELPIS_T_OPT)
+                continue;
+            if (elpis_rdata_validate(rr.type, m->wire, m->len, rr.rdoff,
+                                     rr.rdlen, &drop) != ELPIS_OK)
+                return ELPIS_ERR;
+            if (rr.ttl < minttl)
+                minttl = rr.ttl;
+        }
+        if (rc != ELPIS_ENOTFOUND)
+            return ELPIS_ERR;
+    }
+    if (minttl < 3u)
+        return ELPIS_ERR;
+
+    elpis_out_cancel(t);
+    elpis_rrlist_clear(&t->ans);
+    t->have_deleg = 0;
+    for (i = 0; i < 3; i++) {
+        elpis_rr_iter(&it, m, secs[i]);
+        while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+            if (rr.type == ELPIS_T_OPT)
+                continue;
+            rr.ttl -= 1u;
+            (void)accept_rr(t, secs[i], m, &rr);
+        }
+    }
+    peer_verify_start(t);
+    t->rcode = ELPIS_RC_NOERROR;
+    t->sec = ELPIS_SEC_INSECURE;    /* not ours to vouch for: no AD */
+    t->val_unavailable = 0;
+    t->ede = -1;
+    t->state = ELPIS_TS_FINISH;
+    task_finish(t);
+    return ELPIS_OK;
+}
+
 /* Cache each RRset we just learned, grouped by (owner, type). */
 static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
                                  const elpis_name_t *zone, elpis_section_t sec)
@@ -2018,6 +2116,8 @@ void elpis_task_step(elpis_task_t *t)
                 t->state = t->revalidate ? ELPIS_TS_VALIDATE : ELPIS_TS_FINISH;
                 continue;
             }
+            /* A miss: a nearby peer may have it, while we go and find out. */
+            elpis_meshq_ask(t);
             t->have_deleg = 0;
             t->state = ELPIS_TS_DELEG;
             continue;
@@ -2383,6 +2483,31 @@ static void note_refresh_outcome(elpis_task_t *t)
     k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
                            (t->client_cd ? ELPIS_MK_CD : 0u));
     elpis_mkey_hash(&k);
+
+    /*
+     * Our own resolution of what a peer answered came back with no answer --
+     * a bogus signature, a name that is gone.  The peer's answer is not ours
+     * to keep serving on its say-so: drop it, and the next query resolves
+     * for real.
+     */
+    if (t->peer_verify) {
+        static ELPIS_TLS uint64_t last_note;
+        uint64_t now = elpis_cached_now_ms();
+        char nb[ELPIS_MAX_NAME * 4];
+
+        elpis_mcache_del(t->w->ctx->mcache, &k);
+        elpis_meshq_distrust(elpis_mesh_qhash(folded, t->orig_qname.len,
+                                              t->orig_qtype,
+                                              t->client_do ? ELPIS_MK_DO : 0u));
+        if (now - last_note >= 60000u) {
+            last_note = now;
+            elpis_info("mesh: a peer's answer for %s %s was not confirmed "
+                       "here (%s); dropped", elpis_name_str(&t->orig_qname,
+                       nb, sizeof nb), elpis_type_name(t->orig_qtype),
+                       elpis_rcode_name(t->rcode));
+        }
+        return;
+    }
 
     if (elpis_mcache_refresh_outcome(t->w->ctx->mcache, &k,
                                      t->rcode == ELPIS_RC_NXDOMAIN

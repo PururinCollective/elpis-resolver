@@ -59,4 +59,50 @@ void  elpis_mesh_lsd_make(const uint8_t key[32], const uint8_t node[16],
 int   elpis_mesh_lsd_check(const uint8_t key[32], const uint8_t *p, size_t n,
                            uint8_t node[16], uint16_t *port);
 
+/* ---- live lookups: meshq.c asks, mesh.c answers ------------------- */
+/*
+ * With mesh-lookup: yes, a worker that misses asks one nearby peer's cache
+ * while its own resolution runs, and whichever answers first goes to the
+ * client.  Only NOERROR, with records or without (NODATA), is shared.  Which
+ * peer: the nearest within mesh-lookup-rtt whose digest -- a Bloom filter of
+ * its cache, sent every half minute -- says it probably has the answer.  Lookups are UDP datagrams sealed with ChaCha20-Poly1305 under
+ * a key the answering instance chose and handed out inside the Noise
+ * session, so they have that session's forward secrecy.
+ */
+typedef struct {
+    elpis_addr_t addr;          /* where it answers lookups (UDP)       */
+    uint8_t      key[32];       /* the lookup key it gave us            */
+    uint32_t     key_id;
+    uint32_t     rtt_ms;
+} elpis_mesh_pick_t;
+
+/* The question as the digests hash it: folded name, type, DO/CD bits. */
+uint64_t elpis_mesh_qhash(const uint8_t *qname, uint8_t len, uint16_t qtype,
+                          uint8_t kflags);
+/* The peer worth asking, or ELPIS_ENOTFOUND.  Any thread. */
+int      elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out);
+
+/*
+ * A lookup datagram: u32 key id, a 12-byte nonce, then the sealed
+ * plaintext -- u8 kind, u8 flags, an 8-byte token, and a DNS message: the
+ * question when asking (flags: the DO bit), the cached response when
+ * answering (flags: 1 when found).
+ */
+#define ELPIS_MESH_LQ_ASK      1u
+#define ELPIS_MESH_LQ_ANSWER   2u
+#define ELPIS_MESH_LQ_HDR      10u
+#define ELPIS_MESH_LQ_OVERHEAD (4u + 12u + 16u)
+/* Largest datagram either way: no fragmentation on any real path. */
+#define ELPIS_MESH_LQ_MAX      1232u
+size_t   elpis_mesh_lq_seal(const uint8_t key[32], uint32_t key_id,
+                            const uint8_t *pt, size_t n, uint8_t *out);
+/* ELPIS_OK with the plaintext in `out` (n - overhead bytes). */
+int      elpis_mesh_lq_open(const uint8_t key[32], const uint8_t *dg, size_t n,
+                            uint8_t *out, size_t *outlen);
+
+/* Bloom filters of `nbits`, a power of two, probed `k` times. */
+void     elpis_bloom_set(uint8_t *bits, uint32_t nbits, unsigned k, uint64_t h);
+int      elpis_bloom_test(const uint8_t *bits, uint32_t nbits, unsigned k,
+                          uint64_t h);
+
 #endif /* ELPIS_MESH_H */
