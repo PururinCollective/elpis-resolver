@@ -217,6 +217,23 @@ var D = null, timer = null, zTop = 10, wins = {};
 
 /* ---------- helpers ---------- */
 function $(id){ return document.getElementById(id); }
+
+/*
+ * The API sits next to the page, wherever the page is served from.  Calls to
+ * a root-absolute "/api/..." broke behind a reverse proxy that mounts the page
+ * under a path (https://host/winbox/ -> 127.0.0.1:8082/): they went to
+ * https://host/api/... instead, and login failed with the right password.
+ * A plain relative "api/..." is not enough either -- a proxy that strips the
+ * prefix also serves the page at "/winbox" with no slash, and that resolves
+ * against "/".  So a path not ending in "/" or "/index.html" is taken as the
+ * directory itself.
+ */
+var API_BASE = (function(){
+  var p = location.pathname;
+  if (/\/index\.html$/.test(p)) return p.slice(0, -'index.html'.length);
+  return p.charAt(p.length - 1) === '/' ? p : p + '/';
+})();
+function api(path){ return API_BASE + 'api/' + path; }
 function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 function bytes(v){
@@ -1349,7 +1366,7 @@ function paint(){
 }
 
 function poll(){
-  fetch('/api/status', { credentials:'same-origin' })
+  fetch(api('status'), { credentials:'same-origin' })
     .then(function(r){
       if (r.status === 401){ showLogin(); throw new Error('auth'); }
       return r.json();
@@ -1396,7 +1413,7 @@ $('lf').addEventListener('submit', function(e){
   $('err').textContent = '';
   var body = 'user=' + encodeURIComponent($('u').value) +
              '&pass=' + encodeURIComponent($('p').value);
-  fetch('/api/login', { method:'POST', credentials:'same-origin',
+  fetch(api('login'), { method:'POST', credentials:'same-origin',
       headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body })
     .then(function(r){
       if (r.ok) showDesk();
@@ -1406,7 +1423,7 @@ $('lf').addEventListener('submit', function(e){
 });
 
 $('out').onclick = function(){
-  fetch('/api/logout', { method:'POST', credentials:'same-origin' })
+  fetch(api('logout'), { method:'POST', credentials:'same-origin' })
     .then(showLogin).catch(showLogin);
 };
 $('tile').onclick = tile;
@@ -1446,7 +1463,7 @@ window.addEventListener('resize', function(){
   layoutSave();
 });
 
-fetch('/api/session', { credentials:'same-origin' })
+fetch(api('session'), { credentials:'same-origin' })
   .then(function(r){ return r.json(); })
   .then(function(j){ if (j.ok) showDesk(); else showLogin(); })
   .catch(showLogin);

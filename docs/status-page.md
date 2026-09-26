@@ -166,6 +166,42 @@ location / {
 nginx holds the key, Elpis stays on loopback, and the certificate is the same
 one the rest of the host uses. Nothing has to be copied or kept in step.
 
+The page can also live under a path of a site that serves other things. The
+proxy has to strip the prefix, which in nginx is the trailing slash on both
+lines:
+
+```nginx
+location /winbox/ {
+    proxy_pass http://127.0.0.1:8082/;
+    proxy_set_header Host $host;
+}
+```
+
+The same in Apache, inside the site's `<VirtualHost>`, after
+`a2enmod proxy proxy_http`:
+
+```apache
+ProxyPreserveHost On
+ProxyPass        /winbox/ http://127.0.0.1:8082/
+ProxyPassReverse /winbox/ http://127.0.0.1:8082/
+RedirectMatch 301 ^/winbox$ /winbox/
+```
+
+The trailing slash goes on both sides of `ProxyPass` here too: that is what
+strips the prefix. `ProxyPass /winbox/` does not match `/winbox` with no
+slash, so the redirect sends it there. Put these before any broader
+`ProxyPass /` in the same host, because Apache takes the first match.
+
+The page finds its API relative to wherever it was loaded from, so
+`https://host/winbox/` talks to `https://host/winbox/api/...` and nothing in
+Elpis needs to know the prefix.
+
+Elpis sets its login cookie on `Path=/`, so on a shared host the browser also
+sends it to every other site there. `HttpOnly` keeps their scripts from
+reading it, but their servers still receive it. To keep it to the page's own
+path: `proxy_cookie_path / /winbox/;` in nginx, `ProxyPassReverseCookiePath /
+/winbox/` in Apache.
+
 ## The password
 
 | config | what happens |

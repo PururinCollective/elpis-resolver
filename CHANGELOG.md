@@ -80,6 +80,16 @@ it brings back is resolved and validated as usual. It is still a list of what
 clients looked up, so it is off by default and written `0600`. See
 [Caching](docs/caching.md#surviving-a-restart).
 
+### Fixed
+
+**The status page could not log in behind a reverse proxy on a sub-path.**
+Served at `https://host/winbox/`, the page sent its login and every other API
+call to `https://host/api/...`, outside the proxied path, and login failed
+with the right password. The page now finds its API relative to wherever it
+was loaded from, including `/winbox` with no trailing slash. The status page
+docs have nginx and Apache examples for a sub-path. See
+[Status page](docs/status-page.md).
+
 ## 2.0.2 — 2026-09-25
 
 ### Fixed
