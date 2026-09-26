@@ -14,6 +14,16 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**Licence serials count themselves.** `elpis-licence issue` without
+`--serial` used to give serial 0, every time. It now takes the next number
+after the last one the issuer key gave, kept in `issuer.key.serial` beside the
+key and shared by licences and mesh certificates. The number is taken under a
+lock before anything is signed, so two issues at once never share one and a
+failure leaves a gap rather than a repeat. `--serial N` still sets one by hand,
+and a higher one moves the count on; a `--serial` that is not a plain number
+is now refused instead of read as 0. See
+[Signed licences](docs/licensing.md#issuing-one).
+
 **A build keeps its licence issuer key.** `LICENCE_ISSUER` set only in a
 shell's environment was lost under `sudo make install` and by `elpis-update`,
 which runs as root, and the result silently rejected every licence. make now

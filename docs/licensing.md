@@ -66,7 +66,7 @@ issuer key:
 
 ```bash
 ./bin/elpis-licence issue --key issuer.key --org "Example ISP, AS64500" \
-    --mesh-key <public key from elpis --mesh-keygen> --days 365 --serial 3001
+    --mesh-key <public key from elpis --mesh-keygen> --days 365
 ```
 
 ```
@@ -145,7 +145,7 @@ issuer.
 
 ```bash
 ./bin/elpis-licence issue --key issuer.key \
-    --org "Example ISP, AS64500" --edition commercial --days 365 --serial 1001
+    --org "Example ISP, AS64500" --edition commercial --days 365
 ```
 
 ```
@@ -156,6 +156,16 @@ licence: elpis1.AQEAAAPparF1_GySqXwURXhhbXBsZSBJU1AsIEFTNjQ1MDA.5oQtWOS5ft8...
 ```
 
 `--edition` is one of `commercial`, `community`, `homelab`, `evaluation`.
+
+**Serials count themselves.** Left out, `--serial` is the next number after
+the last one this issuer key gave, kept in a file beside the key,
+`issuer.key.serial` (above, it stood at 1000). Licences and mesh certificates
+share the count, so no two things one key signed have the same serial. Two
+issues at once never share one, and one that fails after taking a number
+leaves a gap, never a repeat. `--serial N` still sets one by hand, and moves
+the count on when it is higher. If you issued by hand before, start the count
+above the highest you used, `echo 1000 > issuer.key.serial`, and keep the file
+with the key: without it the count starts again at 1.
 
 **`--perpetual` is how you issue one that never expires** — not a very large
 `--days`. It records no expiry at all, so the probe and the status page say

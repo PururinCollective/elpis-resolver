@@ -319,7 +319,7 @@ public half. The issuer certifies the public half:
 
 ```bash
 elpis-licence issue --key issuer.key --org "Example ISP, AS64500" \
-    --mesh-key 6d3f…a91c --days 365 --serial 3001
+    --mesh-key 6d3f…a91c --days 365
 ```
 
 and the instance's `elpis.conf` gets:

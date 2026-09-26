@@ -7,13 +7,14 @@
  *
  *   elpis-licence keygen issuer.key
  *   elpis-licence issue --key issuer.key --org "Example ISP" \
- *                       --edition commercial --days 365 --serial 1001
+ *                       --edition commercial --days 365
  *   elpis-licence issue --key issuer.key --org "Example ISP" \
  *                       --mesh-key <instance public key> --days 365
  *   elpis-licence verify elpis1..... | elpism1.....
  *
  * Keep issuer.key off the build machine and out of the repository.  Anyone
- * holding it can mint licences your binaries will believe.
+ * holding it can mint licences your binaries will believe.  Serials are
+ * counted beside it, in issuer.key.serial.
  */
 #include "elpis/licence.h"
 #include "elpis/crypto.h"
@@ -23,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -78,6 +80,130 @@ static int read_key(const char *path, uint8_t sk[32])
     return 0;
 }
 
+/*
+ * Serials.  Left out, --serial is the next after the last one this issuer key
+ * gave, which a file beside the key keeps: issuer.key.serial, one number.  A
+ * licence and a mesh certificate count on the same file, so no two things one
+ * issuer signed share a serial.
+ *
+ * The number is taken under a lock, and written back, before anything is
+ * signed: two issues at once never share one, and one that fails afterwards
+ * leaves a gap, never a repeat.  A --serial given is used as it is, and moves
+ * the file on when it is higher, so the next one taken never repeats it.
+ */
+#define SERIAL_FILE_MAX 1024
+
+static int serial_take(const char *keyfile, int given, uint32_t *serial)
+{
+    char path[SERIAL_FILE_MAX], buf[256], out[160];
+    struct flock lk;
+    unsigned long long last = 0;
+    ssize_t got;
+    size_t len;
+    int fd, found = 0, n;
+    char *p;
+
+    n = snprintf(path, sizeof path, "%s.serial", keyfile);
+    if (n < 0 || (size_t)n >= sizeof path)
+        return die("the key file's name is too long to count serials beside it");
+    fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        if (given) {
+            fprintf(stderr, "elpis-licence: cannot record serial %lu in %s: %s\n",
+                    (unsigned long)*serial, path, strerror(errno));
+            return 0;
+        }
+        fprintf(stderr, "elpis-licence: cannot count serials in %s: %s\n",
+                path, strerror(errno));
+        return die("give --serial N, or issue where the key's directory can "
+                   "be written");
+    }
+    memset(&lk, 0, sizeof lk);
+    lk.l_type = F_WRLCK;
+    lk.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLKW, &lk) != 0) {
+        close(fd);
+        return die("cannot lock the serial file");
+    }
+
+    got = read(fd, buf, sizeof buf - 1);
+    if (got < 0) {
+        close(fd);
+        return die("cannot read the serial file");
+    }
+    buf[got] = '\0';
+    /* Comment lines, then the number.  Anything else is not guessed at: a
+     * wrong guess would hand out a serial already used. */
+    for (p = buf; *p != '\0'; ) {
+        char *eol = strchr(p, '\n');
+        if (eol != NULL)
+            *eol = '\0';
+        while (*p == ' ' || *p == '\t' || *p == '\r')
+            p++;
+        if (*p != '\0' && *p != '#') {
+            char *end;
+            errno = 0;
+            last = strtoull(p, &end, 10);
+            while (*end == ' ' || *end == '\t' || *end == '\r')
+                end++;
+            if (found || errno != 0 || end == p || *end != '\0' ||
+                last > 0xFFFFFFFFull) {
+                close(fd);
+                fprintf(stderr, "elpis-licence: %s should hold the last serial "
+                        "issued and nothing else\n", path);
+                return die("fix it by hand, or give --serial N");
+            }
+            found = 1;
+        }
+        if (eol == NULL)
+            break;
+        p = eol + 1;
+    }
+    if (!given) {
+        if (last >= 0xFFFFFFFFull) {
+            close(fd);
+            return die("serials have run out for this key");
+        }
+        *serial = (uint32_t)(last + 1u);
+    } else if (*serial <= last && found) {
+        close(fd);                  /* nothing to move on */
+        return 0;
+    }
+
+    n = snprintf(out, sizeof out,
+                 "# the last serial elpis-licence issued with %s\n%lu\n",
+                 keyfile, (unsigned long)*serial);
+    len = (n > 0 && (size_t)n < sizeof out) ? (size_t)n : 0;
+    if (len == 0) {
+        /* A long key file name: the number alone is enough. */
+        n = snprintf(out, sizeof out, "%lu\n", (unsigned long)*serial);
+        len = (size_t)n;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, out, len) != (ssize_t)len ||
+        ftruncate(fd, (off_t)len) != 0 || fsync(fd) != 0) {
+        close(fd);
+        return die("cannot write the serial file");
+    }
+    close(fd);
+    return 0;
+}
+
+/* A serial given on the command line: a plain number that fits. */
+static int serial_parse(const char *s, uint32_t *out)
+{
+    unsigned long long v;
+    char *end;
+
+    if (*s < '0' || *s > '9')
+        return -1;
+    errno = 0;
+    v = strtoull(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v > 0xFFFFFFFFull)
+        return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
 static int cmd_keygen(const char *path)
 {
     uint8_t sk[32], pk[32];
@@ -103,8 +229,11 @@ static int cmd_keygen(const char *path)
 
     hex_print(pk, 32, hex);
     printf("private key written to %s (keep it off the build machine)\n", path);
+    printf("serials will be counted beside it, in %s.serial\n", path);
     printf("\npaste the public half into include/elpis/licence.h and rebuild:\n\n");
     printf("  #define ELPIS_LICENCE_ISSUER \"%s\"\n\n", hex);
+    printf("or, for a tree you build from again and again, put it in local.mk:\n\n");
+    printf("  LICENCE_ISSUER = %s\n\n", hex);
     printf("or pass it to a single build:\n\n");
     printf("  make LICENCE_ISSUER=%s\n", hex);
     return 0;
@@ -168,7 +297,7 @@ static int cmd_issue(int argc, char **argv)
     const char *keyfile = NULL, *meshkey = NULL;
     size_t plen, ctxlen = strlen(ELPIS_LICENCE_CONTEXT);
     long days = 365;
-    int perpetual = 0;
+    int perpetual = 0, serial_given = 0;
     int i, rc;
 
     memset(&l, 0, sizeof l);
@@ -180,7 +309,12 @@ static int cmd_issue(int argc, char **argv)
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
         if      (!strcmp(a, "--key")     && v) { keyfile = v; i++; }
         else if (!strcmp(a, "--org")     && v) { elpis_strlcpy(l.org, v, sizeof l.org); i++; }
-        else if (!strcmp(a, "--serial")  && v) { l.serial = (uint32_t)strtoul(v, NULL, 10); i++; }
+        else if (!strcmp(a, "--serial")  && v) {
+            if (serial_parse(v, &l.serial) != 0)
+                return die("--serial takes a whole number, 0 to 4294967295");
+            serial_given = 1;
+            i++;
+        }
         else if (!strcmp(a, "--days")    && v) { days = strtol(v, NULL, 10); i++; }
         else if (!strcmp(a, "--perpetual"))    { perpetual = 1; }
         else if (!strcmp(a, "--mesh-key") && v) { meshkey = v; i++; }
@@ -210,12 +344,26 @@ static int cmd_issue(int argc, char **argv)
         return die("--days puts the expiry before 1970; "
                    "use --perpetual for a licence that never expires");
 
-    if (meshkey != NULL)
-        return issue_meshcert(keyfile, l.org, l.serial, l.issued, l.expires,
-                              meshkey);
-
+    /* Everything checked before a serial is taken, so a mistake does not
+     * use one up. */
     if ((rc = read_key(keyfile, sk)) != 0)
         return rc;
+    if (meshkey != NULL) {
+        uint8_t mk[32];
+        size_t mn = 0;
+        if (elpis_hex_decode(meshkey, mk, sizeof mk, &mn) != ELPIS_OK || mn != 32)
+            return die("--mesh-key takes the 64 hex characters elpis --mesh-keygen prints");
+    }
+    if ((rc = serial_take(keyfile, serial_given, &l.serial)) != 0) {
+        elpis_memzero(sk, sizeof sk);
+        return rc;
+    }
+
+    if (meshkey != NULL) {
+        elpis_memzero(sk, sizeof sk);
+        return issue_meshcert(keyfile, l.org, l.serial, l.issued, l.expires,
+                              meshkey);
+    }
 
     plen = elpis_licence_payload(&l, payload, sizeof payload);
     if (plen == 0)
@@ -223,7 +371,9 @@ static int cmd_issue(int argc, char **argv)
 
     memcpy(signed_buf, ELPIS_LICENCE_CONTEXT, ctxlen);
     memcpy(signed_buf + ctxlen, payload, plen);
-    if (elpis_ed25519_sign(sk, signed_buf, ctxlen + plen, sig) != ELPIS_OK)
+    rc = elpis_ed25519_sign(sk, signed_buf, ctxlen + plen, sig);
+    elpis_memzero(sk, sizeof sk);
+    if (rc != ELPIS_OK)
         return die("signing failed");
 
     if (elpis_b64url_encode(payload, plen, b1, sizeof b1) == 0 ||
@@ -307,7 +457,8 @@ int main(int argc, char **argv)
             "        [--edition commercial|community|homelab|evaluation]\n"
             "        [--days 365]     how long it lasts; negative back-dates it\n"
             "        [--perpetual]    never expires -- use this rather than a huge --days\n"
-            "        [--serial N]\n"
+            "        [--serial N]     left out: the next after the last, counted in\n"
+            "                         <key file>.serial\n"
             "        [--mesh-key HEX] a mesh certificate for that instance key\n"
             "                         instead of a licence (elpis --mesh-keygen)\n"
             "  elpis-licence verify <licence or mesh certificate>\n");
