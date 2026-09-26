@@ -17,7 +17,8 @@
  *   LIST_REQ   u32 most names wanted
  *   LIST_PART  entries: u32 hits, u16 ms, u8 DO/CD, u16 type, u8 len, name
  *   LIST_END   u32 entries sent
- *   PEERS      u8 count, then per peer: u8 4 or 6, the address, u16 port
+ *   PEERS      u8 count, then per peer: u8 4 or 6, the address, u16 port,
+ *              and its node id
  *   PING/PONG  u64 token
  *
  * A message of a type this version does not know is skipped, so a later one
@@ -38,6 +39,7 @@
 #include "elpis/log.h"
 #include "elpis/licence.h"
 #include "elpis/simd.h"
+#include "elpis/telemetry.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -77,7 +79,8 @@
 #define MESH_LEARNED_TRIES   5u
 
 enum { MSG_LIST_REQ = 1, MSG_LIST_PART = 2, MSG_LIST_END = 3, MSG_PEERS = 4,
-       MSG_PING = 5, MSG_PONG = 6, MSG_LOOKUP_KEY = 7, MSG_DIGEST = 8 };
+       MSG_PING = 5, MSG_PONG = 6, MSG_LOOKUP_KEY = 7, MSG_DIGEST = 8,
+       MSG_INFO = 9 };
 /* S_CONFIRM: a licensed dialler's handshake is done on its side, and it
  * waits for the first word back to know its certificate was taken. */
 enum { S_CONNECTING, S_HANDSHAKE, S_CONFIRM, S_UP };
@@ -116,6 +119,14 @@ typedef struct session {
     uint32_t          rtt_ms;          /* 0 until measured               */
     uint32_t          cert_serial;     /* its certificate, when licensed */
     char              whybuf[128];
+    /* For the status page: what it says it is, how we came to it, and what
+     * has gone each way. */
+    char              peer_host[64];
+    char              peer_ver[64];
+    unsigned          via;             /* ELPIS_MESH_F_* discovery bits  */
+    uint64_t          up_ms;
+    uint64_t          rx_bytes, tx_bytes;
+    uint64_t          names_in, names_out, served;
     uint64_t          last_digest;
     /* A digest arriving in parts. */
     uint8_t          *dg;
@@ -132,12 +143,21 @@ typedef struct {
     unsigned     attempted : 1;        /* one dial has run its course   */
     unsigned     has_node  : 1;        /* announced on the segment      */
     uint8_t      node[16];
+    unsigned     via;                  /* ELPIS_MESH_F_BRIDGE/PEX/LSD   */
     unsigned     fails;
     uint32_t     backoff;
     uint64_t     next_try;
+    char         why[96];              /* why the last dial failed      */
 } known_t;
 
 static elpis_ctx_t *g_ctx;
+static int          g_requested, g_running;
+/* Counters for the status page; this thread's alone. */
+static uint64_t     g_lsd_heard, g_lsd_foreign, g_lsd_found;
+static uint64_t     g_pex_sent, g_pex_heard, g_pex_learned;
+static uint64_t     g_lists_asked, g_lists_in, g_names_in, g_lists_out, g_names_out;
+static uint64_t     g_digests_sent, g_digests_in;
+static uint32_t     g_digest_entries;
 static uint8_t      g_psk[32];
 static uint8_t      g_node[16];
 static int          g_lfd[ELPIS_MESH_MAX_LISTEN];
@@ -155,6 +175,8 @@ static uint64_t     g_t0;
 static int          g_licensed;
 static uint8_t      g_skey[32], g_spub[32];
 static char         g_cert_org[ELPIS_LICENCE_MAX_ORG + 1];
+static uint32_t     g_cert_serial;
+static char         g_cert_expires[32];
 /* Local service discovery: a socket per family, and the announcement key. */
 static int          g_lsd4 = -1, g_lsd6 = -1;
 /* The port each family's announcement names: that family's listener, or 0
@@ -194,6 +216,9 @@ typedef struct {
     uint8_t     *bloom;
     uint32_t     bloom_bits;
     uint8_t      bloom_k;
+    /* Workers count their lookups to it here, atomically, under the read
+     * lock: for the status page only. */
+    uint64_t     asked, found, used;
 } ptab_t;
 
 static pthread_rwlock_t g_ptab_lock = PTHREAD_RWLOCK_INITIALIZER;
@@ -590,6 +615,8 @@ static int licensed_setup(const elpis_conf_t *c)
         return ELPIS_ERR;
     }
     elpis_strlcpy(g_cert_org, cert.org, sizeof g_cert_org);
+    g_cert_serial = cert.serial;
+    elpis_strlcpy(g_cert_expires, when, sizeof g_cert_expires);
     g_licensed = 1;
     elpis_info("mesh: licensed to \"%s\" (certificate %lu, expires %s); "
                "peers must be too", cert.org, (unsigned long)cert.serial, when);
@@ -604,6 +631,7 @@ void elpis_mesh_init(elpis_ctx_t *ctx)
 
     g_ctx = ctx;
     g_nlfd = 0;
+    g_requested = c->mesh;
     if (!c->mesh)
         return;
 
@@ -748,6 +776,7 @@ static known_t *known_add(const elpis_addr_t *a, int bridge)
     memset(k, 0, sizeof *k);
     k->a = *a;
     k->bridge = bridge ? 1u : 0u;
+    k->via = bridge ? ELPIS_MESH_F_BRIDGE : 0u;
     k->backoff = MESH_RETRY_MIN_MS;
     return k;
 }
@@ -833,6 +862,7 @@ static void known_after(session_t *s, uint64_t now)
         k->fails = 0;
     } else if (!s->quiet) {
         k->fails++;
+        elpis_strlcpy(k->why, s->why ? s->why : "no answer", sizeof k->why);
         if (k->bridge && k->fails == 1)
             elpis_info("mesh: bridge %s: %s; retrying", s->name,
                        s->why ? s->why : "no answer");
@@ -878,6 +908,7 @@ static void flush(session_t *s)
             return;
         }
         s->outoff += (size_t)n;
+        s->tx_bytes += (uint64_t)n;
     }
     s->outoff = s->outlen = 0;
 }
@@ -987,8 +1018,14 @@ static void send_list(session_t *s, uint32_t want)
         goto out;
     elpis_put32(end, sent);
     send_msg(s, MSG_LIST_END, end, sizeof end);
-    if (sent > 0)
+    if (sent > 0) {
         elpis_info("mesh: sent %u names to %s", sent, s->name);
+        g_lists_out++;
+        g_names_out += sent;
+        s->names_out += sent;
+        elpis_mesh_event(ELPIS_MESH_EV_LIST_OUT, 0, "our most-asked names", 0,
+                         s->name, 0, sent, NULL);
+    }
 out:
     elpis_ckpt_list_free(&l);
 }
@@ -1056,6 +1093,12 @@ static void recv_list_end(session_t *s)
         return;
     }
     elpis_info("mesh: %u names from %s", n, s->name);
+    g_lists_in++;
+    g_names_in += n;
+    s->names_in += n;
+    elpis_mesh_event(ELPIS_MESH_EV_LIST_IN, 0,
+                     g_gathering ? "its most-asked names, for the startup warm-up"
+                                 : "its most-asked names", 0, s->name, 0, n, NULL);
     if (g_gathering) {
         /* A peer's counts weigh half of ours: they are its clients, not
          * these. */
@@ -1079,7 +1122,7 @@ static void recv_list_end(session_t *s)
 
 static void send_peers(session_t *to)
 {
-    uint8_t body[1u + 64u * 19u];
+    uint8_t body[1u + 64u * 35u];
     size_t used = 1;
     unsigned count = 0;
     session_t *s;
@@ -1096,12 +1139,15 @@ static void send_peers(session_t *to)
         body[used] = (uint8_t)(len == 4 ? 4 : 6);
         memcpy(body + used + 1, ip, len);
         elpis_put16(body + used + 1 + len, elpis_addr_port(&s->listen));
-        used += 3u + len;
+        /* With who it is, so an instance already connected under another
+         * address is not dialled again under this one. */
+        memcpy(body + used + 3 + len, s->node, 16);
+        used += 19u + len;
         count++;
     }
     body[0] = (uint8_t)count;
-    if (count > 0)
-        send_msg(to, MSG_PEERS, body, used);
+    if (count > 0 && send_msg(to, MSG_PEERS, body, used) == ELPIS_OK)
+        g_pex_sent++;
     to->last_pex = elpis_now_ms();
 }
 
@@ -1110,6 +1156,7 @@ static void recv_peers(session_t *s, const uint8_t *p, size_t n)
     unsigned count, i;
     size_t off = 1;
 
+    g_pex_heard++;
     if (n < 1)
         return;
     count = p[0];
@@ -1119,21 +1166,34 @@ static void recv_peers(session_t *s, const uint8_t *p, size_t n)
 
         if (off + 1u > n)
             return;
+        const uint8_t *node;
+
         len = p[off] == 4 ? 4u : p[off] == 6 ? 16u : 0u;
-        if (len == 0 || off + 3u + len > n)
+        if (len == 0 || off + 19u + len > n)
             return;
         if (len == 4)
             elpis_addr_from4(&a, p + off + 1, elpis_get16(p + off + 1 + len));
         else
             elpis_addr_from6(&a, p + off + 1, elpis_get16(p + off + 1 + len));
-        off += 3u + len;
+        node = p + off + 3 + len;
+        off += 19u + len;
         /* The same rule the sender should have kept, in case it did not. */
-        if (elpis_addr_port(&a) == 0 || !elpis_mesh_may_tell(&a, &s->addr))
+        if (elpis_addr_port(&a) == 0 || !elpis_mesh_may_tell(&a, &s->addr) ||
+            memcmp(node, g_node, 16) == 0)
             continue;
         if (known_find(&a) == NULL && known_add(&a, 0) != NULL) {
             char buf[64];
+            g_pex_learned++;
             elpis_debug("mesh: heard of %s from %s",
                         elpis_addr_str(&a, buf, sizeof buf), s->name);
+        }
+        {
+            known_t *k = known_find(&a);
+            if (k != NULL) {
+                k->via |= ELPIS_MESH_F_PEX;
+                memcpy(k->node, node, 16);
+                k->has_node = 1;
+            }
         }
     }
 }
@@ -1314,6 +1374,7 @@ int elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out)
             best = (int)i;
     }
     if (best >= 0) {
+        memcpy(out->node, g_ptab[best].node, 16);
         out->addr   = g_ptab[best].addr;
         out->key_id = g_ptab[best].key_id;
         out->rtt_ms = g_ptab[best].rtt_ms;
@@ -1321,6 +1382,19 @@ int elpis_mesh_pick(uint64_t qhash, elpis_mesh_pick_t *out)
     }
     pthread_rwlock_unlock(&g_ptab_lock);
     return best >= 0 ? ELPIS_OK : ELPIS_ENOTFOUND;
+}
+
+void elpis_mesh_tally(const uint8_t node[16], unsigned what)
+{
+    int i;
+
+    pthread_rwlock_rdlock(&g_ptab_lock);
+    if ((i = ptab_find(node)) >= 0)
+        __atomic_add_fetch(what == ELPIS_MESH_T_USED  ? &g_ptab[i].used :
+                           what == ELPIS_MESH_T_FOUND ? &g_ptab[i].found :
+                                                        &g_ptab[i].asked,
+                           1, __ATOMIC_RELAXED);
+    pthread_rwlock_unlock(&g_ptab_lock);
 }
 
 static void send_lookup_key(session_t *s)
@@ -1408,6 +1482,7 @@ static void digest_build(uint64_t now)
     if (b.bits == NULL)
         return;
     b.nbits = nbits;
+    g_digest_entries = b.n;
     elpis_mcache_walk(g_ctx->mcache, digest_fill, &b);
     elpis_free(g_digest);
     g_digest = b.bits;
@@ -1433,6 +1508,7 @@ static void digest_send(session_t *s, uint64_t now)
             return;
     }
     s->last_digest = now;
+    g_digests_sent++;
 }
 
 static void recv_digest(session_t *s, const uint8_t *p, size_t n)
@@ -1466,8 +1542,19 @@ static void recv_digest(session_t *s, const uint8_t *p, size_t n)
     s->dg_got += len;
     if (s->dg_got == total) {
         ptab_bloom(s->node, s->dg, bits, k);
+        g_digests_in++;
         s->dg = NULL;
     }
+}
+
+/* The live session a lookup came from, by address. */
+static session_t *session_by_ip(const elpis_addr_t *a)
+{
+    session_t *s;
+    for (s = g_sessions; s != NULL; s = s->next)
+        if (!s->dead && s->state == S_UP && elpis_addr_eq_ip(&s->addr, a))
+            return s;
+    return NULL;
 }
 
 static int from_a_peer(const elpis_addr_t *a)
@@ -1552,6 +1639,17 @@ static void lq_serve(int fd)
         (void)sendto(fd, out, (size_t)n, 0, &from.u.sa, from.len);
         if (found)
             elpis_stat_inc(&g_ctx->stats.peer_served, 1);
+        {
+            session_t *who = session_by_ip(&from);
+            char qn[ELPIS_MAX_NAME * 4];
+            if (who != NULL && found)
+                who->served++;
+            if (elpis_tm_enabled)
+                elpis_mesh_event(ELPIS_MESH_EV_SERVED,
+                                 found ? ELPIS_MESH_R_ANSWERED : ELPIS_MESH_R_NOTHERE,
+                                 elpis_name_str(&m.qname, qn, sizeof qn), m.qtype,
+                                 who != NULL ? who->name : "", 0, 0, NULL);
+        }
     }
 }
 
@@ -1581,6 +1679,64 @@ static session_t *session_by_node(const uint8_t node[16], const session_t *not)
 static const uint8_t *dialler(const session_t *s)
 {
     return s->initiator ? g_node : s->node;
+}
+
+/*
+ * What this instance is, for the other side's status page: its host name
+ * and its own version and build.  A later message than the rest, so an
+ * older peer that does not know it simply skips it.
+ */
+static void send_info(session_t *s)
+{
+    uint8_t body[3u + 3u * 255u];
+    char host[64];
+    const char *parts[3];
+    size_t used = 0, n;
+    unsigned i;
+
+    elpis_host_name(host, sizeof host);
+    parts[0] = host;
+    parts[1] = ELPIS_VERSION;
+    parts[2] = elpis_build_rev();
+    for (i = 0; i < 3; i++) {
+        n = strlen(parts[i]);
+        if (n > 255u)
+            n = 255u;
+        body[used++] = (uint8_t)n;
+        memcpy(body + used, parts[i], n);
+        used += n;
+    }
+    send_msg(s, MSG_INFO, body, used);
+}
+
+/* Copy one length-prefixed string out, keeping only what prints. */
+static size_t info_str(const uint8_t *p, size_t n, char *out, size_t cap)
+{
+    size_t l, i, o = 0;
+
+    if (n < 1)
+        return 0;
+    l = p[0];
+    if (1u + l > n)
+        return 0;
+    for (i = 0; i < l && o + 1u < cap; i++)
+        if (p[1 + i] >= 0x20 && p[1 + i] < 0x7F)
+            out[o++] = (char)p[1 + i];
+    out[o] = '\0';
+    return 1u + l;
+}
+
+static void recv_info(session_t *s, const uint8_t *p, size_t n)
+{
+    char ver[32], build[32];
+    size_t a, b;
+
+    if ((a = info_str(p, n, s->peer_host, sizeof s->peer_host)) == 0 ||
+        (b = info_str(p + a, n - a, ver, sizeof ver)) == 0 ||
+        info_str(p + a + b, n - a - b, build, sizeof build) == 0)
+        return;
+    snprintf(s->peer_ver, sizeof s->peer_ver, build[0] ? "%s (%s)" : "%s",
+             ver, build);
 }
 
 static void session_closef(session_t *s, const char *fmt, ...)
@@ -1676,6 +1832,15 @@ static void session_up(session_t *s, const uint8_t *hello, size_t n)
     }
     elpis_noise_split(&s->hs, &s->tx, &s->rx);
     s->shares = (hello[1] & HELLO_SHARES) ? 1u : 0u;
+    if (s->initiator) {
+        /* The address now has a name: it is not dialled again while that
+         * instance is connected under any other. */
+        known_t *k = known_find(&s->dial);
+        if (k != NULL) {
+            memcpy(k->node, s->node, 16);
+            k->has_node = 1;
+        }
+    }
     if (elpis_get16(hello + 2) != 0) {
         s->listen = s->addr;
         if (elpis_addr_family(&s->listen) == AF_INET)
@@ -1698,6 +1863,24 @@ static void session_up(session_t *s, const uint8_t *hello, size_t n)
         return;
     }
     session_ready(s);
+}
+
+/*
+ * Whether this instance's list is still to be asked for: once per instance
+ * in the startup window, however many times its connection comes and goes.
+ */
+static int first_ask(const uint8_t node[16])
+{
+    static uint8_t asked[MESH_MAX_SESSIONS][16];
+    static unsigned n;
+    unsigned i;
+
+    for (i = 0; i < n; i++)
+        if (memcmp(asked[i], node, 16) == 0)
+            return 0;
+    if (n < MESH_MAX_SESSIONS)
+        memcpy(asked[n++], node, 16);
+    return 1;
 }
 
 /* Both sides have let each other in. */
@@ -1727,7 +1910,13 @@ static void session_ready(session_t *s)
     twin = session_by_node(s->node, s);
     if (twin != NULL) {
         int c1 = memcmp(dialler(s), dialler(twin), 16);
-        if (c1 <= 0) {
+        /*
+         * Dialled by the same side, the one already working stays -- two
+         * addresses for one instance would otherwise take turns replacing
+         * each other -- unless it has gone quiet, when the new one is
+         * probably the only one that still works.
+         */
+        if (c1 < 0 || (c1 == 0 && now - twin->last_rx > 2u * MESH_PING_MS)) {
             twin->quiet = 1;                    /* not a loss: s replaces it */
             session_close(twin, "replaced by a newer session");
         } else {
@@ -1746,14 +1935,27 @@ static void session_ready(session_t *s)
         elpis_info("mesh: up with %s (node %s, %s)", s->name, id,
                    s->initiator ? "we dialled" : "it dialled");
     s->last_ping = 0;               /* ping at once: lookups need the RTT */
+    s->up_ms = now;
+    send_info(s);
+    if (!s->initiator) {
+        /* It dialled us; say so, and how else we knew of it. */
+        unsigned i;
+        s->via |= ELPIS_MESH_F_IN;
+        for (i = 0; i < g_nknown; i++)
+            if (g_known[i].has_node && !memcmp(g_known[i].node, s->node, 16))
+                s->via |= g_known[i].via;
+    }
     ptab_up(s);
     send_lookup_key(s);
 
-    if (c->warm_rate > 0 && s->shares && now - g_t0 < MESH_ASK_WINDOW_MS) {
+    if (c->warm_rate > 0 && s->shares && now - g_t0 < MESH_ASK_WINDOW_MS &&
+        first_ask(s->node)) {
         uint8_t want[4];
         elpis_put32(want, c->checkpoint_names);
-        if (send_msg(s, MSG_LIST_REQ, want, sizeof want) == ELPIS_OK)
+        if (send_msg(s, MSG_LIST_REQ, want, sizeof want) == ELPIS_OK) {
             s->asked = 1;
+            g_lists_asked++;
+        }
     }
     send_peers(s);
 }
@@ -1865,6 +2067,9 @@ static void on_frame(session_t *s, const uint8_t *p, size_t n)
     case MSG_DIGEST:
         recv_digest(s, g_rx + 1, plen - 1u);
         break;
+    case MSG_INFO:
+        recv_info(s, g_rx + 1, plen - 1u);
+        break;
     default:
         break;                      /* a later version's message */
     }
@@ -1908,6 +2113,7 @@ static void on_readable(session_t *s)
             break;
         }
         s->inlen += (size_t)n;
+        s->rx_bytes += (uint64_t)n;
 
         /* Every whole frame in the buffer. */
         {
@@ -2013,10 +2219,20 @@ static void lsd_on_readable(int fd)
         if (n < 0)
             return;
         /* Another mesh, a stranger, or noise: not a word about it. */
-        if (elpis_mesh_lsd_check(g_lsd_key, buf, (size_t)n, node, &port) != ELPIS_OK)
+        if (elpis_mesh_lsd_check(g_lsd_key, buf, (size_t)n, node, &port) != ELPIS_OK) {
+            g_lsd_foreign++;
             continue;
-        if (memcmp(node, g_node, 16) == 0 || session_by_node(node, NULL) != NULL)
-            continue;               /* our own, looped back, or already up */
+        }
+        if (memcmp(node, g_node, 16) == 0)
+            continue;               /* our own, looped back */
+        g_lsd_heard++;
+        {
+            session_t *up = session_by_node(node, NULL);
+            if (up != NULL) {
+                up->via |= ELPIS_MESH_F_LSD;    /* it is on this segment too */
+                continue;                       /* already up */
+            }
+        }
 
         if (elpis_addr_family(&from) == AF_INET)
             from.u.v4.sin_port = htons(port);
@@ -2031,12 +2247,15 @@ static void lsd_on_readable(int fd)
                 seen = g_known[i].has_node && !memcmp(g_known[i].node, node, 16);
             if ((k = known_add(&from, 0)) == NULL)
                 continue;
-            if (!seen)
+            if (!seen) {
+                g_lsd_found++;
                 elpis_info("mesh: found %s on the local network",
                            elpis_addr_str(&from, name, sizeof name));
+            }
         }
         memcpy(k->node, node, 16);
         k->has_node = 1;
+        k->via |= ELPIS_MESH_F_LSD;
         /* Still announcing after the dials to it gave up: it is there, so
          * one more try -- but no more often than the backoff allows. */
         if (k->fails >= MESH_LEARNED_TRIES && elpis_now_ms() >= k->next_try)
@@ -2089,6 +2308,7 @@ static void dial_due(uint64_t now)
         if (elpis_sock_tcp_connect(&k->a, NULL, &fd) != ELPIS_OK) {
             k->fails++;
             k->attempted = 1;
+            elpis_strlcpy(k->why, strerror(errno), sizeof k->why);
             continue;
         }
         s = session_new(fd, 1, &k->a);
@@ -2098,6 +2318,7 @@ static void dial_due(uint64_t now)
         }
         s->dial = k->a;
         s->state = S_CONNECTING;
+        s->via = k->via | ELPIS_MESH_F_OUT;
         if (k->has_node) {
             memcpy(s->want, k->node, 16);
             s->has_want = 1;
@@ -2200,11 +2421,212 @@ static void timers(uint64_t now)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* The status page                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The Content tab's ring of recent exchanges.  Written from workers as well
+ * as this thread, so under a lock -- but only while the status page is on,
+ * and a lookup is one short append, so the lock is never where time goes.
+ */
+static pthread_mutex_t    g_ev_lock = PTHREAD_MUTEX_INITIALIZER;
+static elpis_mesh_event_t g_ev[ELPIS_MESH_EVENTS];
+static unsigned           g_ev_next, g_ev_n;
+
+void elpis_mesh_event(unsigned kind, unsigned result, const char *name,
+                      uint16_t qtype, const char *peer, uint32_t us,
+                      uint32_t count, const char *note)
+{
+    elpis_mesh_event_t *e;
+
+    if (!elpis_tm_enabled)
+        return;
+    pthread_mutex_lock(&g_ev_lock);
+    e = &g_ev[g_ev_next];
+    g_ev_next = (g_ev_next + 1u) % ELPIS_MESH_EVENTS;
+    if (g_ev_n < ELPIS_MESH_EVENTS)
+        g_ev_n++;
+    e->at     = (uint64_t)elpis_wall_s();
+    e->kind   = (uint8_t)kind;
+    e->result = (uint8_t)result;
+    e->qtype  = qtype;
+    e->us     = us;
+    e->count  = count;
+    elpis_strlcpy(e->name, name ? name : "", sizeof e->name);
+    elpis_strlcpy(e->peer, peer ? peer : "", sizeof e->peer);
+    elpis_strlcpy(e->note, note ? note : "", sizeof e->note);
+    pthread_mutex_unlock(&g_ev_lock);
+}
+
+unsigned elpis_mesh_events(elpis_mesh_event_t *out, unsigned max)
+{
+    unsigned n, i, first;
+
+    pthread_mutex_lock(&g_ev_lock);
+    n = g_ev_n < max ? g_ev_n : max;
+    first = (g_ev_next + ELPIS_MESH_EVENTS - n) % ELPIS_MESH_EVENTS;
+    for (i = 0; i < n; i++)
+        out[i] = g_ev[(first + i) % ELPIS_MESH_EVENTS];
+    pthread_mutex_unlock(&g_ev_lock);
+    return n;
+}
+
+static pthread_mutex_t   g_view_lock = PTHREAD_MUTEX_INITIALIZER;
+static elpis_mesh_view_t g_view, g_view_next;
+
+/* The address alone, without its port, for the Peers table. */
+static void ip_text(const elpis_addr_t *a, char *out, size_t cap)
+{
+    unsigned len;
+    const uint8_t *ip = addr_ip(a, &len);
+
+    if (len == 4)
+        elpis_ntop4(ip, out, cap);
+    else
+        elpis_ntop6(ip, out, cap);
+}
+
+/* Called about once a second from the loop, while the status page is on. */
+static void publish_view(uint64_t now)
+{
+    const elpis_conf_t *c = &g_ctx->conf;
+    elpis_mesh_view_t *v = &g_view_next;
+    const session_t *s;
+    unsigned i;
+
+    memset(v, 0, sizeof *v);
+    v->requested = g_requested;
+    v->on = 1;
+    hex8(g_node, v->node);
+    v->up_s = (now - g_t0) / 1000u;
+    v->licensed = g_licensed;
+    if (g_licensed) {
+        elpis_strlcpy(v->org, g_cert_org, sizeof v->org);
+        v->cert_serial = g_cert_serial;
+        elpis_strlcpy(v->cert_expires, g_cert_expires, sizeof v->cert_expires);
+    }
+    for (i = 0; i < c->n_mesh_listen && i < ELPIS_MESH_MAX_LISTEN; i++)
+        elpis_addr_str(&c->mesh_listen[i], v->listen[i], sizeof v->listen[i]);
+    v->nlisten = i;
+    v->nbridges = c->n_mesh_peer;
+    v->share = c->mesh_share;
+    v->lookup = c->mesh_lookup;
+    v->gathering = g_gathering;
+    v->share_min_hits = c->mesh_share_min_hits;
+    v->lookup_rtt = c->mesh_lookup_rtt;
+    v->max_peers = c->mesh_max_peers;
+
+    v->lsd = c->mesh_lsd;
+    v->lsd4 = g_lsd4 >= 0;
+    v->lsd6 = g_lsd6 >= 0;
+    v->lsd_port4 = g_lsd_port4;
+    v->lsd_port6 = g_lsd_port6;
+    v->lsd_sent = g_lsd_sent;
+    v->lsd_heard = g_lsd_heard;
+    v->lsd_foreign = g_lsd_foreign;
+    v->lsd_found = g_lsd_found;
+    v->lsd_next_s = g_lsd_next > now ? (uint32_t)((g_lsd_next - now) / 1000u) : 0;
+    v->pex_sent = g_pex_sent;
+    v->pex_heard = g_pex_heard;
+    v->pex_learned = g_pex_learned;
+
+    v->lists_asked = g_lists_asked;
+    v->lists_in = g_lists_in;
+    v->names_in = g_names_in;
+    v->lists_out = g_lists_out;
+    v->names_out = g_names_out;
+    v->digests_sent = g_digests_sent;
+    v->digests_in = g_digests_in;
+    v->digest_bits = g_digest != NULL ? g_digest_bits : 0;
+    v->digest_entries = g_digest != NULL ? g_digest_entries : 0;
+    v->digest_age_s = g_digest != NULL ? (uint32_t)((now - g_digest_at) / 1000u) : 0;
+    v->lq_key_age_s = (uint32_t)((now - g_lq_rotated) / 1000u);
+    v->asked  = g_ctx->stats.peer_asked;
+    v->found  = g_ctx->stats.peer_found;
+    v->used   = g_ctx->stats.peer_used;
+    v->served = g_ctx->stats.peer_served;
+
+    pthread_rwlock_rdlock(&g_ptab_lock);
+    for (s = g_sessions; s != NULL && v->npeers < ELPIS_MESH_VIEW_PEERS; s = s->next) {
+        elpis_mesh_peer_view_t *p;
+        int t;
+
+        if (s->dead || s->state != S_UP)
+            continue;
+        p = &v->peers[v->npeers++];
+        elpis_strlcpy(p->host, s->peer_host, sizeof p->host);
+        elpis_strlcpy(p->version, s->peer_ver, sizeof p->version);
+        ip_text(&s->addr, p->addr, sizeof p->addr);
+        p->port = s->has_listen ? elpis_addr_port(&s->listen) : 0;
+        hex8(s->node, p->node);
+        p->flags = s->via | (s->shares ? ELPIS_MESH_F_SHARES : 0u) |
+                   (g_licensed ? ELPIS_MESH_F_CERT : 0u);
+        p->rtt_ms = s->rtt_ms;
+        p->up_s = (now - s->up_ms) / 1000u;
+        p->cert_serial = s->cert_serial;
+        p->rx_bytes = s->rx_bytes;
+        p->tx_bytes = s->tx_bytes;
+        p->names_in = s->names_in;
+        p->names_out = s->names_out;
+        p->served = s->served;
+        if ((t = ptab_find(s->node)) >= 0) {
+            const ptab_t *e = &g_ptab[t];
+            if (e->has_key)
+                p->flags |= ELPIS_MESH_F_KEY;
+            if (e->bloom != NULL) {
+                p->flags |= ELPIS_MESH_F_DIGEST;
+                p->digest_bits = e->bloom_bits;
+            }
+            p->asked = __atomic_load_n(&e->asked, __ATOMIC_RELAXED);
+            p->found = __atomic_load_n(&e->found, __ATOMIC_RELAXED);
+            p->used  = __atomic_load_n(&e->used, __ATOMIC_RELAXED);
+        }
+    }
+    pthread_rwlock_unlock(&g_ptab_lock);
+
+    for (i = 0; i < g_nknown && v->nknown < ELPIS_MESH_VIEW_KNOWN; i++) {
+        const known_t *k = &g_known[i];
+        elpis_mesh_known_view_t *o = &v->known[v->nknown++];
+
+        elpis_addr_str(&k->a, o->addr, sizeof o->addr);
+        o->via = k->via;
+        o->fails = k->fails;
+        elpis_strlcpy(o->why, k->why, sizeof o->why);
+        if (k->self)
+            o->state = ELPIS_MESH_KS_SELF;
+        else if (known_connected(k))
+            o->state = ELPIS_MESH_KS_UP;
+        else if (!k->bridge && k->fails >= MESH_LEARNED_TRIES)
+            o->state = ELPIS_MESH_KS_GIVEN;
+        else if (k->fails > 0)
+            o->state = ELPIS_MESH_KS_RETRY;
+        else
+            o->state = ELPIS_MESH_KS_IDLE;
+        o->retry_s = k->next_try > now ? (uint32_t)((k->next_try - now) / 1000u) : 0;
+    }
+
+    pthread_mutex_lock(&g_view_lock);
+    memcpy(&g_view, v, sizeof g_view);
+    pthread_mutex_unlock(&g_view_lock);
+}
+
+void elpis_mesh_view(elpis_mesh_view_t *out)
+{
+    pthread_mutex_lock(&g_view_lock);
+    memcpy(out, &g_view, sizeof *out);
+    pthread_mutex_unlock(&g_view_lock);
+    /* Before the first publish, or with the mesh off, only this is true. */
+    out->requested = g_requested;
+    out->on = g_running;
+}
+
 void *elpis_mesh_main(void *arg)
 {
     elpis_ctx_t *ctx = (elpis_ctx_t *)arg;
     const elpis_conf_t *c = &ctx->conf;
     struct pollfd pf[2u * ELPIS_MESH_MAX_LISTEN + 2u + MESH_MAX_SESSIONS];
+    uint64_t last_view = 0;
     int lsd[2];
     session_t *ps[MESH_MAX_SESSIONS];
     unsigned i;
@@ -2221,6 +2643,7 @@ void *elpis_mesh_main(void *arg)
 
     lsd[0] = g_lsd4;
     lsd[1] = g_lsd6;
+    g_running = 1;
 
     while (!ctx->shutdown) {
         uint64_t now = elpis_now_ms();
@@ -2232,6 +2655,10 @@ void *elpis_mesh_main(void *arg)
         dial_due(now);
         timers(now);
         reap(now);
+        if (elpis_tm_enabled && now - last_view >= 1000u) {
+            publish_view(now);
+            last_view = now;
+        }
 
         for (l = 0; l < g_nlfd; l++) {
             pf[nf].fd = g_lfd[l];
@@ -2301,5 +2728,6 @@ void *elpis_mesh_main(void *arg)
         session_free(s);
     }
     g_nsessions = 0;
+    g_running = 0;
     return NULL;
 }

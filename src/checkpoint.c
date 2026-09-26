@@ -16,6 +16,7 @@
 #include "elpis/util.h"
 #include "elpis/log.h"
 #include "elpis/atomic.h"
+#include "elpis/mesh.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -814,6 +815,12 @@ static void job_share_done(warmup_t *s)
                (double)(elpis_now_ms() - j->t0) / 1000.0,
                (unsigned long long)elpis_atomic_load64(&j->issued),
                (unsigned long long)elpis_atomic_load64(&j->cached));
+    {
+        uint64_t took = elpis_now_ms() - j->t0;
+        elpis_mesh_event(ELPIS_MESH_EV_WARM, 0, j->what, 0, "",
+                         took > 4294967u ? 0xFFFFFFFFu : (uint32_t)(took * 1000u),
+                         (uint32_t)elpis_atomic_load64(&j->issued), NULL);
+    }
     job_free(j);
 }
 

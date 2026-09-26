@@ -143,6 +143,23 @@ h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
   display:flex;align-items:center;gap:16px;padding:0 10px;font-size:11px;
   color:var(--dim);flex:0 0 auto}
 #status b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+/* tabbed windows: the tab bar stays put and the pane under it scrolls */
+.tabw{display:flex;flex-direction:column;height:100%;margin:-10px}
+.tabs{display:flex;gap:2px;padding:6px 8px 0;border-bottom:1px solid var(--line);
+  flex:0 0 auto}
+.tab{padding:4px 12px;border:1px solid transparent;border-bottom:0;
+  border-radius:4px 4px 0 0;cursor:pointer;color:var(--dim);user-select:none}
+.tab:hover{color:var(--fg)}
+.tab.on{background:var(--win);border-color:var(--line);color:var(--fg);
+  margin-bottom:-1px;font-weight:600}
+.tabpane{flex:1;overflow:auto;padding:10px}
+.tabpane th{white-space:nowrap}
+.flags{font:11px ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em}
+.flags i{font-style:normal;cursor:help}
+.legend{color:var(--dim);margin-top:8px;line-height:1.7}
+.legend code{color:var(--fg)}
+.fbar{display:flex;gap:6px;margin-bottom:8px;align-items:center}
+.fbar .pill{cursor:pointer}
 </style>
 </head>
 <body>
@@ -678,6 +695,241 @@ var TMRES = [
   ser: function(d){ return [{ data: d.history.qps, color:'#e0a32f' }]; } }
 ];
 
+/*
+ * The mesh, as the mesh thread last published it: four tabs, laid out the
+ * way a BitTorrent client lays out a torrent's properties.  General is this
+ * instance; Trackers is how peers are found (bridges, peer exchange, local
+ * discovery); Peers is who is connected; Content is what went across.
+ */
+var MESH_FLAGS = [
+  [0x001, 'B', 'a bridge, named in mesh-peer:'],
+  [0x002, 'X', 'heard of through peer exchange'],
+  [0x004, 'L', 'found by local discovery'],
+  [0x008, 'I', 'it dialled us'],
+  [0x010, 'O', 'we dialled it'],
+  [0x020, 'C', 'its certificate checked out'],
+  [0x040, 'K', 'we hold its lookup key'],
+  [0x080, 'D', 'we hold its cache digest'],
+  [0x100, 'S', 'it shares its list of names']
+];
+var MESH_TABS = [['general','General'], ['trackers','Trackers'],
+                 ['peers','Peers'], ['content','Content']];
+
+function dim(s){ return "<span style='color:var(--dim)'>" + s + "</span>"; }
+function meshFlags(f){
+  return "<span class='flags'>" + MESH_FLAGS.map(function(x){
+    return (f & x[0]) ? "<i title='" + esc(x[2]) + "'>" + x[1] + "</i>" : "";
+  }).join('') + "</span>";
+}
+function meshVia(v){
+  var s = [];
+  if (v & 0x001) s.push('bridge');
+  if (v & 0x002) s.push('peer exchange');
+  if (v & 0x004) s.push('local discovery');
+  return s.length ? s.join(', ') : dim('-');
+}
+function onoff(v){ return v ? "<span class='pill on'>on</span>" : "<span class='pill'>off</span>"; }
+function pct(a, b){ return b ? (a * 100 / b).toFixed(0) + '%' : '-'; }
+
+function meshOff(m){
+  if (!m.requested)
+    return "<div class='tile' style='max-width:520px'><b>The mesh is off</b>" +
+      "<div style='margin-top:6px'>Instances you run can warm each other after a " +
+      "restart and answer each other's misses. <code>mesh: yes</code>, a " +
+      "<code>mesh-psk:</code> and a <code>mesh-listen:</code> or " +
+      "<code>mesh-peer:</code> in elpis.conf turn it on; docs/mesh.md has the rest." +
+      "</div></div>";
+  return "<div class='tile' style='max-width:520px'><b>The mesh did not start</b>" +
+    "<div style='margin-top:6px'>It is configured, but something it needs was " +
+    "missing at startup, so the resolver runs without it. The Log window says " +
+    "what.</div></div>";
+}
+
+function meshGeneral(m){
+  var L = m.lookups || {}, li = m.lists || {}, dg = m.digest || {};
+  var sec = m.licensed ?
+    "certificate " + m.cert + ", " + esc(m.org) :
+    "pre-shared key only";
+  return "<div class='tiles'>" +
+    "<div class='tile'><b>Peers connected</b><div class='big'>" +
+      num((m.peers || []).length) + "</div></div>" +
+    "<div class='tile'><b>Misses a peer answered</b><div class='big'>" +
+      num(L.used) + "</div></div>" +
+    "<div class='tile'><b>Answered for peers</b><div class='big'>" +
+      num(L.served) + "</div></div>" +
+    "<div class='tile'><b>Names received</b><div class='big'>" +
+      num(li.namesin) + "</div></div>" +
+    "</div><div style='height:10px'></div><div class='cols'>" +
+    "<div><h4>This instance</h4><div class='kv'>" +
+      "<b>node</b><span><code>" + esc(m.node) + "</code></span>" +
+      "<b>mesh up</b><span>" + dur(m.up) + "</span>" +
+      "<b>peers let in by</b><span>" + sec + "</span>" +
+      (m.licensed ? "<b>certificate expires</b><span>" + esc(m.certexp) + "</span>" : "") +
+      "<b>listening on</b><span>" + (m.listen.length ?
+        m.listen.map(esc).join('<br>') : dim('nothing: it only dials')) + "</span>" +
+      "<b>bridges</b><span>" + num(m.bridges) + "</span>" +
+      "<b>most peers</b><span>" + num(m.maxpeers) + "</span>" +
+    "</div></div>" +
+    "<div><h4>Name lists</h4><div class='kv'>" +
+      "<b>ours shared</b><span>" + onoff(m.share) + "</span>" +
+      "<b>names shared once asked</b><span>" + num(m.minhits) + " times</span>" +
+      "<b>startup gathering</b><span>" + (m.gathering ? "in progress" : "done") + "</span>" +
+      "<b>lists asked for</b><span>" + num(li.asked) + "</span>" +
+      "<b>lists received</b><span>" + num(li['in']) + " (" + num(li.namesin) + " names)</span>" +
+      "<b>lists sent</b><span>" + num(li.out) + " (" + num(li.namesout) + " names)</span>" +
+    "</div></div>" +
+    "<div><h4>Lookups on a miss</h4><div class='kv'>" +
+      "<b>asking peers</b><span>" + onoff(m.lookup) + "</span>" +
+      "<b>peers asked if within</b><span>" + num(m.rtt) + " ms</span>" +
+      "<b>asked</b><span>" + num(L.asked) + "</span>" +
+      "<b>they had it</b><span>" + num(L.found) + " (" + pct(L.found, L.asked) + ")</span>" +
+      "<b>theirs came first</b><span>" + num(L.used) + " (" + pct(L.used, L.asked) + ")</span>" +
+      "<b>answered for peers</b><span>" + num(L.served) + "</span>" +
+    "</div></div>" +
+    "<div><h4>Our cache digest</h4><div class='kv'>" +
+      "<b>names in it</b><span>" + (dg.bits ? num(dg.entries) : dim('none built yet')) + "</span>" +
+      "<b>size</b><span>" + (dg.bits ? bytes(dg.bits / 8) : '-') + "</span>" +
+      "<b>built</b><span>" + (dg.bits ? dg.age + " s ago" : '-') + "</span>" +
+      "<b>sent to peers</b><span>" + num(dg.sent) + "</span>" +
+      "<b>received</b><span>" + num(dg['in']) + "</span>" +
+      "<b>lookup key age</b><span>" + dur(m.keyage) + "</span>" +
+    "</div></div></div>";
+}
+
+function meshTrackers(m){
+  var z = m.lsd || {}, px = m.pex || {}, known = m.known || [];
+  var h = "<table><tr><th>source</th><th>status</th><th class='n'>peers</th>" +
+          "<th>message</th></tr>";
+  known.forEach(function(k){
+    if (!(k.via & 1)) return;
+    var st = k.state === 1 ? "<span class='pill on'>working</span>" :
+             k.state === 3 ? "<span class='pill'>this instance</span>" :
+             k.state === 2 ? "<span class='pill bad'>not working</span>" :
+                             "<span class='pill warn'>connecting</span>";
+    var msg = k.state === 2 ? esc(k.why) + (k.retry ? '; retrying in ' + k.retry + ' s' : '') :
+              k.state === 3 ? 'it is this instance, so it is not dialled' : '';
+    h += "<tr><td>bridge " + esc(k.addr) + "</td><td>" + st + "</td><td class='n'>" +
+         (k.state === 1 ? 1 : 0) + "</td><td title='" + esc(msg) + "'>" + msg + "</td></tr>";
+  });
+  h += "<tr><td>** [PeX] **</td><td><span class='pill on'>working</span></td>" +
+       "<td class='n'>" + num(px.learned) + "</td><td>told " + num(px.sent) +
+       " times, heard " + num(px.heard) + " times</td></tr>";
+  var lst, lmsg;
+  if (!z.on){ lst = "<span class='pill'>disabled</span>"; lmsg = 'mesh-lsd: no'; }
+  else if (!z.v4 && !z.v6){ lst = "<span class='pill bad'>not working</span>";
+    lmsg = 'could not join 239.255.78.78 or ff12::7878 on UDP 7878'; }
+  else {
+    /* Announcing needs a listener the segment can reach; hearing only needs
+     * the group joined, so a family can do one without the other. */
+    var say = [], hear = [];
+    if (z.port4) say.push('IPv4 port ' + z.port4);
+    if (z.port6) say.push('IPv6 port ' + z.port6);
+    if (z.v4) hear.push('IPv4');
+    if (z.v6) hear.push('IPv6');
+    lst = "<span class='pill on'>working</span>";
+    lmsg = (say.length ? 'announcing ' + say.join(' and ') + ', ' + num(z.sent) +
+              ' times, next in ' + z.next + ' s' :
+              'not announcing: no listener the segment can reach') +
+           '; hearing on ' + hear.join(' and ') + ': ' + num(z.heard) +
+           ' heard, ' + num(z.foreign) + ' ignored from other meshes';
+  }
+  h += "<tr><td>** [LSD] **</td><td>" + lst + "</td><td class='n'>" + num(z.found) +
+       "</td><td title='" + esc(lmsg) + "'>" + lmsg + "</td></tr></table>";
+
+  h += "<h4 style='margin-top:12px'>Addresses known</h4><table><tr><th>address</th>" +
+       "<th>learned from</th><th>state</th><th class='n'>failed</th><th>last error</th></tr>";
+  if (!known.length)
+    h += "<tr><td colspan='5' style='color:var(--dim)'>none yet</td></tr>";
+  known.forEach(function(k){
+    var st = ['idle', 'connected', 'retrying', 'this instance', 'given up'][k.state] || '?';
+    if (k.state === 2 && k.retry) st += ' in ' + k.retry + ' s';
+    h += "<tr><td>" + esc(k.addr) + "</td><td>" + meshVia(k.via) + "</td><td>" + st +
+         "</td><td class='n'>" + num(k.fails) + "</td><td title='" + esc(k.why) + "'>" +
+         (k.why ? esc(k.why) : dim('-')) + "</td></tr>";
+  });
+  return h + "</table><div class='legend'>An address is only where to dial: the " +
+    "handshake decides who gets in. A peer heard of through peer exchange is " +
+    "given up after five failed dials; a bridge never is.</div>";
+}
+
+function meshPeers(m){
+  var p = m.peers || [];
+  var h = "<table><tr><th>instance</th><th>IP address</th><th class='n'>port</th>" +
+          "<th>flags</th><th>version</th><th class='n'>round trip</th>" +
+          "<th class='n'>connected</th><th class='n'>asked / used</th>" +
+          "<th class='n'>answered</th><th class='n'>names in / out</th>" +
+          "<th class='n'>&#8595; / &#8593;</th></tr>";
+  if (!p.length)
+    h += "<tr><td colspan='11' style='color:var(--dim)'>no peer connected</td></tr>";
+  p.forEach(function(x){
+    h += "<tr><td title='node " + esc(x.node) + "'>" + (x.host ? esc(x.host) : dim(esc(x.node))) +
+         "</td><td>" + esc(x.addr) + "</td><td class='n'>" + (x.port || dim('-')) +
+         "</td><td>" + meshFlags(x.flags) + "</td><td>" + (x.ver ? esc(x.ver) : dim('older')) +
+         "</td><td class='n'>" + (x.rtt ? x.rtt + ' ms' : dim('-')) +
+         "</td><td class='n'>" + dur(x.up) +
+         "</td><td class='n'>" + num(x.asked) + ' / ' + num(x.used) +
+         "</td><td class='n'>" + num(x.served) +
+         "</td><td class='n'>" + num(x.nin) + ' / ' + num(x.nout) +
+         "</td><td class='n'>" + bytes(x.rx) + ' / ' + bytes(x.tx) + "</td></tr>";
+  });
+  return h + "</table><div class='legend'>" + MESH_FLAGS.map(function(x){
+    return "<code>" + x[1] + "</code> " + esc(x[2]);
+  }).join(' &middot; ') + "</div>";
+}
+
+var MESH_KIND = { 1:'asked a peer', 2:'a peer asked', 3:'list received',
+                  4:'list sent', 5:'warm-up done', 6:'not confirmed' };
+var MESH_RES  = { 1:["used: it came first", 'on'], 2:["had it; ours came first", ''],
+                  3:["did not have it", 'warn'], 4:["no reply before ours", ''],
+                  5:["answered", 'on'], 6:["not in our cache", ''] };
+var MESH_FILT = [['all','All'], ['asked','Asked'], ['served','Answered'],
+                 ['lists','Lists and warm-ups']];
+
+/* Events carry the peer's address; the Peers table knows its name. */
+function meshPeerName(m, addr){
+  var p = m.peers || [], i, a;
+  for (i = 0; i < p.length; i++){
+    a = p[i].addr.indexOf(':') >= 0 ? '[' + p[i].addr + ']' : p[i].addr;
+    if (a + ':' + p[i].port === addr && p[i].host)
+      return "<span title='" + esc(addr) + "'>" + esc(p[i].host) + "</span>";
+  }
+  return esc(addr);
+}
+
+function meshContent(m, def){
+  var ev = (m.events || []).slice().reverse(), f = def.cf || 'all';
+  var h = "<div class='fbar'>" + MESH_FILT.map(function(x){
+    return "<span class='pill" + (x[0] === f ? " on" : "") + "' data-f='" + x[0] +
+           "'>" + x[1] + "</span>";
+  }).join('') + "<span class='spacer'></span>" +
+    dim(ev.length + ' most recent, kept in memory only') + "</div>";
+  ev = ev.filter(function(e){
+    return f === 'all' || (f === 'asked' && e.k === 1) ||
+           (f === 'served' && e.k === 2) || (f === 'lists' && e.k >= 3);
+  });
+  h += "<table><tr><th>time</th><th>what</th><th>name</th><th>type</th>" +
+       "<th>peer</th><th>result</th><th class='n'>took</th></tr>";
+  if (!ev.length)
+    h += "<tr><td colspan='7' style='color:var(--dim)'>nothing has crossed yet</td></tr>";
+  ev.forEach(function(e){
+    var res = '', took = '';
+    if (e.k <= 2 && MESH_RES[e.r])
+      res = "<span class='pill " + MESH_RES[e.r][1] + "'>" + MESH_RES[e.r][0] + "</span>";
+    else if (e.k === 6)
+      res = "<span class='pill bad'>dropped: ours said " + esc(e.note) + "</span>";
+    else if (e.n)
+      res = num(e.n) + ' names';
+    if (e.k === 1 || e.k === 5) took = ms(e.us);
+    h += "<tr><td>" + new Date(e.at * 1000).toLocaleTimeString() + "</td><td>" +
+         MESH_KIND[e.k] + "</td><td title='" + esc(e.name) + "'>" + esc(e.name) +
+         "</td><td>" + esc(e.type) + "</td><td>" + (e.peer ? meshPeerName(m, e.peer) : dim('-')) +
+         "</td><td>" + res + "</td><td class='n'>" + took + "</td></tr>";
+  });
+  return h + "</table><div class='legend'>Names travel between your own " +
+    "instances only. This list is the last 256 exchanges, kept in memory while " +
+    "this page is on and never written anywhere.</div>";
+}
+
 function viewOf(id){
   for (var i = 0; i < VIEWS.length; i++) if (VIEWS[i].id === id) return VIEWS[i];
   return null;
@@ -921,6 +1173,41 @@ var VIEWS = [
       "<div><h4>Asking for bogus</h4>" + rows(d.top.clientbogus, 'client') + "</div>" +
       "<div><h4>Upstream not answering</h4>" + rows(d.top.timeout, 'server') + "</div>" +
       "</div>";
+  }},
+
+{ id:'mesh', title:'Mesh Network', w:880, h:480, nofit: true,
+  icon:"<svg viewBox='0 0 24 24'><circle cx='5' cy='6' r='2'/><circle cx='19' cy='6' r='2'/>" +
+       "<circle cx='12' cy='18' r='2'/><circle cx='12' cy='10' r='1.5'/>" +
+       "<path d='M7 6h10M6 8l5 8M18 8l-5 8M6.5 7.2l4.2 2.1M17.5 7.2l-4.2 2.1M12 11.5V16'/></svg>",
+  render: function(b, d, w){
+    var self = this, m = d.mesh || {}, sel = this.sel || 'general';
+    var old = b.querySelector('.tabpane'), top = old ? old.scrollTop : 0, pane;
+    if (!m.requested || !m.on) pane = meshOff(m);
+    else if (sel === 'trackers') pane = meshTrackers(m);
+    else if (sel === 'peers')    pane = meshPeers(m);
+    else if (sel === 'content')  pane = meshContent(m, this);
+    else                         pane = meshGeneral(m);
+    b.innerHTML = "<div class='tabw'><div class='tabs'>" +
+      MESH_TABS.map(function(t){
+        return "<div class='tab" + (t[0] === sel ? " on" : "") + "' data-k='" +
+               t[0] + "'>" + t[1] + "</div>";
+      }).join('') + "</div><div class='tabpane'>" + pane + "</div></div>";
+    /* Redrawn every second: keep the reader where they were. */
+    b.querySelector('.tabpane').scrollTop = top;
+    b.querySelector('.tabs').addEventListener('click', function(e){
+      var t = e.target.closest('.tab');
+      if (!t || t.dataset.k === self.sel) return;
+      self.sel = t.dataset.k;
+      b.innerHTML = '';                  /* a new tab starts at its top */
+      paintWin(w);
+      layoutSave();
+    });
+    b.querySelector('.tabpane').addEventListener('click', function(e){
+      var t = e.target.closest('[data-f]');
+      if (!t) return;
+      self.cf = t.dataset.f;
+      paintWin(w);
+    });
   }},
 
 { id:'log', title:'Log', w:640, h:330, nofit: true,

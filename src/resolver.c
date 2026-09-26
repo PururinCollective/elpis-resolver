@@ -2499,6 +2499,11 @@ static void note_refresh_outcome(elpis_task_t *t)
         elpis_meshq_distrust(elpis_mesh_qhash(folded, t->orig_qname.len,
                                               t->orig_qtype,
                                               t->client_do ? ELPIS_MK_DO : 0u));
+        if (elpis_tm_enabled)
+            elpis_mesh_event(ELPIS_MESH_EV_DROPPED, 0,
+                             elpis_name_str(&t->orig_qname, nb, sizeof nb),
+                             t->orig_qtype, "", 0, 0,
+                             elpis_rcode_name(t->rcode));
         if (now - last_note >= 60000u) {
             last_note = now;
             elpis_info("mesh: a peer's answer for %s %s was not confirmed "

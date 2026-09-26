@@ -19,6 +19,7 @@
 #include "elpis/simd.h"
 #include "elpis/util.h"
 #include "elpis/log.h"
+#include "elpis/telemetry.h"
 
 #include <errno.h>
 #include <sys/socket.h>
@@ -31,6 +32,8 @@ typedef struct peerq {
     uint8_t       key[32];
     uint32_t      key_id;
     elpis_addr_t  to;
+    uint8_t       node[16];         /* who, for the status page's tallies */
+    uint64_t      sent_us;
 } peerq_t;
 
 #define MQ_BUCKETS 256u             /* by the token's first byte */
@@ -176,12 +179,31 @@ void elpis_meshq_ask(elpis_task_t *t)
     q->task = t;
     q->key_id = pick.key_id;
     q->to = pick.addr;
+    memcpy(q->node, pick.node, 16);
+    q->sent_us = elpis_now_us();
     memcpy(q->key, pick.key, 32);
     elpis_memzero(pick.key, sizeof pick.key);
     q->hnext = g_mq.hash[q->token[0]];
     g_mq.hash[q->token[0]] = q;
     t->peerq = q;
     elpis_stat_inc(&w->stats.peer_asked, 1);
+    if (elpis_tm_enabled)
+        elpis_mesh_tally(q->node, ELPIS_MESH_T_ASKED);
+}
+
+/* How a lookup ended, for the Content tab. */
+static void mq_note(const elpis_task_t *t, const peerq_t *q, unsigned result)
+{
+    char qn[ELPIS_MAX_NAME * 4], peer[64];
+    uint64_t us;
+
+    if (!elpis_tm_enabled)
+        return;
+    us = elpis_now_us() - q->sent_us;
+    elpis_mesh_event(ELPIS_MESH_EV_ASKED, result,
+                     elpis_name_str(&t->orig_qname, qn, sizeof qn),
+                     t->orig_qtype, elpis_addr_str(&q->to, peer, sizeof peer),
+                     us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)us, 0, NULL);
 }
 
 void elpis_meshq_cancel(elpis_task_t *t)
@@ -191,12 +213,25 @@ void elpis_meshq_cancel(elpis_task_t *t)
     if (q == NULL)
         return;
     t->peerq = NULL;
+    mq_note(t, q, ELPIS_MESH_R_NOREPLY);    /* our own answer came first */
     for (pp = &g_mq.hash[q->token[0]]; *pp != NULL; pp = &(*pp)->hnext)
         if (*pp == q) {
             *pp = q->hnext;
             break;
         }
     mq_free(q);
+}
+
+/* As mq_note(), when the task has already been answered and freed. */
+static void note_answer(const elpis_msg_t *m, const peerq_t *q, unsigned result)
+{
+    char qn[ELPIS_MAX_NAME * 4], peer[64];
+    uint64_t us = elpis_now_us() - q->sent_us;
+
+    elpis_mesh_event(ELPIS_MESH_EV_ASKED, result,
+                     elpis_name_str(&m->qname, qn, sizeof qn), m->qtype,
+                     elpis_addr_str(&q->to, peer, sizeof peer),
+                     us > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)us, 0, NULL);
 }
 
 /* Any lookup in flight to that peer under that key: all share the key, and
@@ -254,15 +289,35 @@ static void mq_readable(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
             continue;
         t = hit->task;
         t->peerq = NULL;
-        mq_free(hit);
 
-        if (!pt[1])
-            continue;               /* the digest's false positive */
-        elpis_stat_inc(&w->stats.peer_found, 1);
-        if (elpis_msg_parse(&m, pt + ELPIS_MESH_LQ_HDR, ptlen - ELPIS_MESH_LQ_HDR,
-                            ELPIS_PARSE_RESPONSE, &drop) != ELPIS_OK)
+        if (!pt[1]) {
+            mq_note(t, hit, ELPIS_MESH_R_MISSING);  /* a false positive */
+            mq_free(hit);
             continue;
-        if (elpis_task_peer_answer(t, &m) == ELPIS_OK)
-            elpis_stat_inc(&w->stats.peer_used, 1);
+        }
+        elpis_stat_inc(&w->stats.peer_found, 1);
+        if (elpis_tm_enabled)
+            elpis_mesh_tally(hit->node, ELPIS_MESH_T_FOUND);
+        if (elpis_msg_parse(&m, pt + ELPIS_MESH_LQ_HDR, ptlen - ELPIS_MESH_LQ_HDR,
+                            ELPIS_PARSE_RESPONSE, &drop) != ELPIS_OK) {
+            mq_free(hit);
+            continue;
+        }
+        /* Noted first: a used answer finishes the task, and frees it. */
+        {
+            peerq_t done = *hit;
+            mq_free(hit);
+            if (elpis_task_peer_answer(t, &m) == ELPIS_OK) {
+                elpis_stat_inc(&w->stats.peer_used, 1);
+                if (elpis_tm_enabled) {
+                    elpis_mesh_tally(done.node, ELPIS_MESH_T_USED);
+                    /* t is gone: the question is in the answer. */
+                    note_answer(&m, &done, ELPIS_MESH_R_USED);
+                }
+            } else {
+                mq_note(t, &done, ELPIS_MESH_R_LATE);
+            }
+            elpis_memzero(done.key, sizeof done.key);
+        }
     }
 }

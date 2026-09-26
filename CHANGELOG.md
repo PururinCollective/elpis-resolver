@@ -14,6 +14,16 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**A Mesh Network window on the status page.** Four tabs: **General** (this
+instance, how peers are let in, lists, lookups and its cache digest),
+**Trackers** (each bridge's status and last error, peer exchange and local
+discovery, every address heard of), **Peers** (host name, address, port, flags
+for how each was found and what we hold of it, version, round trip, lookups
+and traffic) and **Content** (the last 256 exchanges: names asked of peers and
+by them with the outcome and round trip, lists, warm-ups, and any peer answer
+not confirmed here). Peers now tell each other their host name and version, in
+a message older versions skip.
+
 **Instances can warm each other, with nothing on disk.** With `mesh: yes`,
 instances you run connect to the bridges in `mesh-peer:` and to the instances
 those know. One that starts asks the others for the questions their clients ask

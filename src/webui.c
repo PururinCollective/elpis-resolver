@@ -18,6 +18,7 @@
 #include "elpis/infra.h"
 #include "elpis/deleg.h"
 #include "elpis/licence.h"
+#include "elpis/mesh.h"
 #include "webui_assets.h"
 
 #include <errno.h>
@@ -542,6 +543,125 @@ static void json_roots(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, "],");
 }
 
+static void bputb(buf_t *b, int v) { bputs(b, v ? "true" : "false"); }
+
+/*
+ * The Mesh Network window: the mesh thread's last published view, and the
+ * ring of recent exchanges.  Both are copies, so nothing here reaches into a
+ * live session.
+ */
+static void json_mesh(buf_t *b)
+{
+    static elpis_mesh_view_t v;
+    static elpis_mesh_event_t ev[ELPIS_MESH_EVENTS];
+    unsigned i, n;
+
+    elpis_mesh_view(&v);
+    bputs(b, "\"mesh\":{\"requested\":"); bputb(b, v.requested);
+    bputs(b, ",\"on\":");       bputb(b, v.on);
+    bputs(b, ",\"node\":");     bputq(b, v.node);
+    bputs(b, ",\"up\":");       bputu(b, v.up_s);
+    bputs(b, ",\"licensed\":"); bputb(b, v.licensed);
+    bputs(b, ",\"org\":");      bputq(b, v.org);
+    bputs(b, ",\"cert\":");     bputu(b, v.cert_serial);
+    bputs(b, ",\"certexp\":");  bputq(b, v.cert_expires);
+    bputs(b, ",\"listen\":[");
+    for (i = 0; i < v.nlisten; i++) {
+        if (i) bputs(b, ",");
+        bputq(b, v.listen[i]);
+    }
+    bputs(b, "],\"bridges\":");  bputu(b, v.nbridges);
+    bputs(b, ",\"share\":");     bputb(b, v.share);
+    bputs(b, ",\"minhits\":");   bputu(b, v.share_min_hits);
+    bputs(b, ",\"lookup\":");    bputb(b, v.lookup);
+    bputs(b, ",\"rtt\":");       bputu(b, v.lookup_rtt);
+    bputs(b, ",\"maxpeers\":");  bputu(b, v.max_peers);
+    bputs(b, ",\"gathering\":"); bputb(b, v.gathering);
+    bputs(b, ",\"keyage\":");    bputu(b, v.lq_key_age_s);
+
+    bputs(b, ",\"lsd\":{\"on\":"); bputb(b, v.lsd);
+    bputs(b, ",\"v4\":");      bputb(b, v.lsd4);
+    bputs(b, ",\"v6\":");      bputb(b, v.lsd6);
+    bputs(b, ",\"port4\":");   bputu(b, v.lsd_port4);
+    bputs(b, ",\"port6\":");   bputu(b, v.lsd_port6);
+    bputs(b, ",\"sent\":");    bputu(b, v.lsd_sent);
+    bputs(b, ",\"heard\":");   bputu(b, v.lsd_heard);
+    bputs(b, ",\"foreign\":"); bputu(b, v.lsd_foreign);
+    bputs(b, ",\"found\":");   bputu(b, v.lsd_found);
+    bputs(b, ",\"next\":");    bputu(b, v.lsd_next_s);
+    bputs(b, "},\"pex\":{\"sent\":"); bputu(b, v.pex_sent);
+    bputs(b, ",\"heard\":");   bputu(b, v.pex_heard);
+    bputs(b, ",\"learned\":"); bputu(b, v.pex_learned);
+    bputs(b, "},\"lists\":{\"asked\":"); bputu(b, v.lists_asked);
+    bputs(b, ",\"in\":");       bputu(b, v.lists_in);
+    bputs(b, ",\"namesin\":");  bputu(b, v.names_in);
+    bputs(b, ",\"out\":");      bputu(b, v.lists_out);
+    bputs(b, ",\"namesout\":"); bputu(b, v.names_out);
+    bputs(b, "},\"digest\":{\"bits\":"); bputu(b, v.digest_bits);
+    bputs(b, ",\"entries\":");  bputu(b, v.digest_entries);
+    bputs(b, ",\"age\":");      bputu(b, v.digest_age_s);
+    bputs(b, ",\"sent\":");     bputu(b, v.digests_sent);
+    bputs(b, ",\"in\":");       bputu(b, v.digests_in);
+    bputs(b, "},\"lookups\":{\"asked\":"); bputu(b, v.asked);
+    bputs(b, ",\"found\":");  bputu(b, v.found);
+    bputs(b, ",\"used\":");   bputu(b, v.used);
+    bputs(b, ",\"served\":"); bputu(b, v.served);
+
+    bputs(b, "},\"peers\":[");
+    for (i = 0; i < v.npeers; i++) {
+        const elpis_mesh_peer_view_t *p = &v.peers[i];
+        if (i) bputs(b, ",");
+        bputs(b, "{\"host\":");  bputq(b, p->host);
+        bputs(b, ",\"ver\":");   bputq(b, p->version);
+        bputs(b, ",\"addr\":");  bputq(b, p->addr);
+        bputs(b, ",\"port\":");  bputu(b, p->port);
+        bputs(b, ",\"node\":");  bputq(b, p->node);
+        bputs(b, ",\"flags\":"); bputu(b, p->flags);
+        bputs(b, ",\"rtt\":");   bputu(b, p->rtt_ms);
+        bputs(b, ",\"up\":");    bputu(b, p->up_s);
+        bputs(b, ",\"cert\":");  bputu(b, p->cert_serial);
+        bputs(b, ",\"rx\":");    bputu(b, p->rx_bytes);
+        bputs(b, ",\"tx\":");    bputu(b, p->tx_bytes);
+        bputs(b, ",\"nin\":");   bputu(b, p->names_in);
+        bputs(b, ",\"nout\":");  bputu(b, p->names_out);
+        bputs(b, ",\"asked\":"); bputu(b, p->asked);
+        bputs(b, ",\"found\":"); bputu(b, p->found);
+        bputs(b, ",\"used\":");  bputu(b, p->used);
+        bputs(b, ",\"served\":"); bputu(b, p->served);
+        bputs(b, ",\"dbits\":"); bputu(b, p->digest_bits);
+        bputs(b, "}");
+    }
+    bputs(b, "],\"known\":[");
+    for (i = 0; i < v.nknown; i++) {
+        const elpis_mesh_known_view_t *k = &v.known[i];
+        if (i) bputs(b, ",");
+        bputs(b, "{\"addr\":");   bputq(b, k->addr);
+        bputs(b, ",\"via\":");    bputu(b, k->via);
+        bputs(b, ",\"state\":");  bputu(b, (unsigned)k->state);
+        bputs(b, ",\"fails\":");  bputu(b, k->fails);
+        bputs(b, ",\"retry\":");  bputu(b, k->retry_s);
+        bputs(b, ",\"why\":");    bputq(b, k->why);
+        bputs(b, "}");
+    }
+    n = elpis_mesh_events(ev, ELPIS_MESH_EVENTS);
+    bputs(b, "],\"events\":[");
+    for (i = 0; i < n; i++) {
+        const elpis_mesh_event_t *e = &ev[i];
+        if (i) bputs(b, ",");
+        bputs(b, "{\"at\":");    bputu(b, e->at);
+        bputs(b, ",\"k\":");     bputu(b, e->kind);
+        bputs(b, ",\"r\":");     bputu(b, e->result);
+        bputs(b, ",\"name\":");  bputq(b, e->name);
+        bputs(b, ",\"type\":");  bputq(b, e->qtype ? elpis_type_name(e->qtype) : "");
+        bputs(b, ",\"peer\":");  bputq(b, e->peer);
+        bputs(b, ",\"us\":");    bputu(b, e->us);
+        bputs(b, ",\"n\":");     bputu(b, e->count);
+        bputs(b, ",\"note\":");  bputq(b, e->note);
+        bputs(b, "}");
+    }
+    bputs(b, "]},");
+}
+
 static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 {
     const elpis_stats_t *s = &ctx->stats;
@@ -612,6 +732,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, "},");
 
     json_roots(ctx, b);
+    json_mesh(b);
 
     bputs(b, "\"loop\":{\"turns\":");
     bputu(b, ctx->loop.turns);

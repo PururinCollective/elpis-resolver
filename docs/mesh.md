@@ -201,6 +201,17 @@ in constant time. Both are checked against the RFC 7748 and RFC 8439 test
 vectors, and the handshake byte for byte against an independent implementation
 of the Noise specification.
 
+## Watching it
+
+The status page's **Mesh Network** window shows the mesh as this instance
+sees it, in four tabs: General, Trackers (bridges, peer exchange and local
+discovery), Peers (host name, address, port, how each was found, version) and
+Content (the recent names asked and answered, lists and warm-ups). Peers send
+each other their host name and version for it, in a message older versions
+skip. Content keeps the last 256 exchanges in memory, and only while the status
+page is on: it is the same kind of information as the Top names window, and
+never written anywhere. See [Status page](status-page.md).
+
 ## Requiring licensed instances
 
 On its own, the PSK is the whole of the mesh's security. Anyone who has it is a
@@ -281,8 +292,11 @@ encrypted, and inside it is a type byte and a body:
 | 1 `LIST_REQ` | u32: the most names wanted |
 | 2 `LIST_PART` | entries: u32 hits, u16 ms, u8 DO/CD bits, u16 type, u8 length, name in wire form |
 | 3 `LIST_END` | u32: how many entries were sent |
-| 4 `PEERS` | u8 count, then per peer: u8 4 or 6, the address, u16 port |
+| 4 `PEERS` | u8 count, then per peer: u8 4 or 6, the address, u16 port, its 16-byte node id |
 | 5 `PING`, 6 `PONG` | u64 token |
+| 7 `LOOKUP_KEY` | u32 key id, 32-byte key: the key to seal lookups to the sender with |
+| 8 `DIGEST` | u32 sequence, u32 bits, u8 probes, u32 total bytes, u32 offset, then that part of the Bloom filter |
+| 9 `INFO` | three strings, each a length byte and its bytes: host name, version, build |
 
 A message of an unknown type is skipped, so a later version can add more. A
 connection that sends nothing for two minutes is closed; `PING` goes every

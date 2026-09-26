@@ -33,6 +33,7 @@ puts the defaults back.
 | **Root servers** | the roots ranked by the round trip this resolver has actually measured, with how often each was asked and how often it failed to answer |
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
+| **Mesh Network** | the [mesh](mesh.md) in four tabs. **General**: this instance's node id, how peers are let in, lists and lookups counted, its cache digest. **Trackers**: how peers are found, as a torrent client lists its trackers: each bridge with its status and last error, peer exchange and local discovery, and every address heard of. **Peers**: each instance connected, by host name, address and port, with flags for how it was found and what we hold of it, its version, round trip, lookups each way and traffic. **Content**: the last 256 exchanges, newest first: names asked of peers and by them with the outcome and round trip, lists sent and received, warm-ups finished, and any peer answer this instance could not confirm |
 | **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
 | **About** | edition and operator, version, the commit and compiler the binary was built with and the CPU it was built for, uptime, and which ML-DSA parameter sets are live |
 | **Layout** | the desktop as one line, to carry an arrangement to another browser |
