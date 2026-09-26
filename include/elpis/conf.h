@@ -26,6 +26,7 @@
 #define ELPIS_MESH_PORT        7878
 #define ELPIS_MESH_MAX_LISTEN  4
 #define ELPIS_MESH_MAX_BRIDGES 16
+#define ELPIS_MESH_MAX_TRUST_ORGS 16
 
 /*
  * The default name of the identity probe.  It sits in an undelegated TLD on
@@ -101,11 +102,17 @@ typedef struct {
     uint8_t      mesh_lsd;                 /* find peers on the segment   */
     uint8_t      mesh_lookup;              /* ask peers' caches on a miss */
     uint8_t      mesh_share_answers;       /* answers with lists, unsigned */
-    /* Licensed meshes: every peer proves a key the licence issuer certified
-     * for this organisation (mesh.c, licence.h). */
+    /*
+     * Signed instances (mesh.c, licence.h): with a key the licence issuer
+     * certified, this instance is signed, and takes what peers know only
+     * from other signed ones -- of its own organisation, or one trusted
+     * here.  mesh-require-licence lets no other kind in at all.
+     */
     uint8_t      mesh_require_licence;
     char         mesh_key_file[512];       /* this instance's X25519 key */
     char         mesh_cert[ELPIS_LICENCE_MAX_TOKEN];
+    char         mesh_trust_org[ELPIS_MESH_MAX_TRUST_ORGS][ELPIS_LICENCE_MAX_ORG + 1];
+    unsigned     n_mesh_trust_org;
     uint32_t     mesh_lookup_rtt;          /* ms: the farthest peer asked */
     uint32_t     mesh_share_min_hits;
     uint32_t     mesh_max_peers;

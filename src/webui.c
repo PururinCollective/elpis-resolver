@@ -561,10 +561,20 @@ static void json_mesh(buf_t *b)
     bputs(b, ",\"on\":");       bputb(b, v.on);
     bputs(b, ",\"node\":");     bputq(b, v.node);
     bputs(b, ",\"up\":");       bputu(b, v.up_s);
-    bputs(b, ",\"licensed\":"); bputb(b, v.licensed);
+    bputs(b, ",\"tier\":");     bputq(b, v.tier == ELPIS_MESH_TIER_SIGNED
+                                         ? "signed" : "community");
+    bputs(b, ",\"require\":");  bputb(b, v.require);
+    bputs(b, ",\"cancheck\":"); bputb(b, v.can_check);
     bputs(b, ",\"org\":");      bputq(b, v.org);
     bputs(b, ",\"cert\":");     bputu(b, v.cert_serial);
     bputs(b, ",\"certexp\":");  bputq(b, v.cert_expires);
+    bputs(b, ",\"why\":");      bputq(b, v.why);
+    bputs(b, ",\"trust\":[");
+    for (i = 0; i < v.ntrust; i++) {
+        if (i) bputs(b, ",");
+        bputq(b, v.trust[i]);
+    }
+    bputs(b, "]");
     bputs(b, ",\"listen\":[");
     for (i = 0; i < v.nlisten; i++) {
         if (i) bputs(b, ",");
@@ -642,6 +652,10 @@ static void json_mesh(buf_t *b)
         bputs(b, ",\"aout\":");  bputu(b, p->answers_out);
         bputs(b, ",\"aok\":");   bputu(b, p->answers_ok);
         bputs(b, ",\"abad\":");  bputu(b, p->answers_bad);
+        bputs(b, ",\"tier\":");  bputq(b, p->tier == ELPIS_MESH_TIER_SIGNED
+                                         ? "signed" : "community");
+        bputs(b, ",\"org\":");   bputq(b, p->org);
+        bputs(b, ",\"why\":");   bputq(b, p->why);
         bputs(b, "}");
     }
     bputs(b, "],\"known\":[");

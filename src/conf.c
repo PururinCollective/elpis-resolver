@@ -461,6 +461,31 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         elpis_strlcpy(c->mesh_key_file, val, sizeof c->mesh_key_file);
         return ELPIS_OK;
     }
+    if (KEY("mesh-trust-org")) {
+        size_t n = strlen(val);
+        /* The name as the certificate has it, byte for byte; one pair of
+         * quotes around it is taken off, since people write them. */
+        if (n >= 2 && val[0] == '"' && val[n - 1] == '"') {
+            val[n - 1] = '\0';
+            val++;
+            n -= 2;
+        }
+        if (n == 0 || n > ELPIS_LICENCE_MAX_ORG) {
+            elpis_error("%s:%u: 'mesh-trust-org' takes an organisation's name "
+                        "as its certificates carry it, at most %u bytes", src,
+                        lineno, (unsigned)ELPIS_LICENCE_MAX_ORG);
+            return ELPIS_ERR;
+        }
+        if (c->n_mesh_trust_org >= ELPIS_MESH_MAX_TRUST_ORGS) {
+            elpis_warn("%s:%u: more than %u 'mesh-trust-org' lines; the rest "
+                       "are ignored", src, lineno,
+                       (unsigned)ELPIS_MESH_MAX_TRUST_ORGS);
+            return ELPIS_OK;
+        }
+        elpis_strlcpy(c->mesh_trust_org[c->n_mesh_trust_org++], val,
+                      sizeof c->mesh_trust_org[0]);
+        return ELPIS_OK;
+    }
     if (KEY("mesh-cert")) {
         if (strlen(val) >= sizeof c->mesh_cert) {
             perr(&p, key, "(too long)");
@@ -915,7 +940,9 @@ void elpis_conf_dump(const elpis_conf_t *c)
                        "from and to peers within %u ms",
                        (unsigned)c->mesh_lookup_rtt);
         if (c->mesh_require_licence)
-            elpis_info("  mesh-require-licence: every peer shows a certified key");
+            elpis_info("  mesh-require-licence: signed peers only");
+        for (i = 0; i < c->n_mesh_trust_org; i++)
+            elpis_info("  mesh-trust-org \"%s\"", c->mesh_trust_org[i]);
     }
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "

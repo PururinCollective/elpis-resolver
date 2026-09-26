@@ -52,7 +52,7 @@ Measured with three instances: the only one with clients, restarted with no
 checkpoint, was warm four and a half seconds later, its slowest answer 158 ms
 against 1,065 ms cold. Lists carry names only, unless `mesh-share-answers` is
 on (below), and only names asked `mesh-share-min-hits` times. Connections are
-Noise_NNpsk0 over TCP, keyed by one PSK from `elpis --gen-psk`: X25519 for
+Noise_XXpsk0 over TCP, keyed by one PSK from `elpis --gen-psk`: X25519 for
 forward secrecy, ChaCha20-Poly1305, and the PSK mixed into every key, so
 recorded traffic stays safe from a future quantum computer while the key does.
 The shipped systemd unit never runs elpis as root, so it cannot read a key file
@@ -102,17 +102,26 @@ lookups now also pass on only an instance's own answers, never one it got from
 another peer and has not confirmed. See
 [Mesh](docs/mesh.md#answers-with-the-list).
 
-**A mesh can require licensed instances.** With `mesh-require-licence: yes`,
-each instance holds its own key (`elpis --mesh-keygen`) and a certificate for
-it from the licence issuer (`elpis-licence issue --mesh-key …`). The handshake
-becomes Noise_XXpsk0, in which each side proves it holds the key its certificate
-names, and a peer is let in only with a certificate from this build's issuer,
-unexpired, for our own organisation. A leaked PSK is no longer enough to join;
-a certificate copied from someone's config is refused, even from a build
-patched to present it; another customer of the same issuer stays out. The
-certificate is a separate token from the deployment licence, signed under its
-own context, and the resolver still contains no signing code. See
-[Mesh](docs/mesh.md#requiring-licensed-instances).
+**Signed and community instances share one mesh.** The PSK decides who is in.
+Within the mesh, an instance with a key the licence issuer certified
+(`mesh-key:` from `elpis --mesh-keygen`, `mesh-cert:` from
+`elpis-licence issue --mesh-key …`) is signed; any other is community and needs
+nothing but the PSK. What peers know flows one way: a signed instance takes
+lists, answers and lookups only from signed peers, and gives to anyone; a
+community instance takes from anyone. A peer is signed only with a certificate
+from this build's issuer, unexpired, for the key it proves in the handshake,
+and for our own organisation or one named in `mesh-trust-org:`, so two
+organisations can share a mesh. A certificate copied from someone's config is
+not taken, even from a build patched to present it. `mesh-require-licence: yes`
+lets in signed instances only. One key and certificate may serve every instance
+of an organisation. Every connection is Noise_XXpsk0, a community instance
+using a static key it makes at startup; this is mesh protocol version 2, and
+version 1 instances are refused with a hint to upgrade. The certificate is a
+separate token from the deployment licence, signed under its own context, and
+the resolver still contains no signing code. The mesh guide now starts with a
+step-by-step setup, for a community mesh and for signed instances, and a table
+of log messages and what to do about each. See
+[Mesh](docs/mesh.md#signed-and-community-instances).
 
 **A restart can come back warm.** With `checkpoint:` set to a path, Elpis
 writes down the questions clients ask most, every `checkpoint-interval` and

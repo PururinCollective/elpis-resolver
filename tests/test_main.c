@@ -2747,6 +2747,11 @@ static void test_mesh(void)
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
           cf.n_mesh_listen == 1 && elpis_addr_port(&cf.mesh_listen[0]) == 7900,
           "mesh-listen takes a port");
+    elpis_strlcpy(line, "mesh-trust-org: \"Other Org, AS64501\"", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          cf.n_mesh_trust_org == 1 &&
+          !strcmp(cf.mesh_trust_org[0], "Other Org, AS64501"),
+          "mesh-trust-org takes a name, quotes and all");
     elpis_strlcpy(line, "mesh-psk: /etc/elpis/mesh.psk", sizeof line);
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
           !strcmp(cf.mesh_psk_file, "/etc/elpis/mesh.psk"),
@@ -3224,6 +3229,55 @@ static void test_meshcert(void)
           "a signature made under the licence context is refused");
     CHECK(elpis_meshcert_parse("elpis1.AAAA.BBBB", now, &got) == ELPIS_ERR,
           "and a licence token is not a certificate");
+
+    /* Signed or community: what a peer's certificate makes it. */
+    {
+        static const char *const orgs[] = { "Example ISP, AS64500", "Other Org" };
+        elpis_mesh_tier_t t;
+        uint8_t stranger[32];
+        char other[400];
+
+        memset(stranger, 0x5A, sizeof stranger);
+        cert_make(&c, ELPIS_MESHCERT_CONTEXT, tok, sizeof tok);
+
+        elpis_mesh_classify("", c.key, now, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_COMMUNITY && !t.offered &&
+              t.why[0] == '\0', "no certificate: community, and nothing to say");
+        elpis_mesh_classify(tok, c.key, now, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_SIGNED && t.serial == 2001 &&
+              !strcmp(t.org, "Example ISP, AS64500"),
+              "a certificate for the key it proved, for our organisation: signed");
+        elpis_mesh_classify(tok, stranger, now, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_COMMUNITY && t.offered &&
+              t.org[0] == '\0' && strstr(t.why, "did not prove") != NULL,
+              "someone else's certificate: community, and nothing on it is its");
+        elpis_mesh_classify(tok, c.key, now + 2 * 86400, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_COMMUNITY && strstr(t.why, "expired"),
+              "an expired one: community (%s)", t.why);
+        elpis_mesh_classify("elpism1.AAAA.BBBB", c.key, now, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_COMMUNITY &&
+              strstr(t.why, "does not verify"), "one that does not verify: community");
+
+        elpis_strlcpy(c.org, "Other Org", sizeof c.org);
+        cert_make(&c, ELPIS_MESHCERT_CONTEXT, other, sizeof other);
+        elpis_mesh_classify(other, c.key, now, orgs, 1, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_COMMUNITY && !strcmp(t.org, "Other Org") &&
+              strstr(t.why, "not an organisation trusted here"),
+              "another organisation's: community, unless it is trusted here");
+        elpis_mesh_classify(other, c.key, now, orgs, 2, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_SIGNED, "and signed once it is");
+        elpis_mesh_classify(other, c.key, now, NULL, 0, &t);
+        CHECK(t.tier == ELPIS_MESH_TIER_SIGNED,
+              "a community instance, trusting no one in particular, sees any "
+              "signed peer as signed");
+
+        CHECK(elpis_mesh_may_take(ELPIS_MESH_TIER_COMMUNITY, ELPIS_MESH_TIER_COMMUNITY) &&
+              elpis_mesh_may_take(ELPIS_MESH_TIER_COMMUNITY, ELPIS_MESH_TIER_SIGNED) &&
+              elpis_mesh_may_take(ELPIS_MESH_TIER_SIGNED, ELPIS_MESH_TIER_SIGNED) &&
+              !elpis_mesh_may_take(ELPIS_MESH_TIER_SIGNED, ELPIS_MESH_TIER_COMMUNITY),
+              "a signed instance takes from signed peers only, a community one "
+              "from any");
+    }
 }
 
 /* ================================================================== */

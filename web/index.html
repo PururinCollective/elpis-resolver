@@ -234,8 +234,8 @@ var API_BASE = (function(){
   return p.charAt(p.length - 1) === '/' ? p : p + '/';
 })();
 function api(path){ return API_BASE + 'api/' + path; }
-function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
-  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function bytes(v){
   var u = ['B','KiB','MiB','GiB','TiB'], i = 0;
   v = Number(v) || 0;
@@ -724,12 +724,14 @@ var MESH_FLAGS = [
   [0x004, 'L', 'found by local discovery'],
   [0x008, 'I', 'it dialled us'],
   [0x010, 'O', 'we dialled it'],
-  [0x020, 'C', 'its certificate checked out'],
+  [0x020, 'C', 'signed: its certificate checked out, for an organisation trusted here'],
   [0x040, 'K', 'we hold its lookup key'],
   [0x080, 'D', 'we hold its cache digest'],
   [0x100, 'S', 'it shares its list of names'],
   [0x200, 'A', 'we asked it for its answers too'],
-  [0x400, 'R', 'its answers are refused: too many failed their check']
+  [0x400, 'R', 'its answers are refused: too many failed their check'],
+  [0x800, 'N', 'we take nothing from it: this instance is signed, and it is not'],
+  [0x1000, 'U', 'it shows a certificate this build cannot check: no issuer key']
 ];
 var MESH_TABS = [['general','General'], ['trackers','Trackers'],
                  ['peers','Peers'], ['content','Content']];
@@ -766,9 +768,8 @@ function meshOff(m){
 
 function meshGeneral(m){
   var L = m.lookups || {}, li = m.lists || {}, dg = m.digest || {}, A = m.answers || {};
-  var sec = m.licensed ?
-    "certificate " + m.cert + ", " + esc(m.org) :
-    "pre-shared key only";
+  var signed = m.tier === 'signed';
+  var orgs = (signed ? [m.org] : []).concat(m.trust || []);
   return "<div class='tiles'>" +
     "<div class='tile'><b>Peers connected</b><div class='big'>" +
       num((m.peers || []).length) + "</div></div>" +
@@ -782,8 +783,17 @@ function meshGeneral(m){
     "<div><h4>This instance</h4><div class='kv'>" +
       "<b>node</b><span><code>" + esc(m.node) + "</code></span>" +
       "<b>mesh up</b><span>" + dur(m.up) + "</span>" +
-      "<b>peers let in by</b><span>" + sec + "</span>" +
-      (m.licensed ? "<b>certificate expires</b><span>" + esc(m.certexp) + "</span>" : "") +
+      "<b>this instance is</b><span>" + (signed ?
+        "<span class='pill on'>signed</span> " + esc(m.org) :
+        "<span class='pill'>community</span>") + "</span>" +
+      (signed ? "<b>certificate</b><span>" + m.cert + ", expires " + esc(m.certexp) + "</span>" : "") +
+      (m.why ? "<b>its certificate</b><span style='color:var(--warn)'>" + esc(m.why) + "</span>" : "") +
+      "<b>peers let in by</b><span>" + (m.require ? "the PSK and a certificate: signed only" :
+        "the PSK") + "</span>" +
+      "<b>takes from</b><span>" + (signed ? "signed peers only" : "any peer") + "</span>" +
+      "<b>signed peers are of</b><span>" + (!m.cancheck ?
+        dim('none: this build cannot check a certificate') : orgs.length ?
+        orgs.map(esc).join('<br>') : dim('no organisation trusted here')) + "</span>" +
       "<b>listening on</b><span>" + (m.listen.length ?
         m.listen.map(esc).join('<br>') : dim('nothing: it only dials')) + "</span>" +
       "<b>bridges</b><span>" + num(m.bridges) + "</span>" +
@@ -894,7 +904,10 @@ function meshPeers(m){
   if (!p.length)
     h += "<tr><td colspan='12' style='color:var(--dim)'>no peer connected</td></tr>";
   p.forEach(function(x){
-    h += "<tr><td title='node " + esc(x.node) + "'>" + (x.host ? esc(x.host) : dim(esc(x.node))) +
+    var tip = 'node ' + x.node + (x.tier === 'signed' ? ', signed for ' + x.org : ', community') +
+              (x.why ? '; its certificate is not taken: ' + x.why : '');
+    h += "<tr><td title='" + esc(tip) + "'>" + (x.host ? esc(x.host) : dim(esc(x.node))) +
+         (x.why ? " <span class='pill warn'>!</span>" : "") +
          "</td><td>" + esc(x.addr) + "</td><td class='n'>" + (x.port || dim('-')) +
          "</td><td>" + meshFlags(x.flags) + "</td><td>" + (x.ver ? esc(x.ver) : dim('older')) +
          "</td><td class='n'>" + (x.rtt ? x.rtt + ' ms' : dim('-')) +

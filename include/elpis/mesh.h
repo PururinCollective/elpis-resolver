@@ -16,9 +16,16 @@
  *
  * Peers are found through the bridges named in mesh-peer:, through the peers
  * those know (peer exchange), and on the local segment by multicast.  Every
- * connection is TCP under Noise_NNpsk0 (see noise.h), keyed by one PSK the
+ * connection is TCP under Noise_XXpsk0 (see noise.h), keyed by one PSK the
  * operator gives every instance; without it nothing gets past the first
- * message.
+ * message.  The PSK is the mesh: whoever holds it is in.
+ *
+ * Within it, an instance is signed or community.  Signed is one that proves
+ * in the handshake a key the licence issuer certified (mesh-key:, mesh-cert:);
+ * community is every other.  A signed instance takes lists, answers and
+ * lookups only from signed peers, of its own organisation or one it trusts
+ * (mesh-trust-org:), and gives to anyone; a community one takes from anyone.
+ * mesh-require-licence lets in signed instances only.
  */
 #ifndef ELPIS_MESH_H
 #define ELPIS_MESH_H
@@ -43,6 +50,34 @@ void  elpis_mesh_fini(void);
  */
 int   elpis_mesh_key_path(const char *val, const char *credsdir, char *out,
                           size_t cap);
+
+/*
+ * What a peer is, from what it showed in the handshake: `cert`, its
+ * certificate or "" for none, and `rs`, the static key it proved it holds.
+ * Signed only for a certificate this build's issuer signed, unexpired, for
+ * exactly that key, naming one of the `norgs` organisations in `orgs` --
+ * or any, when there are none: a community instance that trusts no one in
+ * particular, to which a tier is only something to show.  A certificate
+ * shown and not taken says why.  Any thread.
+ */
+#define ELPIS_MESH_TIER_COMMUNITY 0
+#define ELPIS_MESH_TIER_SIGNED    1
+
+typedef struct {
+    int      tier;
+    int      offered;               /* it showed a certificate           */
+    int      unchecked;             /* one this build cannot check       */
+    uint32_t serial;                /* a certificate for its own key's    */
+    char     org[ELPIS_LICENCE_MAX_ORG + 1];
+    char     why[160];              /* one shown and not taken: why       */
+} elpis_mesh_tier_t;
+
+void  elpis_mesh_classify(const char *cert, const uint8_t rs[32], int64_t now,
+                          const char *const *orgs, unsigned norgs,
+                          elpis_mesh_tier_t *out);
+/* Whether an instance of tier `mine` takes what a peer of tier `theirs`
+ * knows: a signed one from signed peers only, a community one from any. */
+int   elpis_mesh_may_take(int mine, int theirs);
 
 /* --gen-psk: print a new key in the form mesh-psk: files take. */
 int   elpis_mesh_gen_psk(void);
@@ -187,6 +222,8 @@ int      elpis_mesh_lq_open(const uint8_t key[32], const uint8_t *dg, size_t n,
 #define ELPIS_MESH_F_SHARES 0x100u     /* it answers list requests       */
 #define ELPIS_MESH_F_ANSWERS 0x200u    /* we asked it for answers        */
 #define ELPIS_MESH_F_REFUSED 0x400u    /* too many of them failed        */
+#define ELPIS_MESH_F_NOTAKE 0x800u     /* we take nothing from it        */
+#define ELPIS_MESH_F_UNCHECKED 0x1000u /* its certificate, not checkable here */
 
 #define ELPIS_MESH_VIEW_PEERS 64u
 #define ELPIS_MESH_VIEW_KNOWN 48u
@@ -206,6 +243,9 @@ typedef struct {
     uint64_t asked, found, used;       /* our lookups to it              */
     uint64_t served;                   /* its lookups we answered        */
     uint32_t digest_bits;
+    int      tier;                     /* ELPIS_MESH_TIER_*              */
+    char     org[ELPIS_LICENCE_MAX_ORG + 1];   /* a signed one's          */
+    char     why[160];                 /* a certificate it showed, not taken */
     /* Answers with its list: stored here, and how the checks went. */
     uint64_t answers_in, answers_ok, answers_bad;
     uint64_t answers_out;              /* ours it got                    */
@@ -232,10 +272,15 @@ typedef struct {
     int      on;                       /* and it is running              */
     char     node[9];
     uint64_t up_s;
-    int      licensed;
+    int      tier;                     /* this instance's                */
+    int      require;                  /* mesh-require-licence           */
+    int      can_check;                /* the build carries an issuer key */
     char     org[65];
     uint32_t cert_serial;
     char     cert_expires[32];
+    char     why[160];                 /* a certificate configured, not usable */
+    unsigned ntrust;
+    char     trust[ELPIS_MESH_MAX_TRUST_ORGS][ELPIS_LICENCE_MAX_ORG + 1];
     unsigned nlisten;
     char     listen[ELPIS_MESH_MAX_LISTEN][64];
     unsigned nbridges;

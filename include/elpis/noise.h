@@ -6,9 +6,10 @@
  *   -> psk, e        the initiator's ephemeral key, under a key from the PSK
  *   <- e, ee         the responder's, and a Diffie-Hellman between the two
  *
- * Noise_XXpsk0_25519_ChaChaPoly_SHA256, for a mesh that requires licensed
- * instances: the same start, and then each side's static key, encrypted,
- * with a Diffie-Hellman that only the holder of its private half can do.
+ * Noise_XXpsk0_25519_ChaChaPoly_SHA256, which every mesh connection uses
+ * since mesh version 2: the same start, and then each side's static key,
+ * encrypted, with a Diffie-Hellman that only the holder of its private half
+ * can do.  NN, which version 1 used, stays here with its test vectors.
  *
  *   -> psk, e
  *   <- e, ee, s, es
@@ -18,7 +19,7 @@
  * every instance one operator runs holds the same one.  In NN that is the
  * whole of the authentication; in XX each side also proves it holds the
  * private half of its static key, which mesh.c checks against a certificate
- * from the licence issuer.  The session keys come from both the ephemeral
+ * from the licence issuer when the peer shows one.  The session keys come from both the ephemeral
  * Diffie-Hellman, for forward secrecy, and the PSK, which Noise mixes into
  * the chaining key.  That second part is the post-quantum hedge: an attacker
  * who records a session and later breaks X25519 with a quantum computer still

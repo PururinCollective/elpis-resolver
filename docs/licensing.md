@@ -50,19 +50,24 @@ a date passed would be a far worse failure than anything this protects against.
 | setting | without a licence |
 |---|---|
 | `identity-name:` | ignored with a warning; the probe answers at its default name |
+| `mesh-key:` and `mesh-cert:` | the instance joins the mesh as a community one, not a signed one |
 | `mesh-require-licence: yes` | the mesh stays off; without it the mesh runs on its PSK alone |
 
 Everything else works the same either way. A licence never changes how a query
 is resolved, and nothing is withheld that affects whether the resolver answers
 correctly — see the note on enforcement above. The mesh is no exception: it
-only makes answers arrive sooner, and `mesh-require-licence` only decides which
-instances may join it.
+only makes answers arrive sooner. Signing an instance decides only whose lists
+and answers it takes, and `mesh-require-licence` only which instances may join
+([Mesh](mesh.md#signed-and-community-instances)).
 
 ## Mesh certificates
 
-A mesh that requires licensed instances needs a certificate for each instance's
-mesh key. It is a sibling of the licence, issued by the same tool with the same
-issuer key:
+A signed mesh instance holds a certificate for its instance key. The
+certificate is issued by the same tool, with the same issuer key, as a
+licence. One key and one certificate can serve every instance of an
+organisation. For the whole setup, from the issuer key to a signed instance,
+follow [Mesh: signed instances, step by step](mesh.md#signed-instances-step-by-step).
+This is the issuer's part:
 
 ```bash
 ./bin/elpis-licence issue --key issuer.key --org "Example ISP, AS64500" \
@@ -77,10 +82,11 @@ mesh-cert: elpism1.AQAAC7kAAAAAardsDQAAAABq3vkN...
 ```
 
 `elpis-licence verify` reads either kind. A certificate is its own token
-(`elpism1`), signed under its own context string (`elpis-mesh-cert-v1`), so the
-issuer's signature on one can never be passed off as the other. Unlike a
-licence, an expired certificate is refused: see [Mesh](mesh.md) for what
-that does and why it is safe.
+(`elpism1`), signed in its own context (`elpis-mesh-cert-v1`), so the issuer's
+signature on a certificate can never pass as a licence, or the other way
+round. Unlike a licence, an expired certificate is not accepted: the instance
+then joins the mesh as a community one. See [Mesh](mesh.md) for why that is
+safe.
 
 A lapsed licence keeps what it unlocked. Expiry already does not stop the
 resolver resolving, and quietly moving a name that somebody's monitoring points
