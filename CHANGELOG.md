@@ -35,7 +35,11 @@ on (below), and only names asked `mesh-share-min-hits` times. Connections are
 Noise_NNpsk0 over TCP, keyed by one PSK from `elpis --gen-psk`: X25519 for
 forward secrecy, ChaCha20-Poly1305, and the PSK mixed into every key, so
 recorded traffic stays safe from a future quantum computer while the key does.
-See [Mesh](docs/mesh.md).
+The shipped systemd unit never runs elpis as root, so it cannot read a key file
+that is root's alone: the unit passes the key in with `LoadCredential=`, and
+`mesh-psk: mesh.psk` (or `mesh-key: mesh.key`) names the credential. Started as
+root, elpis reads an absolute path before dropping privileges. See
+[Mesh](docs/mesh.md).
 
 **Instances on one network segment find each other.** With the mesh on,
 `mesh-lsd: yes` (the default) has each instance announce itself by multicast,

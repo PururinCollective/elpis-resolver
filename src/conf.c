@@ -155,6 +155,29 @@ typedef struct {
     unsigned      errors;
 } pctx_t;
 
+/*
+ * Where a mesh key is read from: an absolute path, or the name of a systemd
+ * credential -- LoadCredential=NAME:PATH in the unit -- which mesh.c finds at
+ * startup in the directory systemd names in $CREDENTIALS_DIRECTORY.  A name
+ * is one file name: no slash, not "." or "..", nothing unprintable.
+ */
+static int key_file_ok(const char *v)
+{
+    size_t i, n = strlen(v);
+
+    if (n == 0)
+        return 0;
+    if (v[0] == '/')
+        return 1;
+    if (n > 255 || !strcmp(v, ".") || !strcmp(v, ".."))
+        return 0;
+    for (i = 0; i < n; i++)
+        if (v[i] == '/' || (unsigned char)v[i] <= 0x20 ||
+            (unsigned char)v[i] >= 0x7F)
+            return 0;
+    return 1;
+}
+
 static void perr(pctx_t *p, const char *key, const char *val)
 {
     elpis_error("%s:%u: bad value for '%s': '%s'", p->src, p->lineno, key,
@@ -397,8 +420,9 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     /* ---- mesh ---- */
     if (KEY("mesh")) return want_bool(&p, key, val, &c->mesh);
     if (KEY("mesh-psk")) {
-        if (val[0] != '/' || strlen(val) >= sizeof c->mesh_psk_file) {
-            elpis_error("%s:%u: 'mesh-psk' takes an absolute path", src, lineno);
+        if (!key_file_ok(val) || strlen(val) >= sizeof c->mesh_psk_file) {
+            elpis_error("%s:%u: 'mesh-psk' takes an absolute path, or the name "
+                        "of a systemd credential", src, lineno);
             return ELPIS_ERR;
         }
         elpis_strlcpy(c->mesh_psk_file, val, sizeof c->mesh_psk_file);
@@ -429,8 +453,9 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("mesh-require-licence") || KEY("mesh-require-license"))
         return want_bool(&p, key, val, &c->mesh_require_licence);
     if (KEY("mesh-key")) {
-        if (val[0] != '/' || strlen(val) >= sizeof c->mesh_key_file) {
-            elpis_error("%s:%u: 'mesh-key' takes an absolute path", src, lineno);
+        if (!key_file_ok(val) || strlen(val) >= sizeof c->mesh_key_file) {
+            elpis_error("%s:%u: 'mesh-key' takes an absolute path, or the name "
+                        "of a systemd credential", src, lineno);
             return ELPIS_ERR;
         }
         elpis_strlcpy(c->mesh_key_file, val, sizeof c->mesh_key_file);

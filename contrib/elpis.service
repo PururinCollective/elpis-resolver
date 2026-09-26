@@ -61,6 +61,21 @@ Group=elpis
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
+# The mesh's keys (docs/mesh.md).  Running as elpis, the service cannot read
+# a file that is root's alone, and that is how the keys should be kept.  So
+# systemd reads them, as root, and hands the service a copy only it can read,
+# in a directory of its own for as long as it runs.  In elpis.conf, name the
+# credential instead of giving a path:
+#
+#   mesh-psk: mesh.psk
+#   mesh-key: mesh.key
+#
+# The first for the mesh, the second for mesh-require-licence as well.  They
+# are commented out because systemd will not start the service at all while
+# a file named here is missing.  Needs systemd 247 or later.
+#LoadCredential=mesh.psk:/etc/elpis/mesh.psk
+#LoadCredential=mesh.key:/etc/elpis/mesh.key
+
 # The resolver reads its config at startup and writes nothing afterwards.
 NoNewPrivileges=yes
 PrivateTmp=yes

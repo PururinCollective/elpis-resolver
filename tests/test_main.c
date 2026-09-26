@@ -2747,9 +2747,45 @@ static void test_mesh(void)
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
           cf.n_mesh_listen == 1 && elpis_addr_port(&cf.mesh_listen[0]) == 7900,
           "mesh-listen takes a port");
-    elpis_strlcpy(line, "mesh-psk: mesh.key", sizeof line);
+    elpis_strlcpy(line, "mesh-psk: /etc/elpis/mesh.psk", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          !strcmp(cf.mesh_psk_file, "/etc/elpis/mesh.psk"),
+          "mesh-psk takes an absolute path");
+    elpis_strlcpy(line, "mesh-psk: mesh.psk", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          !strcmp(cf.mesh_psk_file, "mesh.psk"),
+          "or the name of a systemd credential");
+    elpis_strlcpy(line, "mesh-key: mesh.key", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) == ELPIS_OK &&
+          !strcmp(cf.mesh_key_file, "mesh.key"), "and so does mesh-key");
+    elpis_strlcpy(line, "mesh-psk: keys/mesh.psk", sizeof line);
     CHECK(elpis_conf_parse_line(&cf, line, "-", 1) != ELPIS_OK,
-          "mesh-psk wants an absolute path");
+          "but not a relative path");
+    elpis_strlcpy(line, "mesh-key: ..", sizeof line);
+    CHECK(elpis_conf_parse_line(&cf, line, "-", 1) != ELPIS_OK,
+          "nor a name that climbs out of the credentials directory");
+
+    {
+        char path[64];
+        CHECK(elpis_mesh_key_path("/etc/elpis/mesh.psk", "/run/credentials/x",
+                                  path, sizeof path) == ELPIS_OK &&
+              !strcmp(path, "/etc/elpis/mesh.psk"),
+              "a path is read where it says");
+        CHECK(elpis_mesh_key_path("mesh.psk", "/run/credentials/elpis.service",
+                                  path, sizeof path) == ELPIS_OK &&
+              !strcmp(path, "/run/credentials/elpis.service/mesh.psk"),
+              "a credential in the directory systemd names");
+        CHECK(elpis_mesh_key_path("mesh.psk", NULL, path, sizeof path) ==
+                  ELPIS_ENOTFOUND &&
+              elpis_mesh_key_path("mesh.psk", "", path, sizeof path) ==
+                  ELPIS_ENOTFOUND &&
+              elpis_mesh_key_path("mesh.psk", "run/x", path, sizeof path) ==
+                  ELPIS_ENOTFOUND,
+              "and nowhere when systemd named none");
+        CHECK(elpis_mesh_key_path("mesh.psk", "/a/very/long/credentials/"
+                                  "directory/for/a/small/buffer", path, 32) ==
+                  ELPIS_ERR, "a path too long for the buffer is refused");
+    }
 }
 
 /*

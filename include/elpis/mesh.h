@@ -35,6 +35,15 @@ void  elpis_mesh_init(elpis_ctx_t *ctx);
 void *elpis_mesh_main(void *ctx);
 void  elpis_mesh_fini(void);
 
+/*
+ * Where mesh-psk: or mesh-key: says to read a key: an absolute path as it
+ * is, or the name of a systemd credential (LoadCredential= in the unit) in
+ * `credsdir`, the $CREDENTIALS_DIRECTORY systemd gives the service.
+ * ELPIS_ENOTFOUND for a name with no credentials directory to find it in.
+ */
+int   elpis_mesh_key_path(const char *val, const char *credsdir, char *out,
+                          size_t cap);
+
 /* --gen-psk: print a new key in the form mesh-psk: files take. */
 int   elpis_mesh_gen_psk(void);
 /* --mesh-keygen: print a new instance key for mesh-key:, and its public half

@@ -31,28 +31,43 @@ It was warm four and a half seconds after it started.
 Make one key and give every instance the same copy, readable by root alone:
 
 ```bash
-elpis --gen-psk | sudo tee /etc/elpis/mesh.psk > /dev/null
+sudo sh -c 'umask 077; elpis --gen-psk > /etc/elpis/mesh.psk'
 ```
 
-```bash
-sudo chmod 600 /etc/elpis/mesh.psk
+How elpis gets to read it depends on how it is started.
+
+**Under the shipped systemd unit** ([contrib/elpis.service](../contrib/elpis.service)),
+elpis runs as its own user from the start and is never root, so it cannot
+read a file that is root's alone. systemd reads it instead: uncomment this
+line in the unit,
+
+```
+LoadCredential=mesh.psk:/etc/elpis/mesh.psk
 ```
 
-Then, in each instance's `elpis.conf`:
+run `sudo systemctl daemon-reload`, and name the credential rather than the
+file in each instance's `elpis.conf`:
 
 ```
 mesh: yes
-mesh-psk: /etc/elpis/mesh.psk
+mesh-psk: mesh.psk
 mesh-listen: 0.0.0.0@7878          # and/or [::]@7878
 mesh-peer: 192.0.2.1@7878          # a bridge: one or more instances to dial
 ```
 
+systemd hands the service a copy that only it can read, in a directory of its
+own that goes away when it stops. This needs systemd 247 or later (Debian 11,
+Ubuntu 22.04, RHEL 9). With a path there instead, elpis says it cannot read
+the file and why, and runs without the mesh.
+
+**Started as root**, by another init system or by hand, elpis reads the key
+before it drops privileges to the `user:` in its config, so give the path:
+`mesh-psk: /etc/elpis/mesh.psk`.
+
 On one network segment `mesh-peer:` can be left out: the instances find each
 other by multicast (below). Across segments, give each one a bridge on the
-other side. The key is read, and the port bound, before privileges are
-dropped, so the key file can belong to root. The mesh port is TCP; open it
-only to your own instances. Listen on each address family your instances
-reach each other over.
+other side. The mesh port is TCP; open it only to your own instances. Listen
+on each address family your instances reach each other over.
 
 ## How instances find each other
 
@@ -296,7 +311,7 @@ Setting it up takes a build that carries your issuer key (see
 [Signed licences](licensing.md)), and for each instance:
 
 ```bash
-elpis --mesh-keygen | sudo tee /etc/elpis/mesh.key > /dev/null
+sudo sh -c 'umask 077; elpis --mesh-keygen > /etc/elpis/mesh.key'
 ```
 
 That writes the instance's private key, which never leaves it, and prints the
@@ -311,9 +326,13 @@ and the instance's `elpis.conf` gets:
 
 ```
 mesh-require-licence: yes
-mesh-key: /etc/elpis/mesh.key
+mesh-key: mesh.key
 mesh-cert: elpism1.AQAAC7kAAAAAardsDQAA…
 ```
+
+Under the shipped unit, uncomment its second credential line as well,
+`LoadCredential=mesh.key:/etc/elpis/mesh.key`. Started as root, give the path
+instead: `mesh-key: /etc/elpis/mesh.key`.
 
 What it proves, and what it does not:
 

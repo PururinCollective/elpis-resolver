@@ -542,18 +542,61 @@ fail:
 /* Setup                                                               */
 /* ------------------------------------------------------------------ */
 
-/* A 32-byte key from a file of 64 hex digits, as --gen-psk and
- * --mesh-keygen write them.  `made_by` names which, for the error. */
-static int load_key32(const char *path, uint8_t out[32], const char *made_by)
+int elpis_mesh_key_path(const char *val, const char *credsdir, char *out,
+                        size_t cap)
 {
-    char buf[4096];
+    int n;
+
+    if (val[0] == '/')
+        n = snprintf(out, cap, "%s", val);
+    else if (credsdir == NULL || credsdir[0] != '/')
+        return ELPIS_ENOTFOUND;
+    else
+        n = snprintf(out, cap, "%s/%s", credsdir, val);
+    return n < 0 || (size_t)n >= cap ? ELPIS_ERR : ELPIS_OK;
+}
+
+/*
+ * A 32-byte key from a file of 64 hex digits, as --gen-psk and --mesh-keygen
+ * write them.  `val` is what the config says (`key` names the setting): a
+ * path, or a systemd credential.  `made_by` names what writes one, for the
+ * error.
+ */
+static int load_key32(const char *key, const char *val, uint8_t out[32],
+                      const char *made_by)
+{
+    char buf[4096], path[1024];
     struct stat st;
     ssize_t n;
     int fd, rc;
 
+    rc = elpis_mesh_key_path(val, getenv("CREDENTIALS_DIRECTORY"), path,
+                             sizeof path);
+    if (rc == ELPIS_ENOTFOUND) {
+        elpis_error("mesh: '%s: %s' names a systemd credential, and elpis was "
+                    "given none: the unit needs LoadCredential=%s:<the file> "
+                    "(see contrib/elpis.service)", key, val, val);
+        return ELPIS_ERR;
+    }
+    if (rc != ELPIS_OK) {
+        elpis_error("mesh: '%s: %s' makes a path too long", key, val);
+        return ELPIS_ERR;
+    }
     fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        elpis_error("mesh: cannot read %s: %s", path, strerror(errno));
+        int e = errno;
+        /*
+         * The usual way to get here: the shipped unit starts elpis as its own
+         * user, never as root, and the key is root's alone, as it should be.
+         */
+        if (e == EACCES && geteuid() != 0 && val[0] == '/')
+            elpis_error("mesh: cannot read %s: %s.  elpis is not running as "
+                        "root, so it cannot read a file that is root's alone: "
+                        "under systemd, pass it in with LoadCredential= and "
+                        "name the credential in '%s:' (see docs/mesh.md)",
+                        path, strerror(e), key);
+        else
+            elpis_error("mesh: cannot read %s: %s", path, strerror(e));
         return ELPIS_ERR;
     }
     if (fstat(fd, &st) == 0 && (st.st_mode & 077) != 0)
@@ -615,7 +658,8 @@ static int licensed_setup(const elpis_conf_t *c)
                     "--mesh-keygen) and mesh-cert: (from the issuer)");
         return ELPIS_ERR;
     }
-    if (load_key32(c->mesh_key_file, g_skey, "elpis --mesh-keygen") != ELPIS_OK)
+    if (load_key32("mesh-key", c->mesh_key_file, g_skey,
+                   "elpis --mesh-keygen") != ELPIS_OK)
         return ELPIS_ERR;
     elpis_x25519_base(g_spub, g_skey);
     if (elpis_meshcert_parse(c->mesh_cert, elpis_wall_s(), &cert) != ELPIS_OK) {
@@ -665,7 +709,8 @@ void elpis_mesh_init(elpis_ctx_t *ctx)
         c->mesh = 0;
         return;
     }
-    if (load_key32(c->mesh_psk_file, g_psk, "elpis --gen-psk") != ELPIS_OK) {
+    if (load_key32("mesh-psk", c->mesh_psk_file, g_psk,
+                   "elpis --gen-psk") != ELPIS_OK) {
         elpis_error("mesh: the mesh is off");
         c->mesh = 0;
         return;
