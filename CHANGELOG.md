@@ -22,6 +22,15 @@ relative to where it was loaded from. The session cookie is no longer set with
 `Path=/`, either: it is scoped to the path the page sits under, so it is not
 sent to every other application on that host.
 
+### Changed
+
+**Stopping elpis under the shipped systemd unit starts systemd-resolved
+again.** Starting elpis already stopped resolved through `Conflicts=`, and
+stopping it left the host with no resolver at all. Now `ExecStopPost=` starts
+resolved again when elpis stops and is not coming back. A restart, a crash
+that `Restart=` recovers from, and a system shutdown leave resolved alone, and
+so does a resolved you have disabled. Reinstall the unit to pick this up.
+
 ## 2.0.2 — 2026-09-25
 
 ### Fixed
