@@ -22,7 +22,7 @@ permits.
 - The credit and copyright lines in the status page's About window, in
   `web/index.html` ("Created by Anime4000, Ryukura & Claude AI" and
   "Copyright 2026 Pururin Collective"), and the copy generated from it in
-  `src/webui_assets.h`.
+  `src/webui/webui_assets.h`.
 - The Licence section of `README.md`.
 - Any copyright or `SPDX-License-Identifier` line at the top of a file.
 
@@ -46,7 +46,7 @@ answering (`elpis=`, `edition=`, `build=`) and whether a signed licence
 checked out. Monitoring and support depend on that answer being true. The
 parts involved:
 
-- `src/localzone.c`, the block that builds the probe's TXT answer
+- `src/server/localzone.c`, the block that builds the probe's TXT answer
 - `src/licence.c`, which decodes a token and verifies its Ed25519 signature
 - `apply_licensed_settings()` in `src/main.c`, the licence gate on
   `identity-name:`

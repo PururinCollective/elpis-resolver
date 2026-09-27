@@ -39,8 +39,8 @@ Two tools are optional:
   into the binary. A tarball builds without it, and the binary then reports
   `no git checkout`.
 - **python3** regenerates the status page from `web/index.html` when you edit
-  it. Without python3 the committed copy in `src/webui_assets.h` is used, and
-  the build says so.
+  it. Without python3 the committed copy in `src/webui/webui_assets.h` is
+  used, and the build says so.
 
 Linux builds with gcc and clang are tested for each release: gcc 13.3 and
 clang 18.1 for 2.0.2. The BSDs (kqueue) and macOS (kqueue) are supported by
@@ -308,7 +308,7 @@ clang at the warning level the Makefile sets, and should stay that way.
 | Symptom | Cause |
 |---|---|
 | Errors about `ifneq`, or `missing separator` | Not GNU make, as on the BSDs. Use `gmake`. |
-| `python3 not found: keeping the committed src/webui_assets.h` | Not an error. Install python3 only if you edit `web/index.html`. |
+| `python3 not found: keeping the committed src/webui/webui_assets.h` | Not an error. Install python3 only if you edit `web/index.html`. |
 | The binary stops with "Illegal instruction" | Built with `-march` for a newer CPU than this one. Rebuild with a lower level or no `-march`. |
 | The startup line says `generic` after you changed `OPT` | `CFLAGS` was also set, and it overrides `OPT`. Unset it. |
 | `make fuzz` fails | Needs clang with libFuzzer (`sudo apt install clang`). |

@@ -66,19 +66,75 @@ int elpis_scalar_eq_ci(const uint8_t *a, const uint8_t *b, size_t n)
  */
 #include "simd_internal.h"
 
-/* Load the 0..15 byte tail, case-folded, into two words. */
+/*
+ * The last n % 16 bytes of p[0..n) -- what is left after the whole 16-byte
+ * blocks -- case-folded, zero padded, as two words.
+ *
+ * Building the tail a byte at a time in a buffer and reading it back as words
+ * made the read wait on the byte stores whenever the tail was not a multiple
+ * of 8: about 7 ns, half of a whole hash of a typical name.  So where the byte
+ * order is known, the tail is read with word loads that overlap instead --
+ * into the last block, already hashed, when the name has one, and into
+ * itself when it is shorter than 16 bytes -- then shifted into place.  Nothing
+ * outside p[0..n) is read.  The shifts assume little-endian words; anywhere
+ * else the byte loop below does the same job, and the digest is the same.
+ */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+void elpis_hash_tail(const uint8_t *p, size_t n, uint64_t *a, uint64_t *b)
+{
+    const uint8_t *end = p + n;
+    size_t r = n & 15u;
+    uint64_t x0, x1;
+
+    if (r == 0) {
+        *a = *b = 0;
+        return;
+    }
+    if (n >= 16) {
+        /* The name's last 16 bytes, moved down by the 16 - r already hashed. */
+        unsigned s = (unsigned)(16u - r) * 8u;          /* 8..120 bits */
+        x0 = elpis_load64(end - 16);
+        x1 = elpis_load64(end - 8);
+        if (s >= 64) {
+            x0 = x1 >> (s - 64u);
+            x1 = 0;
+        } else {
+            x0 = (x0 >> s) | (x1 << (64u - s));
+            x1 >>= s;
+        }
+    } else if (r >= 8) {
+        x0 = elpis_load64(p);
+        x1 = r == 8 ? 0 : elpis_load64(end - 8) >> ((16u - r) * 8u);
+    } else if (r >= 4) {
+        x0 = (uint64_t)elpis_load32(p) |
+             (((uint64_t)elpis_load32(end - 4) >> ((8u - r) * 8u)) << 32);
+        x1 = 0;
+    } else {                                            /* 1..3 bytes */
+        x0 = (uint64_t)p[0] |
+             ((uint64_t)p[r >> 1] << ((r >> 1) * 8u)) |
+             ((uint64_t)p[r - 1] << ((r - 1) * 8u));
+        x1 = 0;
+    }
+    *a = elpis_swar_lower64(x0);
+    *b = elpis_swar_lower64(x1);
+}
+#else
 void elpis_hash_tail(const uint8_t *p, size_t n, uint64_t *a, uint64_t *b)
 {
     uint8_t t[16];
-    size_t i;
+    size_t r = n & 15u, i;
+
+    p += n - r;
     memset(t, 0, sizeof t);
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < r; i++) {
         uint8_t c = p[i];
         t[i] = (uint8_t)((c >= 'A' && c <= 'Z') ? c + 32 : c);
     }
     *a = elpis_load64(t);
     *b = elpis_load64(t + 8);
 }
+#endif
 
 uint64_t elpis_hash_finish(uint64_t h, uint64_t a, uint64_t b, size_t n)
 {
@@ -98,7 +154,7 @@ uint64_t elpis_scalar_hash_ci(const uint8_t *p, size_t n, uint64_t seed)
         h = elpis_hash_step(h, a, b);
         i += 16;
     }
-    elpis_hash_tail(p + i, n - i, &a, &b);
+    elpis_hash_tail(p, n, &a, &b);
     return elpis_hash_finish(h, a, b, n);
 }
 
