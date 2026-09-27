@@ -198,6 +198,17 @@ h4{margin:0 0 5px;font-size:11px;color:var(--dim);font-weight:600;
 'use strict';
 var D = null, timer = null, zTop = 10, wins = {};
 
+/*
+ * Where the API is. Not "/api/": behind a reverse proxy the page can sit under
+ * a path of its own -- https://host/elpis/ passed to 127.0.0.1:8082/ -- and an
+ * absolute path would ask the host's root instead. The resolver serves the
+ * page only as "/" and "/index.html", so the address bar with those taken off
+ * is the prefix. "https://host/elpis" with no slash is the same page too, and
+ * a relative URL resolved against it would drop "elpis", so add the slash.
+ */
+var API = location.pathname.replace(/\/index\.html$/, '/')
+                           .replace(/\/?$/, '/') + 'api/';
+
 /* ---------- helpers ---------- */
 function $(id){ return document.getElementById(id); }
 function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
@@ -1062,7 +1073,7 @@ function paint(){
 }
 
 function poll(){
-  fetch('/api/status', { credentials:'same-origin' })
+  fetch(API + 'status', { credentials:'same-origin' })
     .then(function(r){
       if (r.status === 401){ showLogin(); throw new Error('auth'); }
       return r.json();
@@ -1109,7 +1120,7 @@ $('lf').addEventListener('submit', function(e){
   $('err').textContent = '';
   var body = 'user=' + encodeURIComponent($('u').value) +
              '&pass=' + encodeURIComponent($('p').value);
-  fetch('/api/login', { method:'POST', credentials:'same-origin',
+  fetch(API + 'login', { method:'POST', credentials:'same-origin',
       headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body })
     .then(function(r){
       if (r.ok) showDesk();
@@ -1119,7 +1130,7 @@ $('lf').addEventListener('submit', function(e){
 });
 
 $('out').onclick = function(){
-  fetch('/api/logout', { method:'POST', credentials:'same-origin' })
+  fetch(API + 'logout', { method:'POST', credentials:'same-origin' })
     .then(showLogin).catch(showLogin);
 };
 $('tile').onclick = tile;
@@ -1159,7 +1170,7 @@ window.addEventListener('resize', function(){
   layoutSave();
 });
 
-fetch('/api/session', { credentials:'same-origin' })
+fetch(API + 'session', { credentials:'same-origin' })
   .then(function(r){ return r.json(); })
   .then(function(j){ if (j.ok) showDesk(); else showLogin(); })
   .catch(showLogin);
