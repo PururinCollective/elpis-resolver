@@ -10,7 +10,7 @@ still reads like a diff of the page.
 import sys, os
 
 src = os.path.join(os.path.dirname(__file__), '..', 'web', 'index.html')
-dst = os.path.join(os.path.dirname(__file__), '..', 'src', 'webui_assets.h')
+dst = os.path.join(os.path.dirname(__file__), '..', 'src', 'webui', 'webui_assets.h')
 
 text = open(src, encoding='utf-8').read()
 if '\r' in text:

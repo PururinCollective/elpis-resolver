@@ -31,6 +31,16 @@ resolved again when elpis stops and is not coming back. A restart, a crash
 that `Restart=` recovers from, and a system shutdown leave resolved alone, and
 so does a resolved you have disabled. Reinstall the unit to pick this up.
 
+**The source files are sorted into folders.** `src/` had grown to forty files
+side by side. They now live in `src/dns/`, `src/cache/`, `src/dnssec/`,
+`src/resolver/`, `src/server/`, `src/net/`, `src/simd/` and `src/webui/`,
+with startup, configuration, logging, counters and the licence left at the top.
+Every file kept its name and its code, and the headers stay in
+`include/elpis/`. A local branch rebases across the move, because git follows
+the renames. A patch applied with plain `patch` needs the new paths.
+`make clean` now removes every object under `src/`, including ones a build on
+another branch left behind.
+
 ## 2.0.2 — 2026-09-25
 
 ### Fixed

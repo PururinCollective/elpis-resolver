@@ -49,13 +49,46 @@ ALL_LDFLAGS = $(LDFLAGS) -pthread
 LIBS      := -lm
 
 # ---- sources ---------------------------------------------------------------
+# One directory per part of the resolver; the program itself (startup, config,
+# logging, counters, licence) stays at the top of src/.  Headers are all in
+# include/elpis/ whichever directory their code lives in.
+
+# DNS wire format: names, messages, record data, EDNS and cookies.
+DNS_SRC := \
+  src/dns/name.c src/dns/msg.c src/dns/rdata.c src/dns/edns.c \
+  src/dns/rrlist.c src/dns/cookie.c
+
+# The shared hash table and the caches built on it.
+CACHE_SRC := \
+  src/cache/cache.c src/cache/mcache.c src/cache/rcache.c src/cache/infra.c \
+  src/cache/delegation.c
+
+# Event loop and sockets, used by both the server and the resolver side.
+NET_SRC := \
+  src/net/loop.c src/net/sock.c
+
+# The client side: listeners, the answer path, rate limits, local names, DNS64.
+SERVER_SRC := \
+  src/server/server.c src/server/ratelimit.c src/server/rrl.c \
+  src/server/localzone.c src/server/dns64.c
+
+# The upstream side: recursion, queries out, and warming at startup.
+RESOLVER_SRC := \
+  src/resolver/resolver.c src/resolver/outbound.c src/resolver/roots.c \
+  src/resolver/tld.c src/resolver/axfr.c src/resolver/probe.c
+
+DNSSEC_SRC := \
+  src/dnssec/dnssec.c src/dnssec/nsec.c src/dnssec/nsec3.c \
+  src/dnssec/trustanchor.c
+
+# The status page and what it shows.
+WEBUI_SRC := \
+  src/webui/webui.c src/webui/telemetry.c src/webui/selfinfo.c
+
 CORE_SRC := \
-  src/util.c src/log.c src/conf.c src/simd.c src/name.c src/msg.c src/rdata.c \
-  src/edns.c src/rrlist.c src/cache.c src/mcache.c src/rcache.c src/infra.c src/loop.c \
-  src/sock.c src/server.c src/outbound.c src/resolver.c src/delegation.c \
-  src/roots.c src/tld.c src/axfr.c src/probe.c src/dns64.c src/localzone.c src/ratelimit.c \
-  src/stats.c src/telemetry.c src/selfinfo.c src/licence.c src/dnssec.c src/nsec.c src/nsec3.c src/trustanchor.c \
-  src/cookie.c src/rrl.c src/conflict.c src/webui.c src/main.c
+  src/util.c src/log.c src/conf.c src/stats.c src/licence.c src/conflict.c \
+  src/simd/simd.c $(DNS_SRC) $(CACHE_SRC) $(NET_SRC) $(SERVER_SRC) \
+  $(RESOLVER_SRC) $(DNSSEC_SRC) $(WEBUI_SRC) src/main.c
 
 CRYPTO_SRC := \
   src/crypto/sha1.c src/crypto/sha2.c src/crypto/keccak.c src/crypto/bn.c \
@@ -86,8 +119,8 @@ GITREV   := $(if $(GITBR),$(if $(GITHASH),$(GITBR)@$(GITHASH)),$(GITHASH))
 endif
 
 # SIMD kernels compiled with elevated ISA + selected at runtime via CPUID.
-SIMD_X86_SRC := src/simd_sse2.c src/simd_avx2.c
-SIMD_ARM_SRC := src/simd_neon.c
+SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c
+SIMD_ARM_SRC := src/simd/simd_neon.c
 
 UNAME_M := $(shell uname -m 2>/dev/null || echo unknown)
 
@@ -155,7 +188,7 @@ $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o: src/cflags.s
 # within the same second as the last build and make's mtime comparison says
 # the object is current, so the old page stays in the binary and every test
 # of the new one silently measures the old one.
-src/webui_assets.h: web/index.html tools/mkassets.py
+src/webui/webui_assets.h: web/index.html tools/mkassets.py
 	@if command -v python3 >/dev/null 2>&1; then \
 	    python3 tools/mkassets.py; \
 	else \
@@ -163,7 +196,7 @@ src/webui_assets.h: web/index.html tools/mkassets.py
 	    touch $@; \
 	fi
 
-src/webui.o: src/webui_assets.h
+src/webui/webui.o: src/webui/webui_assets.h
 
 # Changing LICENCE_ISSUER changes a -D, and make does not watch flags: without
 # this, `make LICENCE_ISSUER=...` over an existing build leaves the old key
@@ -224,13 +257,13 @@ asan:
 	$(MAKE) OPT="-O1 -g3 -DELPIS_DEBUG=1 -fsanitize=address,undefined -fno-omit-frame-pointer" \
 	        LDFLAGS="-fsanitize=address,undefined" $(BIN)
 
-src/simd_avx2.o: src/simd_avx2.c
+src/simd/simd_avx2.o: src/simd/simd_avx2.c
 	$(CC) $(ALL_CFLAGS) -mavx2 -mbmi -mbmi2 -c -o $@ $<
 
-src/simd_sse2.o: src/simd_sse2.c
+src/simd/simd_sse2.o: src/simd/simd_sse2.c
 	$(CC) $(ALL_CFLAGS) -msse2 -c -o $@ $<
 
-src/simd_neon.o: src/simd_neon.c
+src/simd/simd_neon.o: src/simd/simd_neon.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
 %.o: %.c
@@ -283,10 +316,10 @@ FUZZ_OBJ    := $(patsubst %.c,$(FUZZ_DIR)/%.o,$(filter-out src/main.c,$(SRC) $(S
 
 fuzz: $(FUZZ_BIN)
 
-$(FUZZ_DIR)/src/simd_avx2.o: FUZZ_ISA := -mavx2 -mbmi -mbmi2
-$(FUZZ_DIR)/src/simd_sse2.o: FUZZ_ISA := -msse2
+$(FUZZ_DIR)/src/simd/simd_avx2.o: FUZZ_ISA := -mavx2 -mbmi -mbmi2
+$(FUZZ_DIR)/src/simd/simd_sse2.o: FUZZ_ISA := -msse2
 $(FUZZ_DIR)/src/util.o: src/gitrev.h src/buildtarget.h
-$(FUZZ_DIR)/src/webui.o: src/webui_assets.h
+$(FUZZ_DIR)/src/webui/webui.o: src/webui/webui_assets.h
 $(FUZZ_DIR)/src/licence.o: src/licence_issuer.stamp
 
 $(FUZZ_DIR)/%.o: %.c
@@ -311,12 +344,14 @@ uninstall:
 	@echo "left $(PREFIX)/bin/$(PROG).conf in place; remove it yourself if you meant to"
 	-rmdir $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX) 2>/dev/null || true
 
+# Every object and .d file under src/ and tests/, not only the ones in $(OBJ):
+# a build on another branch leaves objects for files this branch does not
+# have, or has somewhere else, and $(OBJ) would never name them.
 clean:
-	rm -f $(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o \
-	      $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence $(FUZZ_BIN)
+	rm -f $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence $(FUZZ_BIN) $(FUZZ_BIN).d
 	rm -rf $(FUZZ_DIR)
-	rm -f src/*.d src/crypto/*.d tests/*.d src/gitrev.h src/licence_issuer.stamp \
-	      src/buildtarget.h src/cflags.stamp
+	find src tests \( -name '*.o' -o -name '*.d' \) -exec rm -f {} +
+	rm -f src/gitrev.h src/licence_issuer.stamp src/buildtarget.h src/cflags.stamp
 	@rmdir $(BINDIR) 2>/dev/null || true
 
 # clean keeps bin/elpis.conf because it is yours by then; this drops it too.
