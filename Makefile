@@ -1,6 +1,24 @@
 # Elpis Resolver -- portable C99 recursive DNS resolver
 # SPDX-License-Identifier: see LICENSE
 
+# Your own settings for every build, one `NAME = value` per line: OPT for a
+# tuned build, CC, PREFIX, LICENCE_ISSUER -- anything in the table in
+# docs/COMPILING.md.  See local.mk.example.  Git ignores the file, so a pull
+# leaves it alone, and it reaches builds that do not get your shell's
+# environment: `sudo make install`, and contrib/elpis-update.sh running as
+# root.  A value on the make command line still wins over it, and it wins
+# over the environment.
+-include local.mk
+ifeq ($(MAKELEVEL),0)
+ifneq ($(wildcard local.mk),)
+LOCAL_MK_VARS := $(strip $(shell sed -n -e 's/^[[:space:]]*override[[:space:]]*//' \
+    -e 's/^[[:space:]]*export[[:space:]]*//' \
+    -e 's/^\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*[:?+!]*=.*/\1/p' local.mk))
+LOCAL_MK_SP :=
+$(info $(LOCAL_MK_SP)  local.mk sets: $(or $(LOCAL_MK_VARS),nothing))
+endif
+endif
+
 PROG      := elpis
 # Build outputs land in bin/, which is ignored by git, so a working tree stays
 # clean across `git pull` and the usual `make clean && make`.
@@ -124,7 +142,11 @@ endif
 SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c
 SIMD_ARM_SRC := src/simd/simd_neon.c
 
+# Only when not given, so a cross build can set it in local.mk as well as on
+# the command line.
+ifndef UNAME_M
 UNAME_M := $(shell uname -m 2>/dev/null || echo unknown)
+endif
 
 ifneq (,$(filter x86_64 amd64 i386 i686,$(UNAME_M)))
   SIMD_SRC  := $(SIMD_X86_SRC)

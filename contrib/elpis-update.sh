@@ -9,6 +9,15 @@
 #
 #   MARCH=znver3 elpis-update
 #
+# Or keep the build settings in local.mk at the top of the tree, which make
+# reads and git leaves alone -- they then apply here, where this runs as root
+# without your shell's environment, and to every other build too:
+#
+#   echo 'OPT = -O3 -fno-strict-aliasing -march=znver3 -mtune=znver3' \
+#       >> /opt/elpis-resolver/local.mk
+#
+# MARCH, when given, replaces the OPT in local.mk for that run.
+#
 set -euo pipefail
 
 # `service` and `systemctl` live in /usr/sbin, which is not on every
@@ -27,8 +36,11 @@ say() { echo "[*] $*"; }
 cd "$SRC" || die "no $SRC"
 command -v systemctl >/dev/null || die "no systemctl on PATH"
 
-OPT="-O3 -fno-strict-aliasing"
-[ -n "$MARCH" ] && OPT="$OPT -march=$MARCH -mtune=$MARCH"
+# OPT goes on the command line only for MARCH: otherwise it would override
+# whatever local.mk says.
+OPT_ARG=()
+[ -n "$MARCH" ] &&
+    OPT_ARG=(OPT="-O3 -fno-strict-aliasing -march=$MARCH -mtune=$MARCH")
 
 was_running=0
 systemctl is-active --quiet "$UNIT" && was_running=1
@@ -40,7 +52,7 @@ git pull --ff-only
 # runs, and a build that fails leaves it serving -- which is the whole point
 # of not cleaning first.
 say "building${MARCH:+ for $MARCH}"
-make static OPT="$OPT"
+make static ${OPT_ARG[@]+"${OPT_ARG[@]}"}
 
 [ -x bin/elpis ] || die "build produced no bin/elpis"
 # make merges new shipped defaults into bin/elpis.conf, and leaves it alone

@@ -85,7 +85,16 @@ public half in [include/elpis/licence.h](../include/elpis/licence.h):
 ```
 
 and rebuild the binaries you distribute. `make LICENCE_ISSUER=<hex>` does the
-same for a one-off build.
+same for a one-off build. To keep it for every build of your tree, put it in
+`local.mk` at the top of the tree instead:
+
+```make
+LICENCE_ISSUER = 6cd740f1...dd6315
+```
+
+Git ignores that file, and unlike your shell's environment it still reaches
+`sudo make install` and `contrib/elpis-update.sh` (see
+[keeping build settings in local.mk](COMPILING.md#keeping-them-in-localmk)).
 
 **`issuer.key` is the whole system.** Anyone holding it can mint licences every
 binary you have shipped will believe, and the only remedy is a new key, which

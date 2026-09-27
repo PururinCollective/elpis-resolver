@@ -27,7 +27,22 @@ kept in `bin/elpis.conf.shipped`. A tree built before this finds them in git
 history. See
 [when the shipped defaults change](docs/configuration.md#when-the-shipped-defaults-change).
 
+**`local.mk` keeps your build settings.** Put `OPT`, `CC`, `PREFIX`,
+`LICENCE_ISSUER`, or anything else from the build-variable table in `local.mk`
+at the top of the tree, one `NAME = value` per line. See `local.mk.example`.
+Git ignores the file, so a pull leaves it alone. It also reaches `sudo make
+install` and `contrib/elpis-update.sh`, which do not get your shell's
+environment. That matters most for `LICENCE_ISSUER`: a build without the key
+rejects every licence, and nothing says so. `make` lists the settings it took
+from the file. A value on the command line still wins. `UNAME_M` can now be
+set there too; it was always recomputed.
+
 ### Changed
+
+**`contrib/elpis-update.sh` leaves `OPT` to `local.mk` unless `MARCH` is
+given.** It always passed its own `OPT`, which would override the file. Without
+`MARCH` and without `local.mk`, a build now gets the Makefile's default flags,
+which add `-fomit-frame-pointer` to what the script used to pass.
 
 **`contrib/elpis-update.sh` refuses a config with conflict markers in it,** and
 ends by saying so when new defaults are waiting on a manual merge. Elpis would
