@@ -10,9 +10,124 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.1.0 — 2026-09-28
+
+Found by a stress test. 1,413 lookups across popular global, Malaysian,
+Indonesian, Singaporean and Chinese sites, e-commerce, streaming and gaming
+were checked against 1.1.1.1. The dnscheck.tools DNSSEC matrix was run, along
+with 100,000 queries a second from cache, fuzzing, and ASan, UBSan and
+valgrind under all of it. It turned up a KeyTrap exposure, a way to deny names
+in signed zones, stored XSS on the status page, a handful of zones whose
+servers drop the HTTPS queries browsers make for every site, and room to make
+cache hits and signature checks several times cheaper.
+
+No config that worked stops working. The new `quirk:` directive is optional.
+
+```
+                                  before     after
+cold lookups, p50                 194 ms     89 ms
+ECDSA P-256 verification          2.7 ms     0.53 ms
+cache hits, one worker            46,000/s   81,000/s
+matches 1.1.1.1 (of 1,413)        1,393      1,397, plus 8 where 1.1.1.1 fails
+dnscheck.tools DNSSEC matrix      —          313 of 313 (1.1.1.1: 285)
+```
+
+### Security
+
+**KeyTrap (CVE-2023-50387): signature checks are now limited.** Every
+signature on an RRset was tried against every key whose tag matched, and a zone
+can make every tag collide. A DNSKEY set of 48 keys sharing one tag, against an
+RRset with 48 signatures, cost 2,304 public-key operations for a single answer:
+seconds of CPU for one query, from anyone able to make Elpis resolve a name in a
+zone they run. Validation now tries at most 8 signatures per RRset, 4 keys per
+signature when tags collide, and 4 keys matched by a DS or trust anchor, with at
+most 64 public-key operations per answer. A legitimate answer needs one to
+three. Running out is answered SERVFAIL; it is never treated as "unsigned".
+
+**RSA keys with an exponent over 64 bits are refused.** The cost of an RSA
+verification grows with the exponent, and RFC 3110 allows 4096 bits: one such
+check took 167 ms, against half a millisecond for the usual 65537. Every
+deployed key uses 3 or 65537, and OpenSSL, and so BIND and Unbound, already
+refuse larger exponents for moduli above 3072 bits.
+
+**An empty answer from a signed zone is no longer taken on trust.** A reply with
+no record at all, not even an SOA, was counted as insecure. So a forged "no such
+data" for any name in a signed zone was believed and served without AD, which is
+the stripped denial RFC 4035 exists to catch. It is now bogus, and answered
+SERVFAIL with EDE 12 (NSEC Missing).
+
+**Stored XSS on the status page.** The page's HTML escaping left single quotes
+alone, and its attributes are single-quoted. A query name containing `'`, which
+any allowed client can send, and which a web page can make a browser send, was
+shown in the top-names list inside a `title` attribute, and could add an event
+handler there. Single quotes are now escaped as well.
+
+**Failed status-page logins are throttled.** A failed login was logged but never
+slowed down, so a script could keep guessing, one PBKDF2 run per guess, holding
+the page's only thread. After five failures in a row an address waits one
+second, doubling with each further failure up to fifteen minutes, and gets
+`429 Too Many Requests` with no password hash computed. A successful login
+clears it.
+
+**Two large stack frames are gone, and workers get at least 1 MiB of stack.**
+A 64 KiB buffer on the reply path, and a 21 KiB one zeroed for each DS match,
+now use per-worker scratch space. musl gives a thread 128 KiB by default, and
+the deepest path, a reply followed by an ML-DSA verification, needed more than
+half of that before these were counted.
+
+### Added
+
+**Quirks: known-broken zones are answered instead of abandoned.** Some zones'
+servers drop HTTPS queries at a firewall, or answer through a load balancer
+that ignores the types it does not handle. Resolving them by the book ended in
+SERVFAIL, seconds later. The new `src/quirks.c` has a built-in list:
+`cimb.com.my`, `tnb.com.my` and `bpi.com.ph` drop HTTPS and SVCB, `m1.com.sg`
+answers them with an empty reply, and `www.kemenkeu.go.id` refers them back to
+itself. Their HTTPS lookups now answer "no data" in milliseconds. A new
+`quirk:` directive adds zones or switches built-in ones off. Answers made up
+this way are validated like any other, so none of this can make a signed
+zone's answer insecure. See [docs/quirks.md](docs/quirks.md).
 
 ### Fixed
+
+**NXDOMAIN answers were never served from the cache.** The message cache only
+took NOERROR, and the RRset cache's check for a cached NXDOMAIN looked at every
+name above the one asked but not the name itself. So every repeat of a name that
+does not exist went back to its zone, about 30 ms each time. Such repeats are
+now answered in microseconds. A refresh that returns NXDOMAIN for a name that
+had an answer still has to be confirmed `refresh-nxdomain-confirmations` times
+before it replaces that answer.
+
+**A signed zone's "no data" lost its proof when its SOA had TTL 0.** A zero
+negative TTL skipped the SOA and the NSEC3 records as well as the cache entry,
+so every such answer from `esdm.go.id` went out without AD, and would have
+failed with the change above. The proof is now kept; only the cache entry is
+skipped.
+
+**DNSKEY and DS queries never got AD.** A client asking for them directly got
+an answer nobody had validated: the exemption meant for the validator's own
+chain-walk lookups applied to everybody. The copies those lookups fetched were
+also served from the message cache with no verdict on them. `dig . DNSKEY
++dnssec` now comes back with AD.
+
+**A load balancer's non-answer ended in SERVFAIL.** When a zone's servers answer
+a type they do not serve with an empty non-authoritative reply, or a referral
+back to the zone itself, Elpis went round every server three times and failed.
+If nobody gives a real answer, "no data" is now the answer, as it is on
+1.1.1.1. `www.m1.com.sg` HTTPS now answers in 30 ms instead of failing after
+3 rounds.
+
+**Retry rounds only ask servers that stayed silent.** The extra rounds through
+a zone's servers are there for packet loss. They also re-asked servers that had
+just answered REFUSED or SERVFAIL, which will say so again: `www.kemendesa.go.id`,
+whose servers refuse the question, took 15.5 s to fail and now takes 4.4 s,
+and `www.qoo10.sg` 0.35 s instead of 1.3 s. A server that timed out on its
+last query is now given `query-timeout` rather than up to four times that. It
+is still heard if it answers late.
+
+**A glueless delegation waited for both of a nameserver's lookups.** It now
+carries on as soon as one address is known, instead of waiting for the slower
+of the A and AAAA lookups.
 
 **The status page works behind a reverse proxy that mounts it under a path.**
 Proxied as `https://host/elpis/`, the page loaded but then asked for
@@ -22,7 +137,39 @@ relative to where it was loaded from. The session cookie is no longer set with
 `Path=/`, either: it is scoped to the path the page sits under, so it is not
 sent to every other application on that host.
 
+**A `forward-zone` or `stub-zone` with a name that is not a domain name is
+reported.** The name was converted on every lookup, and one that did not
+convert was skipped without a word, so the route silently never applied. It
+is now converted once, when the line is read, and a bad one is logged as a
+configuration error with its file and line, like any other bad setting.
+
+**`make test` could link stale objects.** The dependency files of the signing
+Ed25519 and test-issuer licence objects were never included, so a header change
+left both built against the old struct layout, and every Ed25519 test failed
+for no reason in the code.
+
 ### Changed
+
+**ECDSA and RSA verification are 3–5× faster.** The bignum code ran every
+operation across all 144 limbs it can hold, for eight-limb P-256 numbers too.
+It now only touches the limbs in use, and Montgomery multiplication uses 64-bit
+limbs where the compiler has a 128-bit product (GCC and Clang on 64-bit
+targets), with the portable code as the fallback. ECDSA P-256 went from 2.7 ms
+to 0.53 ms, RSA-2048 from 0.13 ms to 0.04 ms, and RSA-4096 from 0.55 ms to
+0.16 ms. In the cold-cache site test (1,413 lookups), p50 went from 194 ms to
+89 ms.
+
+**Cache hits are about 75% cheaper to serve.** Every query, cached or not, was
+checked against the special-use names (`localhost`, `.onion`, the private
+reverse zones and so on) by converting all 45 of them from text first. That was
+85% of the CPU a cache hit cost. They are now converted once, and a name is
+checked against them only when its top-level label could match. One worker
+went from about 46,000 to 81,000 cached answers a second. The whole resolver
+answered 100,000 queries a second from cache for 10 s with no loss, p50
+80–130 µs, and peaked at 207,000–221,000 on four cores shared with the load
+generator. `forward-zone` and `stub-zone` names are no longer converted on
+every lookup either.
+
 
 **Stopping elpis under the shipped systemd unit starts systemd-resolved
 again.** Starting elpis already stopped resolved through `Conflicts=`, and
@@ -40,6 +187,13 @@ Every file kept its name and its code, and the headers stay in
 the renames. A patch applied with plain `patch` needs the new paths.
 `make clean` now removes every object under `src/`, including ones a build on
 another branch left behind.
+
+**Hashing a name is faster.** The last few bytes of a name, after its whole
+16-byte blocks, were copied into a buffer one at a time and read back as
+words, and the read had to wait for the byte stores: about 7 ns, half of
+hashing a typical name. On little-endian machines they are now read with
+overlapping word loads that never touch a byte outside the name. Other
+machines keep the byte loop, and the hash is the same either way.
 
 ## 2.0.2 — 2026-09-25
 
