@@ -1,27 +1,33 @@
 /*
  * bn.c -- fixed-width big integer arithmetic.
+ *
+ * A bn_t is wide enough for RSA-4096, but most of what passes through here is
+ * eight limbs of P-256 or Ed25519.  So nothing looks past a->n: the limbs
+ * above it are unspecified, never read, and never cleared.  Every loop used to
+ * run the full 144 limbs whatever the operand -- bn_sub alone was the largest
+ * cost of an ECDSA verification, which took 2.7 ms where eight limbs of work
+ * take a fraction of that.
  */
 #include "bn.h"
 
 void bn_zero(bn_t *a)
 {
-    memset(a->d, 0, sizeof a->d);
+    a->d[0] = 0;
     a->n = 0;
 }
 
 void bn_set_u32(bn_t *a, uint32_t v)
 {
-    bn_zero(a);
-    if (v) {
-        a->d[0] = v;
-        a->n = 1;
-    }
+    a->d[0] = v;
+    a->n = v ? 1u : 0u;
 }
 
 void bn_copy(bn_t *r, const bn_t *a)
 {
-    if (r != a)
-        *r = *a;
+    if (r == a)
+        return;
+    r->n = a->n;
+    memcpy(r->d, a->d, (size_t)a->n * sizeof a->d[0]);
 }
 
 void bn_trim(bn_t *a)
@@ -88,7 +94,7 @@ int bn_from_bytes(bn_t *a, const uint8_t *p, size_t n)
     if ((n + 3u) / 4u > BN_MAX_LIMBS)
         return ELPIS_ERR;
 
-    bn_zero(a);
+    memset(a->d, 0, ((n + 3u) / 4u) * sizeof a->d[0]);
     for (i = 0; i < n; i++) {
         size_t rev = n - 1u - i;
         a->d[rev / 4u] |= (uint32_t)p[i] << ((rev % 4u) * 8u);
@@ -115,7 +121,8 @@ int bn_to_bytes(const bn_t *a, uint8_t *p, size_t n)
 
 void bn_add(bn_t *r, const bn_t *a, const bn_t *b)
 {
-    unsigned n = a->n > b->n ? a->n : b->n;
+    unsigned an = a->n, bn = b->n;
+    unsigned n = an > bn ? an : bn;
     uint64_t carry = 0;
     unsigned i;
 
@@ -123,37 +130,32 @@ void bn_add(bn_t *r, const bn_t *a, const bn_t *b)
         n = BN_MAX_LIMBS - 1u;
     for (i = 0; i < n; i++) {
         uint64_t s = carry;
-        s += (i < a->n) ? a->d[i] : 0u;
-        s += (i < b->n) ? b->d[i] : 0u;
+        s += (i < an) ? a->d[i] : 0u;
+        s += (i < bn) ? b->d[i] : 0u;
         r->d[i] = (uint32_t)s;
         carry = s >> 32;
     }
-    if (carry && n < BN_MAX_LIMBS) {
+    if (carry)
         r->d[n++] = (uint32_t)carry;
-    }
-    for (i = n; i < BN_MAX_LIMBS; i++)
-        r->d[i] = 0;
     r->n = n;
     bn_trim(r);
 }
 
 void bn_sub(bn_t *r, const bn_t *a, const bn_t *b)
 {
-    int64_t borrow = 0;
+    unsigned an = a->n, bn = b->n;
+    unsigned n = an > bn ? an : bn;
+    uint32_t borrow = 0;
     unsigned i;
 
-    for (i = 0; i < BN_MAX_LIMBS; i++) {
-        int64_t s = (int64_t)((i < a->n) ? a->d[i] : 0u) - borrow;
-        s -= (int64_t)((i < b->n) ? b->d[i] : 0u);
-        if (s < 0) {
-            s += ((int64_t)1 << 32);
-            borrow = 1;
-        } else {
-            borrow = 0;
-        }
-        r->d[i] = (uint32_t)s;
+    for (i = 0; i < n; i++) {
+        uint64_t x = (i < an) ? a->d[i] : 0u;
+        uint64_t y = (i < bn) ? b->d[i] : 0u;
+        uint64_t d = x - y - borrow;
+        r->d[i] = (uint32_t)d;
+        borrow = (uint32_t)(d >> 63);
     }
-    r->n = a->n;
+    r->n = n;
     bn_trim(r);
 }
 
@@ -161,8 +163,11 @@ void bn_mul(bn_t *r, const bn_t *a, const bn_t *b)
 {
     bn_t t;
     unsigned i, j;
+    unsigned tn = a->n + b->n;
 
-    bn_zero(&t);
+    if (tn > BN_MAX_LIMBS)
+        tn = BN_MAX_LIMBS;
+    memset(t.d, 0, (size_t)tn * sizeof t.d[0]);
     for (i = 0; i < a->n; i++) {
         uint64_t carry = 0;
         if (a->d[i] == 0)
@@ -181,11 +186,9 @@ void bn_mul(bn_t *r, const bn_t *a, const bn_t *b)
             /* A further carry cannot occur: the product fits in a->n + b->n. */
         }
     }
-    t.n = a->n + b->n;
-    if (t.n > BN_MAX_LIMBS)
-        t.n = BN_MAX_LIMBS;
+    t.n = tn;
     bn_trim(&t);
-    *r = t;
+    bn_copy(r, &t);
 }
 
 /* r <<= 1 */
@@ -194,14 +197,13 @@ static void bn_shl1(bn_t *a)
     uint32_t carry = 0;
     unsigned i;
 
-    for (i = 0; i < BN_MAX_LIMBS; i++) {
+    for (i = 0; i < a->n; i++) {
         uint32_t nc = a->d[i] >> 31;
         a->d[i] = (a->d[i] << 1) | carry;
         carry = nc;
     }
-    if (a->n < BN_MAX_LIMBS)
-        a->n++;
-    bn_trim(a);
+    if (carry && a->n < BN_MAX_LIMBS)
+        a->d[a->n++] = carry;
 }
 
 void bn_mod(bn_t *r, const bn_t *a, const bn_t *m)
@@ -217,15 +219,19 @@ void bn_mod(bn_t *r, const bn_t *a, const bn_t *m)
     bits = bn_bits(a);
     for (i = bits; i-- > 0; ) {
         bn_shl1(&rem);
-        if (bn_bit(a, i))
-            rem.d[0] |= 1u;
-        if (rem.n == 0)
-            rem.n = 1;
+        if (bn_bit(a, i)) {
+            if (rem.n == 0) {
+                rem.d[0] = 1u;
+                rem.n = 1;
+            } else {
+                rem.d[0] |= 1u;
+            }
+        }
         if (bn_cmp(&rem, m) >= 0)
             bn_sub(&rem, &rem, m);
     }
     bn_trim(&rem);
-    *r = rem;
+    bn_copy(r, &rem);
 }
 
 void bn_addmod(bn_t *r, const bn_t *a, const bn_t *b, const bn_t *m)
@@ -277,6 +283,18 @@ int mont_init(mont_t *c, const bn_t *m)
     for (i = 0; i < 5; i++)
         inv *= 2u - m0 * inv;
     c->m0inv = (uint32_t)(0u - inv);    /* -m^-1 mod 2^32 */
+#ifdef BN_HAVE_U128
+    if ((c->k & 1u) == 0) {
+        uint64_t m064 = (uint64_t)c->m.d[0] | ((uint64_t)c->m.d[1] << 32);
+        uint64_t inv64 = 1;
+        for (i = 0; i < 6; i++)
+            inv64 *= 2u - m064 * inv64;
+        c->m0inv64 = (uint64_t)0 - inv64;
+        for (i = 0; i < c->k / 2u; i++)
+            c->m64[i] = (uint64_t)c->m.d[2u * i] |
+                        ((uint64_t)c->m.d[2u * i + 1u] << 32);
+    }
+#endif
 
     /* rr = 2^(64k) mod m, computed by repeated doubling. */
     bn_set_u32(&t, 1);
@@ -291,59 +309,122 @@ int mont_init(mont_t *c, const bn_t *m)
 
 /*
  * CIOS Montgomery multiplication.  r = a * b * R^-1 mod m, with a, b < m.
+ *
+ * The operands are copied into zero-padded k-limb arrays first, so the inner
+ * loops carry no "is this limb present" test, and the reduction writes each
+ * limb one place down as it goes rather than shifting the whole total after.
  */
-void mont_mul(bn_t *r, const bn_t *a, const bn_t *b, const mont_t *c)
+#ifdef BN_HAVE_U128
+__extension__ typedef unsigned __int128 bn_u128;
+
+/* The same CIOS loop over 64-bit limbs: a quarter of the multiplications. */
+static void mont_mul64(bn_t *r, const uint32_t *A, const uint32_t *B,
+                       const mont_t *c)
 {
-    uint32_t t[BN_MAX_LIMBS + 2];
-    unsigned k = c->k;
+    uint64_t a[BN_MAX_LIMBS / 2], b[BN_MAX_LIMBS / 2], t[BN_MAX_LIMBS / 2 + 2];
+    const uint64_t *m = c->m64;
+    unsigned k = c->k / 2u;
     unsigned i, j;
 
+    for (i = 0; i < k; i++) {
+        a[i] = (uint64_t)A[2u * i] | ((uint64_t)A[2u * i + 1u] << 32);
+        b[i] = (uint64_t)B[2u * i] | ((uint64_t)B[2u * i + 1u] << 32);
+    }
     memset(t, 0, (k + 2u) * sizeof t[0]);
 
     for (i = 0; i < k; i++) {
-        uint64_t carry = 0;
-        uint32_t ai = (i < a->n) ? a->d[i] : 0u;
-        uint32_t mi;
+        bn_u128 p;
+        uint64_t carry = 0, ai = a[i], mi;
 
         for (j = 0; j < k; j++) {
-            uint64_t p = (uint64_t)ai * ((j < b->n) ? b->d[j] : 0u)
-                       + t[j] + carry;
+            p = (bn_u128)ai * b[j] + t[j] + carry;
+            t[j] = (uint64_t)p;
+            carry = (uint64_t)(p >> 64);
+        }
+        p = (bn_u128)t[k] + carry;
+        t[k]     = (uint64_t)p;
+        t[k + 1] = (uint64_t)(p >> 64);
+
+        mi = t[0] * c->m0inv64;
+        p = (bn_u128)mi * m[0] + t[0];
+        carry = (uint64_t)(p >> 64);
+        for (j = 1; j < k; j++) {
+            p = (bn_u128)mi * m[j] + t[j] + carry;
+            t[j - 1] = (uint64_t)p;
+            carry = (uint64_t)(p >> 64);
+        }
+        p = (bn_u128)t[k] + carry;
+        t[k - 1] = (uint64_t)p;
+        t[k]     = t[k + 1] + (uint64_t)(p >> 64);
+    }
+
+    for (i = 0; i < k; i++) {
+        r->d[2u * i]      = (uint32_t)t[i];
+        r->d[2u * i + 1u] = (uint32_t)(t[i] >> 32);
+    }
+    r->n = 2u * k;
+    if (t[k] != 0 && r->n + 2u <= BN_MAX_LIMBS) {
+        r->d[r->n++] = (uint32_t)t[k];
+        r->d[r->n++] = (uint32_t)(t[k] >> 32);
+    }
+    bn_trim(r);
+    if (bn_cmp(r, &c->m) >= 0)
+        bn_sub(r, r, &c->m);
+}
+#endif
+
+void mont_mul(bn_t *r, const bn_t *a, const bn_t *b, const mont_t *c)
+{
+    uint32_t t[BN_MAX_LIMBS + 2];
+    uint32_t A[BN_MAX_LIMBS], B[BN_MAX_LIMBS];
+    const uint32_t *m = c->m.d;
+    unsigned k = c->k;
+    unsigned an = a->n < k ? a->n : k, bn = b->n < k ? b->n : k;
+    unsigned i, j;
+
+    memcpy(A, a->d, (size_t)an * sizeof A[0]);
+    memset(A + an, 0, (size_t)(k - an) * sizeof A[0]);
+    memcpy(B, b->d, (size_t)bn * sizeof B[0]);
+    memset(B + bn, 0, (size_t)(k - bn) * sizeof B[0]);
+#ifdef BN_HAVE_U128
+    if ((k & 1u) == 0) {
+        mont_mul64(r, A, B, c);
+        return;
+    }
+#endif
+    memset(t, 0, (k + 2u) * sizeof t[0]);
+
+    for (i = 0; i < k; i++) {
+        uint64_t p, carry = 0;
+        uint32_t ai = A[i], mi;
+
+        for (j = 0; j < k; j++) {
+            p = (uint64_t)ai * B[j] + t[j] + carry;
             t[j] = (uint32_t)p;
             carry = p >> 32;
         }
-        {
-            uint64_t s = (uint64_t)t[k] + carry;
-            t[k] = (uint32_t)s;
-            t[k + 1] = (uint32_t)(s >> 32);
-        }
+        p = (uint64_t)t[k] + carry;
+        t[k]     = (uint32_t)p;
+        t[k + 1] = (uint32_t)(p >> 32);
 
         mi = (uint32_t)(t[0] * c->m0inv);
-        carry = 0;
-        for (j = 0; j < k; j++) {
-            uint64_t p = (uint64_t)mi * c->m.d[j] + t[j] + carry;
-            t[j] = (uint32_t)p;
+        p = (uint64_t)mi * m[0] + t[0];
+        carry = p >> 32;
+        for (j = 1; j < k; j++) {
+            p = (uint64_t)mi * m[j] + t[j] + carry;
+            t[j - 1] = (uint32_t)p;
             carry = p >> 32;
         }
-        {
-            uint64_t s = (uint64_t)t[k] + carry;
-            t[k] = (uint32_t)s;
-            t[k + 1] += (uint32_t)(s >> 32);
-        }
-
-        /* Shift right one limb: t[0] is now zero by construction. */
-        for (j = 0; j <= k; j++)
-            t[j] = t[j + 1];
-        t[k + 1] = 0;
+        p = (uint64_t)t[k] + carry;
+        t[k - 1] = (uint32_t)p;
+        t[k]     = t[k + 1] + (uint32_t)(p >> 32);
     }
 
-    bn_zero(r);
-    for (i = 0; i < k && i < BN_MAX_LIMBS; i++)
-        r->d[i] = t[i];
+    /* t < 2m: k + 1 limbs at most. */
+    memcpy(r->d, t, (size_t)k * sizeof t[0]);
     r->n = k;
-    if (t[k] != 0 && k < BN_MAX_LIMBS) {
-        r->d[k] = t[k];
-        r->n = k + 1u;
-    }
+    if (k < BN_MAX_LIMBS && t[k] != 0)
+        r->d[r->n++] = t[k];
     bn_trim(r);
     if (bn_cmp(r, &c->m) >= 0)
         bn_sub(r, r, &c->m);

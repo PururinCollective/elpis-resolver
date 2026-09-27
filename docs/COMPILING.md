@@ -43,7 +43,7 @@ Two tools are optional:
   used, and the build says so.
 
 Linux builds with gcc and clang are tested for each release: gcc 13.3 and
-clang 18.1 for 2.0.2. The BSDs (kqueue) and macOS (kqueue) are supported by
+clang 18.1 for 2.1.0. The BSDs (kqueue) and macOS (kqueue) are supported by
 the code, but no build on them was tested for this release.
 
 ## Building
@@ -60,9 +60,12 @@ Everything the build produces goes in `bin/`, which git ignores, so
 
 `bin/` is a complete bundle: the binary, plus `bin/elpis.conf` seeded from the
 shipped defaults the first time you build. Copy the directory to another
-machine and it runs. The config is seeded once and never touched again, so
-your edits survive every rebuild and `make clean`. `elpis.conf` in the source
-tree stays the untouched reference.
+machine and it runs. After that the config is yours, and your edits survive
+every rebuild and `make clean`. When a pull changes the shipped `elpis.conf`,
+`make` merges the change into `bin/elpis.conf` and keeps your edits; where the
+two clash it changes nothing and warns you (see
+[when the shipped defaults change](configuration.md#when-the-shipped-defaults-change)).
+`elpis.conf` in the source tree stays the reference.
 
 Changing compiler flags needs no `make clean`. The flags are kept in a stamp
 file that every object depends on, so a changed `OPT` or `CFLAGS` recompiles
@@ -72,16 +75,16 @@ everything, and repeating a build with the same flags compiles nothing.
 
 | Target | What it does |
 |---|---|
-| `make` | Ordinary build: `bin/elpis` and `bin/elpis.conf` |
+| `make` | Ordinary build: `bin/elpis`, and `bin/elpis.conf` seeded or brought up to date |
 | `make static` | One statically linked binary with no shared libraries (runs `make clean` first) |
-| `make test` | The self-tests: 376 of them, no network needed |
+| `make test` | The self-tests: 416 of them, no network needed |
 | `make debug` | `-O0 -g3` with debug assertions |
 | `make asan` | AddressSanitizer and UndefinedBehaviorSanitizer build |
 | `make fuzz` | libFuzzer harness for the message parser, `bin/fuzz-msg` (needs clang) |
 | `make licence-tool` | `bin/elpis-licence`, which signs deployment licences (see [licensing](licensing.md)) |
 | `make install` | Install to `/opt/elpis-resolver/bin` (see [Installing](#installing)) |
 | `make uninstall` | Remove the binary and leave your config alone |
-| `make clean` | Objects and binaries. Keeps `bin/elpis.conf` |
+| `make clean` | Objects and binaries. Keeps `bin/elpis.conf` and `bin/elpis.conf.shipped` |
 | `make distclean` | `bin/` and everything in it |
 
 `debug`, `asan` and `static` run `make clean` first, because they change what
@@ -236,7 +239,7 @@ The startup line names the compiler, the architecture, the CPU the build was
 tuned for, and the SIMD kernel in use:
 
 ```
-elpis 2.0.2 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
+elpis 2.1.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
               gcc 13.3.0, x86_64 znver3 (native), ...
 ```
 
@@ -248,7 +251,7 @@ The **build** string shows where the binary came from:
 
 | Built from | Build string |
 |---|---|
-| a release tag | `v2.0.2` |
+| a release tag | `v2.1.0` |
 | any other commit | `main@bcc97d252fac` (branch and commit) |
 | a tarball, no git | empty, and the status page says `no git checkout` |
 

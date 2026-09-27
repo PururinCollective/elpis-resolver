@@ -43,6 +43,13 @@ say "building${MARCH:+ for $MARCH}"
 make static OPT="$OPT"
 
 [ -x bin/elpis ] || die "build produced no bin/elpis"
+# make merges new shipped defaults into bin/elpis.conf, and leaves it alone
+# where they clash with your edits (tools/conf-merge.sh).  A config copied
+# over from that merge with its markers still in would start -- the marker
+# lines are skipped as bad settings -- so refuse it here rather than run it.
+if grep -q -e '^<<<<<<< ' -e '^>>>>>>> ' bin/elpis.conf; then
+    die "bin/elpis.conf has merge conflict markers in it; not restarting"
+fi
 ./bin/elpis -t >/dev/null 2>&1 || die "built binary rejects the config; not restarting"
 new=$(./bin/elpis -V)
 
@@ -61,4 +68,8 @@ fi
 say "running $new"
 say "$(dig +short +tries=1 +timeout=3 TXT elpis.sakurako.oomuro @127.0.0.1 2>/dev/null | head -1 || echo '(probe did not answer)')"
 [ "$was_running" -eq 1 ] || say "note: $UNIT was not running before this"
+if [ -f bin/elpis.conf.shipped.pending ]; then
+    echo "[!] new defaults in elpis.conf clash with your edits in bin/elpis.conf;"
+    echo "[!] it is unchanged -- see bin/elpis.conf.new to merge them by hand"
+fi
 echo "[!] DONE"

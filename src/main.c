@@ -555,6 +555,8 @@ static void *probe_main(void *arg)
 /* ================================================================== */
 
 static volatile sig_atomic_t g_sig_quit;
+#define WORKER_STACK ((size_t)1 << 20)
+
 static volatile sig_atomic_t g_sig_hup;
 static volatile sig_atomic_t g_sig_stats;
 static volatile sig_atomic_t g_sig_flush;
@@ -1208,13 +1210,31 @@ int main(int argc, char **argv)
             elpis_warn("could not start the status page thread");
     }
 
-    for (i = 1; i < nthreads; i++) {
-        if (pthread_create(&g_workers[i].th, NULL, worker_main,
-                           &g_workers[i]) != 0) {
-            elpis_error("cannot create worker %u: %s", i, strerror(errno));
-            break;
+    /*
+     * At least a mebibyte of stack for each worker, whatever the C library's
+     * default.  glibc gives eight; musl gives 128 KiB, and a worker's deepest
+     * path -- a reply, its validation, an ML-DSA verification of 34 KiB of
+     * polynomials -- is not far off that.  Worker 0 is the main thread and
+     * has the process stack.
+     */
+    {
+        pthread_attr_t attr;
+        int have_attr = pthread_attr_init(&attr) == 0;
+        size_t ss = 0;
+
+        if (have_attr && pthread_attr_getstacksize(&attr, &ss) == 0 &&
+            ss < WORKER_STACK)
+            (void)pthread_attr_setstacksize(&attr, WORKER_STACK);
+        for (i = 1; i < nthreads; i++) {
+            if (pthread_create(&g_workers[i].th, have_attr ? &attr : NULL,
+                               worker_main, &g_workers[i]) != 0) {
+                elpis_error("cannot create worker %u: %s", i, strerror(errno));
+                break;
+            }
+            g_workers[i].started = 1;
         }
-        g_workers[i].started = 1;
+        if (have_attr)
+            pthread_attr_destroy(&attr);
     }
 
     /* Worker 0 runs on the main thread so signals land somewhere useful. */

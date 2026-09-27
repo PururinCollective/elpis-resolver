@@ -24,7 +24,9 @@
 #include "elpis/ctx.h"
 #include "elpis/deleg.h"
 #include "elpis/conflict.h"
+#include "elpis/quirks.h"
 #include "simd/simd_internal.h"
+#include "crypto/bn.h"
 
 #include "vectors.h"
 
@@ -1973,6 +1975,324 @@ static void test_task_ceiling(void)
     elpis_free(w);
 }
 
+
+/* ================================================================== */
+/*
+ * Montgomery multiplication against schoolbook multiply-and-reduce, for
+ * moduli of every width from one limb to nine: the odd ones take the portable
+ * 32-bit path, the even ones the 64-bit one where the compiler has it, and no
+ * signature vector here has an odd width to exercise the first.
+ */
+static void test_bignum(void)
+{
+    unsigned k, round, bad = 0, runs = 0;
+
+    section("bignum");
+    for (k = 1; k <= 9; k++) {
+        for (round = 0; round < 40; round++) {
+            bn_t m, a, b, am, bm, r, want, prod;
+            mont_t c;
+            unsigned i;
+
+            m.n = k;
+            for (i = 0; i < k; i++)
+                m.d[i] = elpis_random_u32();
+            m.d[0] |= 1u;
+            m.d[k - 1] |= 0x80000000u;
+            if (mont_init(&c, &m) != ELPIS_OK) {
+                bad++;
+                continue;
+            }
+            a.n = b.n = k;
+            for (i = 0; i < k; i++) {
+                a.d[i] = elpis_random_u32();
+                b.d[i] = elpis_random_u32();
+            }
+            a.d[k - 1] &= 0x7FFFFFFFu;       /* a, b < m */
+            b.d[k - 1] &= 0x7FFFFFFFu;
+            if (round == 0) {                /* the edges: m - 1 squared */
+                bn_t one;
+                bn_set_u32(&one, 1);
+                bn_sub(&a, &m, &one);
+                bn_copy(&b, &a);
+            }
+            bn_trim(&a);
+            bn_trim(&b);
+
+            mont_to(&am, &a, &c);
+            mont_to(&bm, &b, &c);
+            mont_mul(&r, &am, &bm, &c);
+            mont_from(&r, &r, &c);
+
+            bn_mul(&prod, &a, &b);
+            bn_mod(&want, &prod, &m);
+            if (bn_cmp(&r, &want) != 0)
+                bad++;
+            runs++;
+        }
+    }
+    CHECK(bad == 0, "Montgomery products match a*b mod m (%u of %u wrong)",
+          bad, runs);
+}
+
+/* ================================================================== */
+/* An Ed25519 DNSKEY whose key bytes at even offsets can be swapped
+ * without changing the key tag: RFC 4034 appendix B sums those bytes. */
+static void keytrap_key(uint8_t rd[36], unsigned variant)
+{
+    unsigned i, a, b;
+    uint8_t t;
+
+    rd[0] = 0x01; rd[1] = 0x01;        /* flags 257: zone key, SEP */
+    rd[2] = 3;
+    rd[3] = ELPIS_ALG_ED25519;
+    for (i = 0; i < 32; i++)
+        rd[4 + i] = (uint8_t)(0x10 + i * 7);
+    a = 4 + 2u * (variant % 16u);
+    b = 4 + 2u * ((variant / 16u + variant % 16u + 1u) % 16u);
+    t = rd[a]; rd[a] = rd[b]; rd[b] = t;
+}
+
+static void test_keytrap(void)
+{
+    static elpis_rrset_buf_t keys, set, ds;
+    elpis_conf_t c;
+    elpis_name_t zone;
+    uint8_t rd[256];
+    uint16_t tag = 0;
+    unsigned i, nkeys = 0;
+    uint64_t n;
+    int64_t now = elpis_wall_s();
+    int ede = -1, rc;
+
+    section("keytrap");
+    elpis_conf_defaults(&c);
+    elpis_name_from_text(&zone, "keytrap.test.");
+
+    /* Twenty keys, all with one key tag. */
+    elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+    for (i = 0; nkeys < 20 && i < 64; i++) {
+        uint8_t k[36];
+        unsigned j, dup = 0;
+        keytrap_key(k, i);
+        for (j = 0; j < keys.count; j++)
+            if (memcmp(keys.data + keys.off[j], k, 36) == 0)
+                dup = 1;
+        if (dup)
+            continue;
+        if (nkeys == 0)
+            tag = elpis_dnskey_tag(k, 36);
+        else if (elpis_dnskey_tag(k, 36) != tag)
+            continue;
+        elpis_rrset_buf_add(&keys, k, 36);
+        nkeys++;
+    }
+    CHECK(nkeys == 20, "twenty distinct keys share key tag %u (%u)", tag, nkeys);
+
+    /* One A record under twenty signatures naming that tag, none good. */
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+    rd[0] = 192; rd[1] = 0; rd[2] = 2; rd[3] = 1;
+    elpis_rrset_buf_add(&set, rd, 4);
+    for (i = 0; i < 20; i++) {
+        size_t o = 0;
+        elpis_put16(rd + o, ELPIS_T_A); o += 2;
+        rd[o++] = ELPIS_ALG_ED25519;
+        rd[o++] = 2;                               /* labels */
+        elpis_put32(rd + o, 3600); o += 4;
+        elpis_put32(rd + o, (uint32_t)(now + 86400)); o += 4;
+        elpis_put32(rd + o, (uint32_t)(now - 86400)); o += 4;
+        elpis_put16(rd + o, tag); o += 2;
+        memcpy(rd + o, zone.d, zone.len); o += zone.len;
+        memset(rd + o, (int)(0x40 + i), 64); o += 64;
+        elpis_rrset_buf_add_sig(&set, rd, (uint16_t)o);
+    }
+
+    (void)elpis_dnssec_take_verifies();
+    rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+    n = elpis_dnssec_take_verifies();
+    CHECK(rc == ELPIS_EBOGUS, "twenty bad signatures are bogus");
+    CHECK(n >= 1 && n <= 8, "and cost 1 to 8 verifications, not 400 (%llu)",
+          (unsigned long long)n);
+
+    /* The DNSKEY set signed the same way, with a DS for every key. */
+    for (i = 0; i < set.sigcount; i++) {
+        uint8_t *sig = set.data + set.off[set.count + i];
+        elpis_put16(sig, ELPIS_T_DNSKEY);
+        sig[3] = 2;
+        elpis_rrset_buf_add_sig(&keys, sig, set.len[set.count + i]);
+    }
+    elpis_rrset_buf_init(&ds, &zone, ELPIS_T_DS, ELPIS_CLASS_IN, 3600);
+    for (i = 0; i < keys.count; i++) {
+        uint8_t buf[ELPIS_MAX_NAME + 64];
+        uint8_t dsr[4 + 32];
+        size_t bl = 0;
+        memcpy(buf, zone.d, zone.len); bl = zone.len;
+        memcpy(buf + bl, keys.data + keys.off[i], keys.len[i]); bl += keys.len[i];
+        elpis_put16(dsr, tag);
+        dsr[2] = ELPIS_ALG_ED25519;
+        dsr[3] = 2;                                /* SHA-256 */
+        elpis_sha256(buf, bl, dsr + 4);
+        elpis_rrset_buf_add(&ds, dsr, sizeof dsr);
+    }
+    ede = -1;
+    (void)elpis_dnssec_take_verifies();
+    rc = elpis_dnskey_validate_ds(&c, &keys, &ds, now, &ede);
+    n = elpis_dnssec_take_verifies();
+    CHECK(rc == ELPIS_EBOGUS, "a DNSKEY set nobody signed is bogus");
+    CHECK(n >= 1 && n <= 4u * 8u, "every DS matching tried at most 4 keys, 8 "
+          "checks each (%llu, not 400)", (unsigned long long)n);
+
+    /* RSA with a 72-bit exponent is refused before any arithmetic. */
+    {
+        static uint8_t key[1024], sig[1024], big[1100];
+        size_t kl = unhex(TV_RSA2048_DNSKEY, key, sizeof key);
+        size_t sl = unhex(TV_RSA2048_SIG, sig, sizeof sig);
+        size_t off = key[0] ? 1u : 3u, elen = key[0] ? key[0] : elpis_get16(key + 1);
+        uint8_t h[32];
+
+        elpis_sha256(TV_MESSAGE, strlen(TV_MESSAGE), h);
+        big[0] = 9;
+        memset(big + 1, 0x01, 9);
+        big[9] = key[off + elen - 1];              /* odd, like a real e */
+        memcpy(big + 10, key + off + elen, kl - off - elen);
+        CHECK(elpis_rsa_verify(big, 10 + kl - off - elen, sig, sl, h, 32,
+                               ELPIS_HASH_SHA256) == 0,
+              "an RSA key with an exponent over 64 bits is refused");
+        CHECK(elpis_rsa_verify(key, kl, sig, sl, h, 32, ELPIS_HASH_SHA256) == 1,
+              "the same key with its own exponent still verifies");
+    }
+}
+
+/* ================================================================== */
+static void test_quirks(void)
+{
+    elpis_conf_t c;
+    elpis_name_t n;
+    char line[256], fb[64];
+
+    section("quirks");
+    elpis_conf_defaults(&c);
+
+    elpis_name_from_text(&n, "cimb.com.my.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) & ELPIS_QUIRK_DROPS_SVCB,
+          "cimb.com.my drops HTTPS and SVCB (built in)");
+    elpis_name_from_text(&n, "WWW.Cimb.COM.my.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) & ELPIS_QUIRK_DROPS_SVCB,
+          "and so does a zone below it, whatever the case");
+    elpis_name_from_text(&n, "notcimb.com.my.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) == 0,
+          "a name that only ends in the same letters does not");
+    elpis_name_from_text(&n, "com.my.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) == 0, "nor does the parent");
+    elpis_name_from_text(&n, "www.kemenkeu.go.id.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) == ELPIS_QUIRK_SELFREF_NODATA,
+          "www.kemenkeu.go.id refers other types back to itself");
+
+    elpis_strlcpy(line, "quirk: example.net drops-svcb, empty-nodata", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && c.nquirk == 1,
+          "a quirk: line parses");
+    elpis_name_from_text(&n, "a.example.net.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) ==
+              (ELPIS_QUIRK_DROPS_SVCB | ELPIS_QUIRK_EMPTY_NODATA),
+          "and covers the zone's children with both flags");
+    elpis_quirk_flags_str(c.quirk[0].flags, fb, sizeof fb);
+    CHECK(strcmp(fb, "drops-svcb empty-nodata") == 0, "and prints back (%s)", fb);
+
+    elpis_strlcpy(line, "quirk: com.my none", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK, "none parses");
+    elpis_name_from_text(&n, "cimb.com.my.");
+    CHECK(elpis_quirks_for(c.quirk, c.nquirk, &n) & ELPIS_QUIRK_DROPS_SVCB,
+          "a parent's none does not cancel a deeper built-in");
+    elpis_strlcpy(line, "quirk: cimb.com.my none", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          elpis_quirks_for(c.quirk, c.nquirk, &n) == 0,
+          "the zone's own none does");
+
+    elpis_strlcpy(line, "quirk: example.org drops-everything", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK,
+          "an unknown flag is an error");
+    elpis_strlcpy(line, "quirk: example.org", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK,
+          "a zone with no flag is an error");
+}
+
+/* ================================================================== */
+/* The special names answered before anything is cached or resolved. */
+static int local_answer(elpis_worker_t *w, const char *name, uint16_t qtype,
+                        unsigned *rcode, unsigned *ancount)
+{
+    uint8_t q[512];
+    size_t ql = 12, outlen = 0;
+    elpis_name_t n;
+    elpis_msg_t m;
+    int drop = 0, hit;
+
+    memset(q, 0, 12);
+    q[2] = 0x01;                        /* RD */
+    q[5] = 1;
+    elpis_name_from_text(&n, name);
+    memcpy(q + ql, n.d, n.len); ql += n.len;
+    elpis_put16(q + ql, qtype); ql += 2;
+    elpis_put16(q + ql, ELPIS_CLASS_IN); ql += 2;
+    if (elpis_msg_parse(&m, q, ql, ELPIS_PARSE_QUERY, &drop) != ELPIS_OK)
+        return -1;
+    hit = elpis_localzone_static(w, &m, w->txbuf, ELPIS_MAX_MSG, &outlen);
+    if (hit && outlen >= 12) {
+        *rcode   = elpis_get16(w->txbuf + 2) & 0x0Fu;
+        *ancount = elpis_get16(w->txbuf + 6);
+    }
+    return hit;
+}
+
+static void test_localzone(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    unsigned rc = 99, an = 99;
+
+    section("local names");
+    if (ctx == NULL || w == NULL) {
+        CHECK(0, "set up");
+        elpis_free(ctx);
+        elpis_free(w);
+        return;
+    }
+    elpis_conf_defaults(&ctx->conf);
+    w->ctx   = ctx;
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->ctab  = (elpis_cslot_t *)elpis_calloc(ELPIS_BLD_CTAB, sizeof(elpis_cslot_t));
+
+    CHECK(local_answer(w, "localhost.", ELPIS_T_A, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NOERROR && an == 1, "localhost has an address");
+    CHECK(local_answer(w, "a.b.LocalHost.", ELPIS_T_AAAA, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NOERROR && an == 1, "and so does a name under it");
+    CHECK(local_answer(w, "10.1.168.192.in-addr.arpa.", ELPIS_T_PTR, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NXDOMAIN, "private reverse space is NXDOMAIN");
+    CHECK(local_answer(w, "8.8.8.8.in-addr.arpa.", ELPIS_T_PTR, &rc, &an) == 0,
+          "public reverse space is resolved");
+    CHECK(local_answer(w, "x.Onion.", ELPIS_T_A, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NXDOMAIN, ".onion is NXDOMAIN");
+    CHECK(local_answer(w, "localhost.arpa.", ELPIS_T_A, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NXDOMAIN, "localhost.arpa is NXDOMAIN");
+    CHECK(local_answer(w, "www.example.com.", ELPIS_T_A, &rc, &an) == 0,
+          "an ordinary name is not answered locally");
+    CHECK(local_answer(w, "arpa.", ELPIS_T_SOA, &rc, &an) == 0,
+          "nor is arpa itself");
+    CHECK(local_answer(w, ELPIS_IDENTITY_NAME_DEFAULT ".", ELPIS_T_TXT, &rc, &an) == 1 &&
+          rc == ELPIS_RC_NOERROR && an == 1, "the identity probe answers");
+    CHECK(local_answer(w, "ELPIS.Sakurako.OOMURO", ELPIS_T_TXT, &rc, &an) == 1 &&
+          an == 1, "in any case");
+    CHECK(local_answer(w, "x." ELPIS_IDENTITY_NAME_DEFAULT ".", ELPIS_T_TXT,
+                       &rc, &an) == 0, "but not below itself");
+    CHECK(local_answer(w, "sakurako.oomuro.", ELPIS_T_TXT, &rc, &an) == 0,
+          "nor above");
+
+    elpis_free(w->txbuf);
+    elpis_free(w->ctab);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
 /* ================================================================== */
 int main(void)
 {
@@ -1990,6 +2310,8 @@ int main(void)
     test_cache();
     test_hashes();
     test_signatures();
+    test_bignum();
+    test_keytrap();
     test_dnssec();
     test_dns64();
     test_conflict();
@@ -2001,6 +2323,8 @@ int main(void)
     test_val_retry_budget();
     test_cookies();
     test_task_ceiling();
+    test_quirks();
+    test_localzone();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

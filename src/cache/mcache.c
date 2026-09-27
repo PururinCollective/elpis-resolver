@@ -363,6 +363,20 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
     return elpis_cache_insert(c, e, k);
 }
 
+int elpis_mcache_rcode(elpis_cache_t *c, const elpis_mkey_t *k)
+{
+    unsigned shard;
+    const ment_t *e;
+    int rc;
+
+    e = (const ment_t *)elpis_cache_read_begin(c, k->hash, k, &shard);
+    if (e == NULL)
+        return -1;
+    rc = (int)e->rcode;
+    elpis_cache_read_end(c, shard);
+    return rc;
+}
+
 /*
  * Record how a background refresh turned out.
  *

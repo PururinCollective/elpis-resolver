@@ -312,6 +312,33 @@ uint64_t elpis_dnssec_take_verifies(void)
     return n;
 }
 
+/*
+ * KeyTrap (CVE-2023-50387).  One RRset may carry many signatures and one
+ * DNSKEY set many keys, and nothing stops a zone from making every key tag
+ * collide: the loops below then ran every signature against every key, a
+ * public-key operation each time.  A DNSKEY set of 48 keys that share a tag
+ * and an RRset with 48 signatures over it is 2,304 verifications for one
+ * answer -- seconds of CPU for a worker, for one query, from anybody who can
+ * make us resolve a name in a zone they run.
+ *
+ * So the work is bounded three ways, as BIND, Unbound and PowerDNS bound it
+ * since: signatures tried per RRset, keys tried per signature when their
+ * tags collide, and public-key operations per validation.  A legitimate
+ * RRset needs one; a key rollover two or three.  Running out is a failure to
+ * validate, and answered SERVFAIL -- never read as "unsigned".
+ */
+#define VAL_SIG_TRIES     8u     /* failed signature checks per RRset   */
+#define VAL_TAG_COLLIDE   4u     /* keys tried per signature, same tag  */
+#define VAL_DS_TRIES      4u     /* DS- or anchor-matched keys tried    */
+#define VAL_MAX_VERIFIES  64u    /* public-key operations per validation */
+
+/*
+ * The count of the validation running on this thread, or NULL outside one:
+ * set by val_run() for its own task and put back when it returns, so a
+ * validation resumed from inside another's completion counts against itself.
+ */
+static ELPIS_TLS unsigned *g_val_spent;
+
 static int verify_with_key(const elpis_conf_t *c, uint8_t alg,
                            const uint8_t *key, size_t keylen,
                            const uint8_t *data, size_t datalen,
@@ -320,6 +347,17 @@ static int verify_with_key(const elpis_conf_t *c, uint8_t alg,
     int halg = elpis_alg_hash(c, alg);
     uint8_t digest[64];
 
+    if (g_val_spent != NULL) {
+        if (*g_val_spent >= VAL_MAX_VERIFIES) {
+            elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX - 1, __FILE__,
+                          __LINE__, "dnssec: %u signature checks spent on one "
+                          "answer, the most one may take; treating the rest "
+                          "as failed (a zone with colliding key tags?)",
+                          VAL_MAX_VERIFIES);
+            return 0;
+        }
+        (*g_val_spent)++;
+    }
     g_verifies++;
 
     if (alg == c->alg_mldsa44)
@@ -458,7 +496,7 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
 {
     const uint8_t *rd[ELPIS_RRSET_MAX_RR];
     uint16_t rl[ELPIS_RRSET_MAX_RR];
-    unsigned i, j;
+    unsigned i, j, fails = 0;
     int saw_sig = 0;
 
     if (set->count == 0)
@@ -473,20 +511,32 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
         rl[i] = set->len[i];
     }
 
-    for (i = 0; i < set->sigcount; i++) {
+    for (i = 0; i < set->sigcount && fails < VAL_SIG_TRIES; i++) {
         const uint8_t *sig = set->data + set->off[set->count + i];
         uint16_t siglen = set->len[set->count + i];
+        unsigned tagged = 0;
 
         if (siglen < 19)
             continue;
         saw_sig = 1;
 
-        for (j = 0; j < keys->count; j++) {
+        for (j = 0; j < keys->count && fails < VAL_SIG_TRIES; j++) {
             const uint8_t *key = keys->data + keys->off[j];
             uint16_t keylen = keys->len[j];
-            int rc = elpis_rrsig_verify(conf, &set->name, set->type, set->klass,
-                                        rd, rl, set->count, sig, siglen,
-                                        key, keylen, now, ede);
+            int rc;
+
+            /* The cheap part of elpis_rrsig_verify()'s own test, here so the
+             * keys sharing this signature's tag can be counted. */
+            if (keylen < 5 || key[3] != sig[2] ||
+                elpis_dnskey_tag(key, keylen) != elpis_get16(sig + 16))
+                continue;
+            if (++tagged > VAL_TAG_COLLIDE)
+                break;
+            rc = elpis_rrsig_verify(conf, &set->name, set->type, set->klass,
+                                    rd, rl, set->count, sig, siglen,
+                                    key, keylen, now, ede);
+            if (rc == ELPIS_EBOGUS)
+                fails++;
             if (rc == ELPIS_OK) {
                 if (wildcard_out != NULL) {
                     uint8_t labels = sig[3];
@@ -509,20 +559,51 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
     return ELPIS_EBOGUS;
 }
 
+/*
+ * The one-key "set" a DS or anchor match is checked with.  It is an RRset
+ * buffer -- 21 KiB -- and it used to be built on the stack and zeroed whole for
+ * every matching key, on a path already deep inside a worker's callbacks.
+ * Only the header fields and one key are ever read.
+ */
+static ELPIS_TLS elpis_rrset_buf_t g_one_key;
+
+static const elpis_rrset_buf_t *one_key(const elpis_rrset_buf_t *keys,
+                                        const uint8_t *key, uint16_t keylen)
+{
+    elpis_rrset_buf_t *one = &g_one_key;
+
+    one->name     = keys->name;
+    one->type     = ELPIS_T_DNSKEY;
+    one->klass    = keys->klass;
+    one->ttl      = keys->ttl;
+    one->orig_ttl = keys->orig_ttl;
+    one->sec      = 0;
+    one->count    = 1;
+    one->sigcount = 0;
+    one->flags    = 0;
+    one->zone_labels = 0;
+    one->off[0]   = 0;
+    one->len[0]   = keylen;
+    one->used     = keylen;
+    memcpy(one->data, key, keylen);
+    return one;
+}
+
 int elpis_dnskey_validate_ds(const elpis_conf_t *conf,
                              const elpis_rrset_buf_t *keys,
                              const elpis_rrset_buf_t *ds,
                              int64_t now, int *ede)
 {
-    unsigned i, j;
+    unsigned i, j, tried = 0;
     int any_supported = 0;
 
     /*
      * At least one DS must match a DNSKEY, and that DNSKEY must then verify
      * the whole DNSKEY RRset's own signature.  Checking the DS alone is not
-     * enough: it only authenticates one key, not the set.
+     * enough: it only authenticates one key, not the set.  Matched keys are
+     * tried VAL_DS_TRIES at most, for the reason at VAL_SIG_TRIES.
      */
-    for (i = 0; i < ds->count; i++) {
+    for (i = 0; i < ds->count && tried < VAL_DS_TRIES; i++) {
         const uint8_t *dsr = ds->data + ds->off[i];
         uint16_t dslen = ds->len[i];
 
@@ -534,28 +615,17 @@ int elpis_dnskey_validate_ds(const elpis_conf_t *conf,
             continue;
         any_supported = 1;
 
-        for (j = 0; j < keys->count; j++) {
+        for (j = 0; j < keys->count && tried < VAL_DS_TRIES; j++) {
             const uint8_t *key = keys->data + keys->off[j];
             uint16_t keylen = keys->len[j];
 
             if (!elpis_ds_matches(&keys->name, key, keylen, dsr, dslen))
                 continue;
             /* This key is authenticated; use it on the DNSKEY RRset itself. */
-            {
-                elpis_rrset_buf_t one;
-                int rc;
-                memset(&one, 0, sizeof one);
-                one.name = keys->name;
-                one.type = ELPIS_T_DNSKEY;
-                one.klass = keys->klass;
-                one.count = 1;
-                one.off[0] = 0;
-                one.len[0] = keylen;
-                memcpy(one.data, key, keylen);
-                rc = elpis_rrset_validate(conf, keys, &one, now, NULL, ede);
-                if (rc == ELPIS_OK)
-                    return ELPIS_OK;
-            }
+            tried++;
+            if (elpis_rrset_validate(conf, keys, one_key(keys, key, keylen),
+                                     now, NULL, ede) == ELPIS_OK)
+                return ELPIS_OK;
         }
     }
 
@@ -578,7 +648,7 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
                              int64_t now, int *ede)
 {
     const elpis_ta_t *tas[16];
-    unsigned n, i, j;
+    unsigned n, i, j, tried = 0;
     int any_supported = 0;
 
     n = elpis_ta_for(store, &keys->name, tas, (unsigned)ELPIS_ARRAY_LEN(tas));
@@ -587,7 +657,7 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
         return ELPIS_ENOTFOUND;
     }
 
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && tried < VAL_DS_TRIES; i++) {
         uint8_t dsr[4 + 64];
         if (!elpis_digest_supported(tas[i]->digest_type))
             continue;
@@ -600,25 +670,16 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
         dsr[3] = tas[i]->digest_type;
         memcpy(dsr + 4, tas[i]->digest, tas[i]->digest_len);
 
-        for (j = 0; j < keys->count; j++) {
+        for (j = 0; j < keys->count && tried < VAL_DS_TRIES; j++) {
             const uint8_t *key = keys->data + keys->off[j];
             uint16_t keylen = keys->len[j];
             if (!elpis_ds_matches(&keys->name, key, keylen, dsr,
                                   (size_t)tas[i]->digest_len + 4u))
                 continue;
-            {
-                elpis_rrset_buf_t one;
-                memset(&one, 0, sizeof one);
-                one.name  = keys->name;
-                one.type  = ELPIS_T_DNSKEY;
-                one.klass = keys->klass;
-                one.count = 1;
-                one.off[0] = 0;
-                one.len[0] = keylen;
-                memcpy(one.data, key, keylen);
-                if (elpis_rrset_validate(conf, keys, &one, now, NULL, ede) == ELPIS_OK)
-                    return ELPIS_OK;
-            }
+            tried++;
+            if (elpis_rrset_validate(conf, keys, one_key(keys, key, keylen),
+                                     now, NULL, ede) == ELPIS_OK)
+                return ELPIS_OK;
         }
     }
 
@@ -716,6 +777,10 @@ typedef struct {
     unsigned          waiting : 1;
     unsigned          pending_tries;
     unsigned          steps;
+    unsigned          verifies;   /* public-key operations, VAL_MAX_VERIFIES */
+    /* The walk reached a signer with keys proven from the anchor down: that
+     * zone is signed, and whatever it says must carry proof. */
+    unsigned          keyed : 1;
     /*
      * How many times each distinct lookup has come back empty.  This has to
      * be per (name, type) and not a single counter for "the last thing we
@@ -1810,6 +1875,18 @@ static void tally(elpis_task_t *t, val_t *v)
                  t->ede >= 0 ? t->ede : ELPIS_EDE_DNSSEC_BOGUS);
         return;
     }
+    /*
+     * Nothing in the answer to judge at all -- no record, not even an SOA --
+     * from a zone the walk reached with proven keys.  That zone is signed,
+     * and a signed zone that says "nothing here" says it with a signed SOA
+     * and an NSEC or NSEC3.  An empty reply was counted insecure, so a forged
+     * one denied any name in any signed zone and was believed: the stripped
+     * denial RFC 4035 section 5 exists to catch.
+     */
+    if (nsecure == 0 && ninsecure == 0 && v->keyed) {
+        val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_NSEC_MISSING);
+        return;
+    }
     if (ninsecure > 0 || nsecure == 0) {
         val_done(t, ELPIS_SEC_INSECURE, -1);
         return;
@@ -1827,7 +1904,26 @@ static void tally(elpis_task_t *t, val_t *v)
     }
 }
 
+static void val_step(elpis_task_t *t);
+
+/*
+ * Run the machine for `t` with its own signature budget in force.  Only the
+ * pointer is put back afterwards: `t` may have finished and been freed by the
+ * time val_step() returns.
+ */
 static void val_run(elpis_task_t *t)
+{
+    unsigned *saved = g_val_spent;
+    val_t *v = (val_t *)t->val;
+
+    if (v == NULL)
+        return;
+    g_val_spent = &v->verifies;
+    val_step(t);
+    g_val_spent = saved;
+}
+
+static void val_step(elpis_task_t *t)
 {
     val_t *v = (val_t *)t->val;
     elpis_worker_t *w = t->w;
@@ -2127,6 +2223,9 @@ static void val_run(elpis_task_t *t)
         case VS_VERIFY: {
             int reached = elpis_name_eq(&v->cur, &v->signers[v->si]);
 
+            if (reached && v->keys.sec == (uint8_t)ELPIS_SEC_SECURE &&
+                !v->cut[v->si])
+                v->keyed = 1;
             if (reached)
                 verify_for_current(t, v);
             else
@@ -2179,9 +2278,15 @@ int elpis_val_start(elpis_task_t *t)
     }
     /*
      * The chain walk fetches DNSKEY and DS itself and checks them against the
-     * anchor, so those lookups must not re-enter the validator.
+     * anchor, so its own lookups -- child tasks -- must not re-enter the
+     * validator.  A client asking for them is another matter: "dig . DNSKEY
+     * +dnssec" came back without AD, because nothing ever judged the answer,
+     * and the copy the walk had fetched was served out of the message cache
+     * with no verdict on it.  Asked for directly, they are validated like any
+     * other answer; the walk finds its keys in the cache, just fetched.
      */
-    if (t->qtype == ELPIS_T_DNSKEY || t->qtype == ELPIS_T_DS ||
+    if (((t->qtype == ELPIS_T_DNSKEY || t->qtype == ELPIS_T_DS) &&
+         t->depth > 0) ||
         t->qclass != ELPIS_CLASS_IN) {
         t->sec = ELPIS_SEC_UNCHECKED;
         return 0;

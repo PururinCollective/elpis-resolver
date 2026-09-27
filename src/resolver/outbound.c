@@ -431,6 +431,15 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
      */
     if (t->rounds > 0 && timeout > c->query_timeout_ms)
         timeout = c->query_timeout_ms;
+    /*
+     * The same for a server that timed out the last time it was asked.  Its
+     * estimate has doubled with every miss, and waiting that out cost 4.8 s
+     * on one of www.kemendesa.go.id's dead servers, in the first round, with
+     * nothing else left to try.  If it is merely slow, the late listener
+     * below still hears it, and its estimate comes back down.
+     */
+    if (inf.timeouts > 0 && timeout > c->query_timeout_ms)
+        timeout = c->query_timeout_ms;
     q->timeout_ms = timeout;
     elpis_timer_add(w->loop, &q->timer, timeout, out_timeout, q);
 
@@ -603,6 +612,7 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
             if (rcode == ELPIS_RC_REFUSED)
                 elpis_infra_set_flag(w->ctx->infra, &q->server,
                                      ELPIS_INF_LAME, 1);
+            elpis_task_note_answered(t, &q->server);
             elpis_out_free(w, q);
             return;
         }

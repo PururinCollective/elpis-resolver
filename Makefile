@@ -8,7 +8,8 @@ BINDIR    := bin
 BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
-VERSION   := 2.0.2
+BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
+VERSION   := 2.1.0
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.
@@ -87,6 +88,7 @@ WEBUI_SRC := \
 
 CORE_SRC := \
   src/util.c src/log.c src/conf.c src/stats.c src/licence.c src/conflict.c \
+  src/quirks.c \
   src/simd/simd.c $(DNS_SRC) $(CACHE_SRC) $(NET_SRC) $(SERVER_SRC) \
   $(RESOLVER_SRC) $(DNSSEC_SRC) $(WEBUI_SRC) src/main.c
 
@@ -144,7 +146,7 @@ OBJ += $(SIMD_OBJ)
         licence-tool fuzz FORCE
 
 
-all: $(BIN) $(BINCONF)
+all: $(BIN) $(BINCONF) $(BINCONF_BASE)
 
 FORCE:
 
@@ -228,12 +230,20 @@ $(BINDIR):
 	@mkdir -p $(BINDIR)
 
 # bin/ is meant to be a complete, portable bundle: copy the directory to a
-# machine and it runs.  The config is seeded from the shipped defaults once and
-# never touched again -- your edits survive every rebuild, and `make clean`
-# leaves it alone.  Use `make distclean` to start over.
+# machine and it runs.  The config is seeded from the shipped defaults, and
+# after that it is yours: `make clean` leaves it alone, and so does every
+# rebuild -- except that when elpis.conf itself changes, the change is merged
+# in, three-way, against the defaults your copy was last merged with
+# (bin/elpis.conf.shipped).  New settings and comments arrive and your edits
+# stay.  Where both changed the same lines nothing is touched: the merge with
+# the conflicts marked goes to bin/elpis.conf.new and make says so, every
+# time, until you have dealt with it.  See tools/conf-merge.sh.  Use
+# `make distclean` to start over.
 $(BINCONF): | $(BINDIR)
-	@cp elpis.conf $(BINCONF)
-	@echo "  seeded $(BINCONF) from the shipped defaults"
+	@sh tools/conf-merge.sh elpis.conf $(BINCONF) $(BINCONF_BASE)
+
+$(BINCONF_BASE): elpis.conf | $(BINCONF)
+	@sh tools/conf-merge.sh elpis.conf $(BINCONF) $(BINCONF_BASE)
 
 $(BIN): $(OBJ) | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $(OBJ) $(ALL_LDFLAGS) $(LIBS)
@@ -245,7 +255,7 @@ $(BIN): $(OBJ) | $(BINDIR)
 STATIC_OPT ?= $(OPT)
 static:
 	$(MAKE) clean
-	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(BIN) $(BINCONF)
+	$(MAKE) LDFLAGS="-static" OPT="$(STATIC_OPT)" $(BIN) $(BINCONF) $(BINCONF_BASE)
 	-strip $(BIN)
 
 debug:
@@ -354,11 +364,15 @@ clean:
 	rm -f src/gitrev.h src/licence_issuer.stamp src/buildtarget.h src/cflags.stamp
 	@rmdir $(BINDIR) 2>/dev/null || true
 
-# clean keeps bin/elpis.conf because it is yours by then; this drops it too.
+# clean keeps bin/elpis.conf because it is yours by then, and the record of
+# the defaults it was merged with; this drops them too.
 distclean: clean
 	rm -rf $(BINDIR)
 
-# The test object is built outside $(OBJ), so its own .d has to be named here
-# as well -- otherwise a change to a header leaves tests/test_main.o stale and
-# it is linked against a struct layout it was not compiled for.
--include $(OBJ:.o=.d) tests/test_main.d $(FUZZ_OBJ:.o=.d)
+# The test objects are built outside $(OBJ), so their own .d files have to be
+# named here as well -- otherwise a change to a header leaves them stale and
+# they are linked against a struct layout they were not compiled for.  That
+# includes the signing ed25519 and the test-issuer licence objects: a change to
+# the bignum header once left both behind, and every Ed25519 test failed.
+-include $(OBJ:.o=.d) tests/test_main.d tests/ed25519_sign.d \
+         tests/licence_test.d $(FUZZ_OBJ:.o=.d)

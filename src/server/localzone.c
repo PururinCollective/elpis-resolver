@@ -12,6 +12,8 @@
 #include "elpis/simd.h"
 #include "elpis/licence.h"
 
+#include <pthread.h>
+
 /* Reverse zones that describe address space which cannot appear on the
  * public internet (RFC 6303 section 4, RFC 6761 section 6.1). */
 static const char *const k_private_reverse[] = {
@@ -40,21 +42,130 @@ static const char *const k_nonexistent[] = {
     "invalid.", "onion.", "local.", "localhost.arpa.", "alt."
 };
 
+/*
+ * The tables above, in wire form, built once.  They used to be converted from
+ * text on every query -- 45 conversions to learn that www.google.com is none
+ * of them -- which was 85% of what a cache hit cost.
+ */
+static elpis_name_t g_private_reverse[ELPIS_ARRAY_LEN(k_private_reverse)];
+static elpis_name_t g_nonexistent[ELPIS_ARRAY_LEN(k_nonexistent)];
+static elpis_name_t g_localhost;
+static pthread_once_t g_tables_once = PTHREAD_ONCE_INIT;
+
+static void tables_build(void)
+{
+    unsigned i;
+
+    for (i = 0; i < ELPIS_ARRAY_LEN(k_private_reverse); i++)
+        if (elpis_name_from_text(&g_private_reverse[i], k_private_reverse[i]) != ELPIS_OK)
+            g_private_reverse[i].len = 0;
+    for (i = 0; i < ELPIS_ARRAY_LEN(k_nonexistent); i++)
+        if (elpis_name_from_text(&g_nonexistent[i], k_nonexistent[i]) != ELPIS_OK)
+            g_nonexistent[i].len = 0;
+    if (elpis_name_from_text(&g_localhost, "localhost.") != ELPIS_OK)
+        g_localhost.len = 0;
+}
+
+/*
+ * The rightmost label of `q`: every name the tables hold ends in one of a
+ * handful of them, so this rules nearly every query out in one comparison.
+ */
+static const uint8_t *top_label(const elpis_name_t *q, unsigned *len)
+{
+    size_t i = 0, last = 0;
+
+    if (q->len <= 1)
+        return NULL;
+    while (i < q->len && q->d[i] != 0) {
+        last = i;
+        i += 1u + q->d[i];
+    }
+    *len = q->d[last];
+    return q->d + last + 1;
+}
+
+static int label_is(const uint8_t *l, unsigned len, const char *text)
+{
+    size_t n = strlen(text);
+    return l != NULL && len == n && elpis_eq_ci(l, (const uint8_t *)text, n);
+}
+
+/*
+ * `q` equals the presentation-format `text`, compared label by label without
+ * converting either.  Plain hostnames only; anything with an escape in it is
+ * converted and compared the long way.
+ */
+static int name_equals_text(const elpis_name_t *q, const char *text)
+{
+    size_t i = 0;
+    const char *t = text;
+
+    if (strchr(text, '\\') != NULL) {
+        elpis_name_t n;
+        return elpis_name_from_text(&n, text) == ELPIS_OK && elpis_name_eq(q, &n);
+    }
+    if (t[0] == '.' && t[1] == '\0')
+        return q->len == 1;
+    for (;;) {
+        const char *dot = strchr(t, '.');
+        size_t l = dot != NULL ? (size_t)(dot - t) : strlen(t);
+
+        if (l == 0)
+            return i < q->len && q->d[i] == 0 && (dot == NULL || dot[1] == '\0');
+        if (i >= q->len || q->d[i] != l ||
+            !elpis_eq_ci(q->d + i + 1, (const uint8_t *)t, l))
+            return 0;
+        i += 1u + l;
+        if (dot == NULL)
+            return i < q->len && q->d[i] == 0;
+        t = dot + 1;
+    }
+}
+
+/* Local answers for this top-level label: NXDOMAIN for the RFC 6761 names
+ * and, when blocked, the private reverse zones. */
+static int is_nonexistent(const elpis_name_t *q, const uint8_t *tld,
+                          unsigned tlen)
+{
+    unsigned i;
+
+    if (!label_is(tld, tlen, "invalid") && !label_is(tld, tlen, "onion") &&
+        !label_is(tld, tlen, "local") && !label_is(tld, tlen, "alt") &&
+        !label_is(tld, tlen, "arpa"))
+        return 0;
+    for (i = 0; i < ELPIS_ARRAY_LEN(g_nonexistent); i++)
+        if (g_nonexistent[i].len && elpis_name_is_subdomain(q, &g_nonexistent[i]))
+            return 1;
+    return 0;
+}
+
+static int is_private_reverse(const elpis_name_t *q, const uint8_t *tld,
+                              unsigned tlen)
+{
+    unsigned i;
+
+    if (!label_is(tld, tlen, "arpa"))
+        return 0;
+    for (i = 0; i < ELPIS_ARRAY_LEN(g_private_reverse); i++)
+        if (g_private_reverse[i].len &&
+            elpis_name_is_subdomain(q, &g_private_reverse[i]))
+            return 1;
+    return 0;
+}
+
+static int is_localhost(const elpis_name_t *q, const uint8_t *tld, unsigned tlen)
+{
+    return label_is(tld, tlen, "localhost") && g_localhost.len &&
+           elpis_name_is_subdomain(q, &g_localhost);
+}
+
+/* The CHAOS names, rare enough to convert as they come. */
 static int name_matches(const elpis_name_t *q, const char *text)
 {
     elpis_name_t n;
     if (elpis_name_from_text(&n, text) != ELPIS_OK)
         return 0;
     return elpis_name_is_subdomain(q, &n);
-}
-
-/* Exactly this name, not anything beneath it. */
-static int name_equals(const elpis_name_t *q, const char *text)
-{
-    elpis_name_t n;
-    if (elpis_name_from_text(&n, text) != ELPIS_OK)
-        return 0;
-    return elpis_name_eq(q, &n);
 }
 
 /* Append one character-string to TXT rdata, silently dropping what will not
@@ -120,8 +231,12 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
                            uint8_t *out, size_t cap, size_t *outlen)
 {
     const elpis_conf_t *c = &w->ctx->conf;
+    const uint8_t *tld;
+    unsigned tlen = 0;
     size_t n;
-    unsigned i;
+
+    pthread_once(&g_tables_once, tables_build);
+    tld = top_label(&m->qname, &tlen);
 
     /* CHAOS: version.bind / hostname.bind / id.server. */
     if (m->qclass == ELPIS_CLASS_CH) {
@@ -172,8 +287,8 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
      * reason version banners are -- a kernel release is a CVE lookup key and
      * a hostname usually describes somebody's network.
      */
-    if (c->identity && c->identity_name[0] &&
-        name_equals(&m->qname, c->identity_name)) {
+    if (c->identity && c->identity_name[0] && tld != NULL &&
+        name_equals_text(&m->qname, c->identity_name)) {
         const elpis_licence_t *lic = &w->ctx->licence;
         uint8_t rd[512];
         size_t  rdlen = 0;
@@ -278,7 +393,7 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
     }
 
     /* localhost and friends (RFC 6761 section 6.3). */
-    if (name_matches(&m->qname, "localhost.")) {
+    if (is_localhost(&m->qname, tld, tlen)) {
         if (m->qtype == ELPIS_T_A) {
             uint8_t rd[4] = { 127, 0, 0, 1 };
             n = build_simple(w, m, ELPIS_RC_NOERROR, out, cap, &m->qname,
@@ -297,25 +412,12 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
         return 1;
     }
 
-    for (i = 0; i < ELPIS_ARRAY_LEN(k_nonexistent); i++) {
-        if (name_matches(&m->qname, k_nonexistent[i])) {
-            n = build_simple(w, m, ELPIS_RC_NXDOMAIN, out, cap, NULL, 0, 0, NULL, 0);
-            if (n == 0) return 0;
-            *outlen = n;
-            return 1;
-        }
-    }
-
-    if (c->block_private_reverse) {
-        for (i = 0; i < ELPIS_ARRAY_LEN(k_private_reverse); i++) {
-            if (name_matches(&m->qname, k_private_reverse[i])) {
-                n = build_simple(w, m, ELPIS_RC_NXDOMAIN, out, cap, NULL, 0, 0,
-                                 NULL, 0);
-                if (n == 0) return 0;
-                *outlen = n;
-                return 1;
-            }
-        }
+    if (is_nonexistent(&m->qname, tld, tlen) ||
+        (c->block_private_reverse && is_private_reverse(&m->qname, tld, tlen))) {
+        n = build_simple(w, m, ELPIS_RC_NXDOMAIN, out, cap, NULL, 0, 0, NULL, 0);
+        if (n == 0) return 0;
+        *outlen = n;
+        return 1;
     }
 
     return 0;
@@ -329,25 +431,21 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
 int elpis_localzone_answer(elpis_task_t *t)
 {
     const elpis_conf_t *c = &t->w->ctx->conf;
-    unsigned i;
+    const uint8_t *tld;
+    unsigned tlen = 0;
 
-    for (i = 0; i < ELPIS_ARRAY_LEN(k_nonexistent); i++) {
-        if (name_matches(&t->qname, k_nonexistent[i])) {
-            t->rcode = ELPIS_RC_NXDOMAIN;
-            t->sec = ELPIS_SEC_INSECURE;
-            return 1;
-        }
+    pthread_once(&g_tables_once, tables_build);
+    tld = top_label(&t->qname, &tlen);
+    if (tld == NULL)
+        return 0;
+
+    if (is_nonexistent(&t->qname, tld, tlen) ||
+        (c->block_private_reverse && is_private_reverse(&t->qname, tld, tlen))) {
+        t->rcode = ELPIS_RC_NXDOMAIN;
+        t->sec = ELPIS_SEC_INSECURE;
+        return 1;
     }
-    if (c->block_private_reverse) {
-        for (i = 0; i < ELPIS_ARRAY_LEN(k_private_reverse); i++) {
-            if (name_matches(&t->qname, k_private_reverse[i])) {
-                t->rcode = ELPIS_RC_NXDOMAIN;
-                t->sec = ELPIS_SEC_INSECURE;
-                return 1;
-            }
-        }
-    }
-    if (name_matches(&t->qname, "localhost.")) {
+    if (is_localhost(&t->qname, tld, tlen)) {
         uint8_t rd[16];
         if (t->qtype == ELPIS_T_A) {
             rd[0] = 127; rd[1] = 0; rd[2] = 0; rd[3] = 1;

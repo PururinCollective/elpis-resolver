@@ -391,6 +391,95 @@ static void session_drop(const char *tok)
 }
 
 /* ------------------------------------------------------------------ */
+/* Login throttling                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Failed logins, per address.  A failed login was only logged, so a script
+ * could guess for as long as it liked -- slowly, one PBKDF2 at a time, but
+ * with nothing to stop it, and every guess held the page's only thread.
+ * After LOGIN_FREE failures in a row an address waits, twice as long after
+ * each further one, up to LOGIN_MAX_WAIT; no hash is computed for it while it
+ * does.  A success clears it.  The table is small and the oldest entry makes
+ * room, so a flood of addresses can only make it forget, never grow.
+ */
+#define LOGIN_SLOTS     32u
+#define LOGIN_FREE       5u
+#define LOGIN_MAX_WAIT 900u              /* seconds */
+
+typedef struct {
+    uint8_t  ip[16];
+    uint8_t  used;
+    unsigned fails;
+    uint64_t until_ms, last_ms;
+} login_slot_t;
+
+static login_slot_t g_login[LOGIN_SLOTS];
+
+static void peer_ip(const struct sockaddr_storage *ss, uint8_t out[16])
+{
+    memset(out, 0, 16);
+    if (ss->ss_family == AF_INET)
+        memcpy(out, &((const struct sockaddr_in *)(const void *)ss)->sin_addr, 4);
+    else if (ss->ss_family == AF_INET6)
+        memcpy(out, &((const struct sockaddr_in6 *)(const void *)ss)->sin6_addr, 16);
+}
+
+static login_slot_t *login_slot(const uint8_t ip[16], int make)
+{
+    unsigned i, oldest = 0;
+
+    for (i = 0; i < LOGIN_SLOTS; i++)
+        if (g_login[i].used && memcmp(g_login[i].ip, ip, 16) == 0)
+            return &g_login[i];
+    if (!make)
+        return NULL;
+    for (i = 0; i < LOGIN_SLOTS; i++) {
+        if (!g_login[i].used) {
+            oldest = i;
+            break;
+        }
+        if (g_login[i].last_ms < g_login[oldest].last_ms)
+            oldest = i;
+    }
+    memset(&g_login[oldest], 0, sizeof g_login[oldest]);
+    memcpy(g_login[oldest].ip, ip, 16);
+    g_login[oldest].used = 1;
+    return &g_login[oldest];
+}
+
+/* Seconds this address must still wait, or 0. */
+static unsigned login_wait(const uint8_t ip[16])
+{
+    const login_slot_t *l = login_slot(ip, 0);
+    uint64_t now = elpis_now_ms();
+
+    if (l == NULL || l->until_ms <= now)
+        return 0;
+    return (unsigned)((l->until_ms - now + 999u) / 1000u);
+}
+
+static void login_result(const uint8_t ip[16], int ok)
+{
+    login_slot_t *l = login_slot(ip, !ok);
+    uint64_t now = elpis_now_ms();
+
+    if (l == NULL)
+        return;
+    if (ok) {
+        memset(l, 0, sizeof *l);
+        return;
+    }
+    l->last_ms = now;
+    if (++l->fails > LOGIN_FREE) {
+        unsigned shift = l->fails - LOGIN_FREE - 1u;
+        unsigned wait = shift >= 10u ? LOGIN_MAX_WAIT
+                                     : ELPIS_MIN(1u << shift, LOGIN_MAX_WAIT);
+        l->until_ms = now + (uint64_t)wait * 1000u;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* JSON snapshot                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -877,7 +966,7 @@ static size_t read_request(int fd, char *req, const char **body)
     return got;
 }
 
-static void handle_conn(elpis_ctx_t *ctx, int fd)
+static void handle_conn(elpis_ctx_t *ctx, int fd, const uint8_t peer[16])
 {
     static char req[REQ_MAX + 1];
     static char out[OUT_MAX];
@@ -912,7 +1001,15 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
          */
         char user[64] = "", pass[256] = "", set[256];
         int ok = 0;
+        unsigned wait = login_wait(peer);
 
+        if (wait > 0) {
+            char ra[64];
+            snprintf(ra, sizeof ra, "Retry-After: %u\r\n", wait);
+            respond(fd, "429 Too Many Requests", "application/json", ra,
+                    "{\"ok\":false}", 12);
+            return;
+        }
         if (form_field(body, "user", user, sizeof user) &&
             form_field(body, "pass", pass, sizeof pass)) {
             /* Compare the name in equal time too, so it cannot be probed. */
@@ -924,6 +1021,7 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
             ok = uok && pok;
             memset(pass, 0, sizeof pass);
         }
+        login_result(peer, ok);
         if (!ok) {
             /*
              * Rate limited: a guessing script must not be able to push
@@ -1035,6 +1133,8 @@ void *elpis_webui_main(void *ctxv)
 
     while (!ctx->shutdown) {
         struct pollfd pfd;
+        struct sockaddr_storage peer_ss;
+        uint8_t peer[16];
         int rc, cfd;
         uint64_t now = elpis_now_ms();
 
@@ -1064,9 +1164,14 @@ void *elpis_webui_main(void *ctxv)
         if (rc == 0)
             continue;
 
-        cfd = accept(lfd, NULL, NULL);
+        {
+            socklen_t sl = (socklen_t)sizeof peer_ss;
+            memset(&peer_ss, 0, sizeof peer_ss);
+            cfd = accept(lfd, (struct sockaddr *)&peer_ss, &sl);
+        }
         if (cfd < 0)
             continue;
+        peer_ip(&peer_ss, peer);
         {
             struct timeval io;
             int on = 1;
@@ -1076,7 +1181,7 @@ void *elpis_webui_main(void *ctxv)
             (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &io, sizeof io);
             (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
         }
-        handle_conn(ctx, cfd);
+        handle_conn(ctx, cfd, peer);
         close(cfd);
     }
     close(lfd);

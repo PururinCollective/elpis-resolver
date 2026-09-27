@@ -85,6 +85,9 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
 #define ELPIS_REFRESH_FAILED    0
 #define ELPIS_REFRESH_NXDOMAIN  1
 /* Returns 1 when the cached answer was given up and should be re-resolved. */
+/* The rcode of the entry held for `k`, or -1 when there is none. */
+int elpis_mcache_rcode(elpis_cache_t *c, const elpis_mkey_t *k);
+
 int elpis_mcache_refresh_outcome(elpis_cache_t *c, const elpis_mkey_t *k,
                                  int outcome, unsigned nx_confirm);
 

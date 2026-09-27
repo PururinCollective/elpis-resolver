@@ -211,8 +211,10 @@ var API = location.pathname.replace(/\/index\.html$/, '/')
 
 /* ---------- helpers ---------- */
 function $(id){ return document.getElementById(id); }
-function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
-  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+/* Every attribute here is single-quoted, and a DNS name may hold a quote:
+ * escape both kinds, or a query name closes the attribute it is shown in. */
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function bytes(v){
   var u = ['B','KiB','MiB','GiB','TiB'], i = 0;
   v = Number(v) || 0;

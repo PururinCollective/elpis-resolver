@@ -26,6 +26,20 @@ static int rsa_parse(const uint8_t *key, size_t keylen, bn_t *n, bn_t *e)
     }
     if (elen == 0 || off + elen >= keylen)
         return ELPIS_EFORMAT;
+    /*
+     * RFC 3110 lets the exponent run to 4096 bits, and the cost of a
+     * verification grows with it: one with a 4096-bit exponent and modulus
+     * took 167 ms here, against half a millisecond for e = 65537.  That is a
+     * lever for anyone who can publish a key.  Every deployed key uses 3 or
+     * 65537; OpenSSL, and so BIND and Unbound, refuse an exponent over 64 bits
+     * for moduli above 3072.  Refuse it for all of them.
+     */
+    while (elen > 0 && key[off] == 0) {
+        off++;
+        elen--;
+    }
+    if (elen == 0 || elen > 8)
+        return ELPIS_EFORMAT;
 
     if (bn_from_bytes(e, key + off, elen) != ELPIS_OK)
         return ELPIS_EFORMAT;

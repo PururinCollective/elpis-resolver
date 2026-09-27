@@ -71,6 +71,20 @@ static int bn_from_hex(bn_t *a, const char *s)
 #define FADD(r, a, b) bn_addmod((r), (a), (b), &g->fp.m)
 #define FSUB(r, a, b) bn_submod((r), (a), (b), &g->fp.m)
 
+/*
+ * A point is three bignums of 144 limbs each, and assigning one copied all of
+ * them -- 1.7 KiB -- where P-256 uses eight.  Copy what is live.
+ */
+static void ecp_copy(ecp_t *r, const ecp_t *p)
+{
+    if (r == p)
+        return;
+    bn_copy(&r->X, &p->X);
+    bn_copy(&r->Y, &p->Y);
+    bn_copy(&r->Z, &p->Z);
+    r->inf = p->inf;
+}
+
 void ec_set_inf(ecp_t *p)
 {
     bn_set_u32(&p->X, 1);
@@ -128,8 +142,8 @@ void ec_dbl(ecp_t *r, const ecp_t *p, const ec_group_t *g)
         FADD(&gamma, &gamma, &gamma);             /* 8*gamma^2 */
         FSUB(&r->Y, &eight_beta, &gamma);
     }
-    r->X = t1;
-    r->Z = t0;
+    bn_copy(&r->X, &t1);
+    bn_copy(&r->Z, &t0);
     r->inf = bn_is_zero(&r->Z);
 }
 
@@ -140,8 +154,8 @@ void ec_add(ecp_t *r, const ecp_t *p, const ecp_t *q, const ec_group_t *g)
 {
     bn_t z1z1, z2z2, u1, u2, s1, s2, h, rr, i, j, v, t0;
 
-    if (p->inf) { *r = *q; return; }
-    if (q->inf) { *r = *p; return; }
+    if (p->inf) { ecp_copy(r, q); return; }
+    if (q->inf) { ecp_copy(r, p); return; }
 
     FMUL(&z1z1, &p->Z, &p->Z);
     FMUL(&z2z2, &q->Z, &q->Z);
@@ -189,9 +203,9 @@ void ec_add(ecp_t *r, const ecp_t *p, const ecp_t *q, const ec_group_t *g)
         FSUB(&z3, &z3, &z2z2);
         FMUL(&z3, &z3, &h);      /* Z3 */
 
-        r->X = t0;
-        r->Y = y3;
-        r->Z = z3;
+        bn_copy(&r->X, &t0);
+        bn_copy(&r->Y, &y3);
+        bn_copy(&r->Z, &z3);
         r->inf = bn_is_zero(&z3);
     }
 }
@@ -206,8 +220,8 @@ void ec_mul2(ecp_t *r, const bn_t *k1, const ecp_t *q, const bn_t *k2,
     unsigned i;
 
     ec_set_inf(&tbl[0]);
-    tbl[1] = g->G;
-    tbl[2] = *q;
+    ecp_copy(&tbl[1], &g->G);
+    ecp_copy(&tbl[2], q);
     ec_add(&tbl[3], &g->G, q, g);
 
     ec_set_inf(r);
