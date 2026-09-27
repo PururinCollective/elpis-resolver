@@ -10,6 +10,29 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**`make` merges new shipped defaults into `bin/elpis.conf`.** The config used
+to be seeded once and never touched again, so a setting added in a new release
+never reached a config that already existed, and nobody was told. When a pull
+now changes `elpis.conf`, `make` does a three-way merge, the way git merges a
+branch: new settings and comments arrive, your edits stay, and the
+previous copy is kept as `bin/elpis.conf.bak`. Where the new defaults and your
+edits changed the same lines, `bin/elpis.conf` is left alone. The merge with the
+conflicts marked goes to `bin/elpis.conf.new`, and `make` warns every time until
+you save `bin/elpis.conf` again. The defaults each copy was last merged with are
+kept in `bin/elpis.conf.shipped`. A tree built before this finds them in git
+history. See
+[when the shipped defaults change](docs/configuration.md#when-the-shipped-defaults-change).
+
+### Changed
+
+**`contrib/elpis-update.sh` refuses a config with conflict markers in it,** and
+ends by saying so when new defaults are waiting on a manual merge. Elpis would
+start with such a config and skip the marker lines as bad settings.
+
 ## 2.1.0 — 2026-09-28
 
 Found by a stress test. 1,413 lookups across popular global, Malaysian,

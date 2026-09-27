@@ -9,9 +9,62 @@ binary sits in a `bin/` directory; then in `/etc/elpis/`, then in `/etc/`. The
 first that exists wins.
 
 In practice the first one is what you get: `make` seeds `bin/elpis.conf` from
-the copy shipped in the source tree and never overwrites it afterwards, so the
-shipped file stays a reference and `bin/elpis.conf` is the one you edit. It
-survives rebuilds and `make clean`; `make distclean` is what removes it.
+the copy shipped in the source tree, so the shipped file stays a reference and
+`bin/elpis.conf` is the one you edit. It survives rebuilds and `make clean`;
+`make distclean` is what removes it.
+
+### When the shipped defaults change
+
+A pull that changes `elpis.conf` — a new setting, a new default, better
+comments — is merged into `bin/elpis.conf` by the next `make`, the way git
+merges a branch. What changed in the shipped file is applied, and what you
+changed in yours is kept:
+
+```
+  merged the new shipped defaults into bin/elpis.conf (+16 -0 lines);
+  your edits are kept, and the previous copy is bin/elpis.conf.bak
+```
+
+The merge needs to know which shipped defaults your copy came from, and keeps
+them in `bin/elpis.conf.shipped`. A tree built before that file existed finds
+them in git history the first time: the committed `elpis.conf` closest to
+yours. Outside a git checkout it cannot, so that first time nothing is merged,
+and later changes are.
+
+Where the shipped file and yours changed the same lines, nothing is guessed.
+`bin/elpis.conf` is left exactly as it is, and still in use. The merge with the
+conflicts marked goes to `bin/elpis.conf.new`, and every `make` says so until
+you have dealt with it:
+
+```
+  WARNING: the new shipped defaults in elpis.conf conflict with
+  WARNING: your edits in bin/elpis.conf, in 1 place(s).
+  WARNING: bin/elpis.conf is unchanged and still in use.
+  WARNING: The merge, with the conflicts marked, is bin/elpis.conf.new
+  WARNING: -- see line(s) 251
+```
+
+Each conflict shows your lines, the defaults you started from, and the new
+ones:
+
+```
+<<<<<<< bin/elpis.conf (yours)
+query-timeout: 800                     # per upstream attempt, milliseconds
+||||||| bin/elpis.conf.shipped (defaults you started from)
+query-timeout: 1200                    # per upstream attempt, milliseconds
+=======
+query-timeout: 1500                    # per upstream attempt, milliseconds
+>>>>>>> elpis.conf (new defaults)
+```
+
+Keep what you want, remove the marker lines, and copy the result over
+`bin/elpis.conf`. Or edit `bin/elpis.conf` by hand. Saving it is what tells the
+next `make` you are done, so keeping your own side of every conflict works too.
+A config with markers left in it is refused by `contrib/elpis-update.sh`
+rather than restarted with: Elpis would skip those lines as bad settings.
+
+The merge is `diff3` from GNU diffutils, or `git merge-file` where there is no
+`diff3`; see `tools/conf-merge.sh`.
 
 Without any config at all the defaults are a working recursive resolver on
 `127.0.0.1:5335`. (Not 5353 — that is mDNS, and avahi-daemon holds it on most
