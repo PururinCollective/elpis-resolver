@@ -173,6 +173,9 @@ struct elpis_task {
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;
+    /* Bit i: tried[i] answered, whatever it said.  Only the ones that did
+     * not are worth asking again in another round. */
+    uint32_t        tried_answered;
     unsigned        rounds;     /* times every server here has been tried */
 
     /* ---- QNAME minimisation (RFC 9156) ---- */
@@ -199,6 +202,16 @@ struct elpis_task {
      * SERVFAIL, but only one of them is an attack.
      */
     unsigned        val_unavailable : 1;
+    /*
+     * A server of the current delegation answered with a reply that can only
+     * mean "nothing of that type here" from a load balancer that will not say
+     * so properly -- an empty NOERROR, or a referral back to the zone itself
+     * (see quirks.h).  If nobody gives a real answer, that is the answer.
+     */
+    unsigned        lame_nodata : 1;
+    /* The "no data" was made up here, from lame_nodata or a quirk: there is
+     * no SOA to take a negative TTL from, so it is cached for a fixed one. */
+    unsigned        synth_nodata : 1;
 
     /* ---- DNSSEC working state ---- */
     void           *val;
@@ -328,6 +341,8 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
                                 const elpis_msg_t *m);
 void elpis_resolver_on_timeout(elpis_task_t *t, elpis_outq_t *q);
 void elpis_resolver_on_error(elpis_task_t *t, elpis_outq_t *q, int ede);
+/* `server` gave `t` a final reply, usable or not: not TC, not BADCOOKIE. */
+void elpis_task_note_answered(elpis_task_t *t, const elpis_addr_t *server);
 /* The question in flight, again, to the same server (BADCOOKIE, TC). */
 int  elpis_task_resend(elpis_task_t *t, const elpis_addr_t *server,
                        int force_tcp);

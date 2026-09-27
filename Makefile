@@ -87,6 +87,7 @@ WEBUI_SRC := \
 
 CORE_SRC := \
   src/util.c src/log.c src/conf.c src/stats.c src/licence.c src/conflict.c \
+  src/quirks.c \
   src/simd/simd.c $(DNS_SRC) $(CACHE_SRC) $(NET_SRC) $(SERVER_SRC) \
   $(RESOLVER_SRC) $(DNSSEC_SRC) $(WEBUI_SRC) src/main.c
 
@@ -358,7 +359,10 @@ clean:
 distclean: clean
 	rm -rf $(BINDIR)
 
-# The test object is built outside $(OBJ), so its own .d has to be named here
-# as well -- otherwise a change to a header leaves tests/test_main.o stale and
-# it is linked against a struct layout it was not compiled for.
--include $(OBJ:.o=.d) tests/test_main.d $(FUZZ_OBJ:.o=.d)
+# The test objects are built outside $(OBJ), so their own .d files have to be
+# named here as well -- otherwise a change to a header leaves them stale and
+# they are linked against a struct layout they were not compiled for.  That
+# includes the signing ed25519 and the test-issuer licence objects: a change to
+# the bignum header once left both behind, and every Ed25519 test failed.
+-include $(OBJ:.o=.d) tests/test_main.d tests/ed25519_sign.d \
+         tests/licence_test.d $(FUZZ_OBJ:.o=.d)

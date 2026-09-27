@@ -165,6 +165,7 @@ over an SSH tunnel, a VPN, or your own TLS reverse proxy. See
 | [DNSSEC](docs/dnssec.md) | validation, the algorithms, cookies, the standards followed |
 | [Status page](docs/status-page.md) | the web interface and how to reach it safely |
 | [Troubleshooting](docs/troubleshooting.md) | answers not coming back, port conflicts, malformed input |
+| [Quirks](docs/quirks.md) | zones whose servers drop or dodge some query types, and how Elpis answers for them |
 | [Internals](docs/internals.md) | why the hot paths look the way they do |
 | [Licensing](docs/licensing.md) | signed deployment licences |
 | [Changelog](CHANGELOG.md) | what changed in each release |

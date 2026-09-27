@@ -189,6 +189,20 @@ They are used round-robin across the outbound socket pool. An off-path
 attacker forging a reply then has to guess the source address as well as the
 port and the message ID.
 
+## Zones whose servers misbehave
+
+```
+quirk: example.net drops-svcb
+quirk: cimb.com.my none
+```
+
+Some zones drop HTTPS queries at a firewall, or sit behind a load balancer
+that answers only the types it balances. A quirk says how a zone misbehaves, so
+Elpis answers "no data" instead of timing out into SERVFAIL. A built-in list
+covers the zones known to need one. These lines add to it, and `none` switches
+a built-in entry off. See [quirks](quirks.md) for the flags, the built-in list,
+and how to find a zone that needs one.
+
 ## Hashing a status page password
 
 ```bash

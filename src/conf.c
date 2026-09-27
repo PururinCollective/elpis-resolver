@@ -507,6 +507,11 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         r = &c->route[c->nroute];
         memset(r, 0, sizeof *r);
         elpis_strlcpy(r->name, elpis_strtrim(val), sizeof r->name);
+        if (elpis_name_from_text(&r->zone, r->name) != ELPIS_OK) {
+            perr(&p, key, r->name);
+            return ELPIS_ERR;
+        }
+        elpis_name_lower(&r->zone);
         r->is_stub = KEY("stub-zone") ? 1u : 0u;
         while (r->naddr < ELPIS_ARRAY_LEN(r->addr)) {
             char *tok = elpis_strtrim(sp);
@@ -526,6 +531,43 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         }
         if (r->naddr == 0) { perr(&p, key, val); return ELPIS_ERR; }
         c->nroute++;
+        return ELPIS_OK;
+    }
+
+    /* ---- zones whose servers misbehave ---- */
+    if (KEY("quirk")) {
+        /* "zone flag[ flag...]", or "zone none" to switch a built-in off */
+        char *sp = strpbrk(val, " \t");
+        elpis_quirk_t *q;
+        if (sp == NULL) { perr(&p, key, val); return ELPIS_ERR; }
+        *sp++ = '\0';
+        if (c->nquirk >= ELPIS_ARRAY_LEN(c->quirk)) {
+            elpis_warn("%s:%u: too many quirk entries", src, lineno);
+            return ELPIS_OK;
+        }
+        q = &c->quirk[c->nquirk];
+        memset(q, 0, sizeof *q);
+        if (elpis_name_from_text(&q->zone, elpis_strtrim(val)) != ELPIS_OK) {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        elpis_name_lower(&q->zone);
+        for (;;) {
+            char *tok = elpis_strtrim(sp);
+            char *nx = strpbrk(tok, " \t,");
+            if (*tok == '\0')
+                break;
+            if (nx != NULL)
+                *nx++ = '\0';
+            if (elpis_quirk_flag_parse(tok, &q->flags) != 0) {
+                perr(&p, key, tok);
+                return ELPIS_ERR;
+            }
+            if (nx == NULL)
+                break;
+            sp = nx;
+        }
+        c->nquirk++;
         return ELPIS_OK;
     }
 
@@ -765,5 +807,11 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  %s %s -> %s",
                    c->route[i].is_stub ? "stub-zone   " : "forward-zone",
                    c->route[i].name, list);
+    }
+    for (i = 0; i < c->nquirk; i++) {
+        char zb[ELPIS_MAX_NAME * 4], fb[64];
+        elpis_quirk_flags_str(c->quirk[i].flags, fb, sizeof fb);
+        elpis_info("  quirk %s %s",
+                   elpis_name_str(&c->quirk[i].zone, zb, sizeof zb), fb);
     }
 }

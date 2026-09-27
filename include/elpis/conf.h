@@ -15,6 +15,8 @@
 #include "elpis/log.h"
 #include "elpis/dns.h"
 #include "elpis/licence.h"
+#include "elpis/name.h"
+#include "elpis/quirks.h"
 
 #define ELPIS_MAX_LISTEN 16
 #define ELPIS_MAX_ACL    64
@@ -40,6 +42,9 @@ typedef struct {
 
 typedef struct {
     char         name[ELPIS_MAX_NAME * 4];
+    /* The same name in wire form, lower case, made once when the line is
+     * read: every resolution that is not a cache hit looks the routes up. */
+    elpis_name_t zone;
     elpis_addr_t addr[8];
     unsigned     naddr;
     uint8_t      is_stub;         /* stub (iterate) vs forward (recurse) */
@@ -156,6 +161,10 @@ typedef struct {
     /* --- forwarders / stubs --------------------------------------- */
     elpis_zoneroute_t route[ELPIS_MAX_FORWARD + ELPIS_MAX_STUB];
     unsigned     nroute;
+
+    /* --- zones whose servers misbehave (quirks.c) ------------------- */
+    elpis_quirk_t quirk[ELPIS_MAX_QUIRKS];
+    unsigned     nquirk;
 
     /* --- rate limiting -------------------------------------------- */
     uint32_t     client_qps;               /* 0 = off                    */

@@ -73,19 +73,11 @@ static const elpis_zoneroute_t *route_lookup(const elpis_conf_t *c,
     unsigned i;
 
     for (i = 0; i < c->nroute; i++) {
-        elpis_name_t z;
-        if (elpis_name_from_text(&z, c->route[i].name) != ELPIS_OK)
+        const elpis_name_t *z = &c->route[i].zone;
+        if (best != NULL && z->labels <= best->zone.labels)
             continue;
-        if (!elpis_name_is_subdomain(name, &z))
-            continue;
-        if (best == NULL) {
+        if (elpis_name_is_subdomain(name, z))
             best = &c->route[i];
-        } else {
-            elpis_name_t bz;
-            if (elpis_name_from_text(&bz, best->name) == ELPIS_OK &&
-                z.labels > bz.labels)
-                best = &c->route[i];
-        }
     }
     return best;
 }
@@ -93,25 +85,19 @@ static const elpis_zoneroute_t *route_lookup(const elpis_conf_t *c,
 int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name)
 {
     const elpis_zoneroute_t *r;
-    elpis_name_t z;
 
-    if (c->nroute == 0 || (r = route_lookup(c, name)) == NULL ||
-        elpis_name_from_text(&z, r->name) != ELPIS_OK)
+    if (c->nroute == 0 || (r = route_lookup(c, name)) == NULL)
         return -1;
-    return (int)z.labels;
+    return (int)r->zone.labels;
 }
 
 /* Turn a configured route into a delegation the send path can use. */
 static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
 {
-    elpis_name_t zone;
     unsigned i;
 
-    if (elpis_name_from_text(&zone, r->name) != ELPIS_OK)
-        return 0;
     memset(d, 0, sizeof *d);
-    d->zone = zone;
-    elpis_name_lower(&d->zone);
+    d->zone = r->zone;
     d->sec      = ELPIS_SEC_UNCHECKED;
     d->ds_state = ELPIS_DS_UNKNOWN;
     d->ttl      = 3600;
@@ -497,6 +483,28 @@ static int cache_try(elpis_task_t *t)
         }
 
         /*
+         * A cached NXDOMAIN for this very name.  cache_negative() files one
+         * under the name itself, and nothing looked there: only the names
+         * above it were checked, below.  So every repeat of a name that does
+         * not exist went back out to its zone -- 30 ms each, for ever, for
+         * the lookups a browser makes most often after the ones that work.
+         * Not at or above a configured zone, for the reason that follows.
+         */
+        {
+            int routed = elpis_route_depth(c, &t->qname);
+            if ((int)t->qname.labels > routed &&
+                elpis_rcache_get(w->ctx->rcache, &t->qname, ELPIS_T_NXNAME,
+                                 t->qclass, now, 0, b) == ELPIS_OK &&
+                (b->flags & ELPIS_RRF_NXDOMAIN)) {
+                t->rcode = ELPIS_RC_NXDOMAIN;
+                add_negative_soa(t, b);
+                chain_sec(t, b->sec);
+                t->from_cache = 1;
+                return 1;
+            }
+        }
+
+        /*
          * A cached NXDOMAIN above this name covers it too (RFC 8020) -- but
          * not one at or above a configured stub-zone or forward-zone.  The
          * public tree saying "corp." does not exist is exactly why the
@@ -545,8 +553,42 @@ static int already_tried(const elpis_task_t *t, const elpis_addr_t *a)
 
 static void mark_tried(elpis_task_t *t, const elpis_addr_t *a)
 {
-    if (t->ntried < ELPIS_MAX_TRIED)
+    if (t->ntried < ELPIS_MAX_TRIED) {
+        t->tried_answered &= ~((uint32_t)1 << t->ntried);
         t->tried[t->ntried++] = *a;
+    }
+}
+
+void elpis_task_note_answered(elpis_task_t *t, const elpis_addr_t *server)
+{
+    unsigned i;
+    for (i = 0; i < t->ntried; i++)
+        if (elpis_addr_eq_ip(&t->tried[i], server))
+            t->tried_answered |= (uint32_t)1 << i;
+}
+
+/*
+ * Set up another round through the delegation: forget the servers that went
+ * quiet, so they are asked again, and keep the ones that answered marked as
+ * tried.  A server that said REFUSED or SERVFAIL a moment ago will say it
+ * again; asking it every round is what made www.kemendesa.go.id, whose
+ * servers refuse the question, take 15 s to fail instead of 2.  Returns 0
+ * when every server answered and another round has nobody to ask.
+ */
+static int next_round(elpis_task_t *t)
+{
+    elpis_addr_t keep[ELPIS_MAX_TRIED];
+    unsigned i, n = 0;
+
+    for (i = 0; i < t->ntried; i++)
+        if (t->tried_answered & ((uint32_t)1 << i))
+            keep[n++] = t->tried[i];
+    if (n == t->ntried)
+        return 0;
+    memcpy(t->tried, keep, n * sizeof keep[0]);
+    t->ntried   = n;
+    t->tried_answered = n ? (uint32_t)(((uint64_t)1 << n) - 1u) : 0u;
+    return 1;
 }
 
 /*
@@ -988,7 +1030,15 @@ static void nsaddr_done(elpis_task_t *child, void *ctxp)
 
     if (p->nchild)
         p->nchild--;
-    if (p->nchild == 0 && p->state == ELPIS_TS_NSADDR) {
+    /*
+     * On as soon as there is an address to send to, not when both lookups
+     * are done: the A for a nameserver usually lands well before the AAAA,
+     * and a zone whose own servers are slow or dead held every question to
+     * it until the slower lookup gave up.  The other one still lands here
+     * later and adds what it finds to the delegation in use.
+     */
+    if (p->state == ELPIS_TS_NSADDR &&
+        (p->nchild == 0 || (got && elpis_deleg_addr_count(&p->deleg) > 0))) {
         /*
          * Now that the nameservers have addresses, the delegation is worth
          * keeping.  A referral only gets cached when the parent volunteers
@@ -1238,6 +1288,7 @@ static int absorb_referral(elpis_task_t *t, const elpis_msg_t *m,
     t->have_deleg = 1;
     t->ntried = 0;
     t->rounds = 0;
+    t->lame_nodata = 0;
     *newzone = nd.zone;
     return 1;
 }
@@ -1419,9 +1470,15 @@ static void copy_denial_records(elpis_task_t *t, const elpis_msg_t *m)
     elpis_rr_t rr;
     int drop = 0;
 
+    /*
+     * The worker's scratch, not the stack: this was a 64 KiB frame, deep in
+     * the callbacks under a reply, and a thread stack is 128 KiB on musl.
+     * Nothing else holds rd2 across this call.
+     */
+    uint8_t *rd = t->w->rd2;
+
     elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
     while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
-        uint8_t rd[ELPIS_MAX_MSG];
         size_t rdlen;
 
         if (rr.klass != t->qclass)
@@ -1435,7 +1492,7 @@ static void copy_denial_records(elpis_task_t *t, const elpis_msg_t *m)
          * there by then.
          */
         if (elpis_rdata_canonical(rr.type, m->wire, m->len, rr.rdoff,
-                                  rr.rdlen, rd, sizeof rd, &rdlen, 1) != ELPIS_OK)
+                                  rr.rdlen, rd, ELPIS_MAX_MSG, &rdlen, 1) != ELPIS_OK)
             continue;
         if (rdlen > 0xFFFFu)
             continue;
@@ -1477,11 +1534,17 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
         minimum = elpis_get32(rd + rdlen - 4);
         ttl = rr.ttl < minimum ? rr.ttl : minimum;
         ttl = elpis_clamp_neg_ttl(c, ttl);
-        if (ttl == 0)
-            return;
-
-        if (1u + rr.name.len + rdlen > sizeof blob)
-            return;
+        /*
+         * A TTL of zero means "do not cache this", not "this proves nothing".
+         * It used to return here, before the SOA and the NSEC3 records went
+         * into the answer, so a signed zone publishing its SOA with TTL 0 --
+         * esdm.go.id does -- had every "no data" served with its proof
+         * stripped: unsigned at best, and refused once an empty answer from a
+         * signed zone was.  The proof goes into the answer either way; only
+         * the cache entry is skipped.
+         */
+        if (ttl == 0 || 1u + rr.name.len + rdlen > sizeof blob)
+            goto answer;
         blob[0] = rr.name.len;
         memcpy(blob + 1, rr.name.d, rr.name.len);
         memcpy(blob + 1 + rr.name.len, rd, rdlen);
@@ -1534,6 +1597,7 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
         }
         elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
 
+answer:
         /* Carry the SOA into the reply so the client sees the proof, and the
          * denial records with it so the validator can check that proof. */
         rrlist_add_stamped(t, ELPIS_SEC_AUTHORITY, &rr.name, ELPIS_T_SOA,
@@ -1628,6 +1692,49 @@ static resp_kind_t classify(elpis_task_t *t, const elpis_msg_t *m,
     return RESP_UNUSABLE;
 }
 
+/*
+ * A reply that says nothing, in one of the two ways a load balancer says
+ * nothing about a type it does not serve: 1 for NOERROR with no record in
+ * answer or authority, 2 for a referral back to the zone we asked -- its own
+ * NS records, and nothing else.  0 for anything else.  Neither is set AA; an
+ * authoritative one is already a plain NODATA to classify().
+ */
+static int lame_nodata_shape(const elpis_task_t *t, const elpis_msg_t *m,
+                             const elpis_name_t *zone)
+{
+    elpis_rr_iter_t it;
+    elpis_rr_t rr;
+    int drop = 0, ns = 0;
+
+    if (elpis_msg_rcode(m) != ELPIS_RC_NOERROR ||
+        (m->hdr.flags & (ELPIS_FLAG_AA | ELPIS_FLAG_TC)) ||
+        m->hdr.ancount != 0)
+        return 0;
+    elpis_rr_iter(&it, m, ELPIS_SEC_AUTHORITY);
+    while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+        if (rr.klass != t->qclass || rr.type != ELPIS_T_NS ||
+            !elpis_name_eq(&rr.name, zone))
+            return 0;
+        ns = 1;
+    }
+    return ns ? 2 : 1;
+}
+
+/*
+ * Answer "no data" for the question in hand, made up rather than read off
+ * the wire: see lame_nodata and ELPIS_QUIRK_*.  Straight to the validator,
+ * which judges an empty answer by whether the zone is signed -- insecure if
+ * it is not, refused if it is, since a signed zone's "no data" comes with a
+ * proof and this has none.
+ */
+static void synth_nodata(elpis_task_t *t)
+{
+    elpis_out_cancel(t);
+    t->rcode = ELPIS_RC_NOERROR;
+    t->synth_nodata = 1;
+    t->state = ELPIS_TS_VALIDATE;
+}
+
 static void next_server(elpis_task_t *t, int ede)
 {
     if (t->ede < 0)
@@ -1646,6 +1753,9 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
 
     if (t->state == ELPIS_TS_DEAD)
         return;
+    /* A final reply, whatever it says -- a truncated one or a BADCOOKIE is
+     * a request to ask again, and never gets here. */
+    elpis_task_note_answered(t, &q->server);
 
     zone = t->have_deleg ? t->deleg.zone : elpis_name_root;
 
@@ -1933,9 +2043,24 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
         return;
 
     case RESP_UNUSABLE:
-    default:
+    default: {
+        const elpis_conf_t *c = &w->ctx->conf;
+        int shape = t->forwarding || t->deleg_from_route
+                        ? 0 : lame_nodata_shape(t, m, &zone);
+
+        if (shape != 0) {
+            unsigned quirks = elpis_quirks_for(c->quirk, c->nquirk, &zone);
+            t->lame_nodata = 1;
+            if (quirks & (shape == 1 ? ELPIS_QUIRK_EMPTY_NODATA
+                                     : ELPIS_QUIRK_SELFREF_NODATA)) {
+                synth_nodata(t);
+                elpis_task_step(t);
+                return;
+            }
+        }
         next_server(t, ELPIS_EDE_OTHER);
         return;
+    }
     }
 }
 
@@ -2043,6 +2168,7 @@ void elpis_task_step(elpis_task_t *t)
                 elpis_name_init_root(&start);
 
             t->forwarding = 0;
+            t->lame_nodata = 0;
             {
                 const elpis_zoneroute_t *r = route_lookup(c, &start);
                 if (r != NULL && route_to_deleg(r, &t->deleg)) {
@@ -2096,9 +2222,31 @@ void elpis_task_step(elpis_task_t *t)
                 t->state = ELPIS_TS_DELEG;
                 continue;
             }
+            /*
+             * A zone whose servers never answer this type: say "no data" now
+             * rather than after every one of them has timed out.
+             */
+            if ((t->qtype == ELPIS_T_HTTPS || t->qtype == ELPIS_T_SVCB) &&
+                !t->forwarding && !t->deleg_from_route &&
+                (elpis_quirks_for(c->quirk, c->nquirk, &t->deleg.zone) &
+                 ELPIS_QUIRK_DROPS_SVCB)) {
+                synth_nodata(t);
+                continue;
+            }
             if (!choose_server(t, &server, &sinf)) {
                 if (choose_nameless(t) != NULL) {
                     t->state = ELPIS_TS_NSADDR;
+                    continue;
+                }
+                /*
+                 * Every server has been asked, none gave an answer, and at
+                 * least one said "nothing" in a load balancer's way.  That is
+                 * what the zone has to say -- 1.1.1.1 answers the same -- and
+                 * going round again only asks the same servers to say it
+                 * again, until SERVFAIL.
+                 */
+                if (t->lame_nodata) {
+                    synth_nodata(t);
                     continue;
                 }
                 /*
@@ -2111,9 +2259,9 @@ void elpis_task_step(elpis_task_t *t)
                  * every timeout has doubled that server's estimate, so each
                  * round waits longer than the last, up to query-timeout.
                  */
-                if (t->ntried > 0 && t->rounds < c->max_retries) {
+                if (t->ntried > 0 && t->rounds < c->max_retries &&
+                    next_round(t)) {
                     t->rounds++;
-                    t->ntried = 0;
                     continue;
                 }
                 elpis_task_fail(t, ELPIS_RC_SERVFAIL, ELPIS_EDE_NO_REACHABLE_AUTH);
@@ -2226,6 +2374,41 @@ static int hidden_from_client(const elpis_task_t *t, const elpis_trr_t *rr)
              rr->type == t->orig_qtype);
 }
 
+static void task_mkey(const elpis_task_t *t, elpis_mkey_t *k, uint8_t *folded)
+{
+    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
+    elpis_simd_lower(folded, folded, t->orig_qname.len);
+    k->qname    = folded;
+    k->qnamelen = t->orig_qname.len;
+    k->qtype    = t->orig_qtype;
+    k->qclass   = t->qclass;
+    k->kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
+                            (t->client_cd ? ELPIS_MK_CD : 0u));
+    elpis_mkey_hash(k);
+}
+
+/*
+ * May this NXDOMAIN go into the message cache?  Yes, unless it is a refresh
+ * of an answer that said the name exists: that one has to be confirmed a few
+ * times before it replaces the answer (refresh-nxdomain-confirmations), and
+ * note_refresh_outcome() counts them.  A refresh of a cached NXDOMAIN is the
+ * same answer again and simply replaces it.
+ *
+ * NXDOMAIN answers never went into the message cache at all, so each repeat
+ * of a name that does not exist was a task and a trip to the RRset cache --
+ * or, since that lookup was broken too, to the network.
+ */
+static int nxdomain_storable(const elpis_task_t *t)
+{
+    elpis_mkey_t k;
+    uint8_t folded[ELPIS_MAX_NAME];
+
+    if (!t->prefetch)
+        return 1;
+    task_mkey(t, &k, folded);
+    return elpis_mcache_rcode(t->w->ctx->mcache, &k) == (int)ELPIS_RC_NXDOMAIN;
+}
+
 static void task_finish(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
@@ -2303,7 +2486,9 @@ static void task_finish(elpis_task_t *t)
      * name whose prebuilt response has expired permanently on the slow path,
      * reassembling the same records on every query.
      */
-    if (t->rcode == ELPIS_RC_NOERROR && t->sec != ELPIS_SEC_BOGUS)
+    if (t->sec != ELPIS_SEC_BOGUS &&
+        (t->rcode == ELPIS_RC_NOERROR ||
+         (t->rcode == ELPIS_RC_NXDOMAIN && nxdomain_storable(t))))
         cache_store_answer(t);
     else if (t->prefetch)
         note_refresh_outcome(t);
@@ -2373,16 +2558,7 @@ static void note_refresh_outcome(elpis_task_t *t)
     elpis_mkey_t k;
     uint8_t folded[ELPIS_MAX_NAME];
 
-    memcpy(folded, t->orig_qname.d, t->orig_qname.len);
-    elpis_simd_lower(folded, folded, t->orig_qname.len);
-
-    k.qname    = folded;
-    k.qnamelen = t->orig_qname.len;
-    k.qtype    = t->orig_qtype;
-    k.qclass   = t->qclass;
-    k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
-                           (t->client_cd ? ELPIS_MK_CD : 0u));
-    elpis_mkey_hash(&k);
+    task_mkey(t, &k, folded);
 
     if (elpis_mcache_refresh_outcome(t->w->ctx->mcache, &k,
                                      t->rcode == ELPIS_RC_NXDOMAIN
@@ -2429,10 +2605,32 @@ static void cache_store_answer(elpis_task_t *t)
     /* Background refreshes must land in the cache too; that is their job. */
     if (!t->has_client && !t->prefetch && t->parent == NULL)
         return;
-    if (t->ans.n == 0 && t->rcode == ELPIS_RC_NOERROR)
+    /*
+     * Nor anything a lookup without a client left unjudged: the DNSKEY and DS
+     * sets the chain walk fetches for itself, above all.  Kept here they were
+     * served to the next client that asked, with no verdict and so no AD --
+     * "dig . DNSKEY +dnssec" answered unvalidated.  That client's own lookup
+     * now validates them.
+     */
+    if (!t->has_client && c->dnssec && t->sec == ELPIS_SEC_UNCHECKED &&
+        !t->client_cd)
         return;
+    if (t->ans.n == 0 && t->rcode == ELPIS_RC_NOERROR && !t->synth_nodata)
+        return;
+    if (t->rcode == ELPIS_RC_NXDOMAIN) {
+        /* RFC 2308 section 5: without an SOA a negative answer has no TTL,
+         * and is not cached. */
+        for (i = 0; i < t->ans.n; i++)
+            if (t->ans.rr[i].type == ELPIS_T_SOA &&
+                t->ans.rr[i].section == (uint8_t)ELPIS_SEC_AUTHORITY)
+                break;
+        if (i == t->ans.n)
+            return;
+    }
 
-    ttl = elpis_rrlist_min_ttl(&t->ans, 0);
+    ttl = elpis_rrlist_min_ttl(&t->ans, ELPIS_QUIRK_NODATA_TTL);
+    if (t->synth_nodata && ttl > ELPIS_QUIRK_NODATA_TTL)
+        ttl = ELPIS_QUIRK_NODATA_TTL;
     if (ttl == 0)
         return;
 
