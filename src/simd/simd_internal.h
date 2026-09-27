@@ -12,7 +12,8 @@
 #define HK2 0x8ebc6af09c88c6e3ull
 #define HK3 0x589965cc75374cc3ull
 
-/* Case-folded 0..15 byte tail, zero padded, split into two words. */
+/* The case-folded last n % 16 bytes of p[0..n), zero padded, as two words:
+ * what is left once a kernel has hashed every whole 16-byte block. */
 void     elpis_hash_tail(const uint8_t *p, size_t n, uint64_t *a, uint64_t *b);
 uint64_t elpis_hash_finish(uint64_t h, uint64_t a, uint64_t b, size_t n);
 

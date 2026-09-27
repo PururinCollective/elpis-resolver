@@ -112,7 +112,7 @@ uint64_t elpis_avx2_hash_ci(const uint8_t *p, size_t n, uint64_t seed)
         h = elpis_hash_step(h, elpis_load64(tmp), elpis_load64(tmp + 8));
         i += 16;
     }
-    elpis_hash_tail(p + i, n - i, &a, &b);
+    elpis_hash_tail(p, n, &a, &b);
     _mm256_zeroupper();
     return elpis_hash_finish(h, a, b, n);
 }

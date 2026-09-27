@@ -24,6 +24,7 @@
 #include "elpis/ctx.h"
 #include "elpis/deleg.h"
 #include "elpis/conflict.h"
+#include "simd/simd_internal.h"
 
 #include "vectors.h"
 
@@ -113,6 +114,32 @@ static void test_util(void)
     CHECK(elpis_parse_duration("7d", &d) == 0 && d == 604800, "parse 7d");
 }
 
+/*
+ * The hash as it was first written: each 16-byte block, and then the tail,
+ * case-folded a byte at a time into a zeroed buffer.  Every kernel shares
+ * elpis_hash_tail(), the scalar one included, so comparing them with each
+ * other cannot catch a mistake in it; this can.
+ */
+static uint64_t ref_hash_ci(const uint8_t *p, size_t n, uint64_t seed)
+{
+    uint64_t h = elpis_hash_seed(seed);
+    uint8_t t[16];
+    size_t i = 0, j, k;
+
+    for (;;) {
+        k = n - i < 16 ? n - i : 16;
+        memset(t, 0, sizeof t);
+        for (j = 0; j < k; j++) {
+            uint8_t c = p[i + j];
+            t[j] = (uint8_t)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+        }
+        if (k < 16)
+            return elpis_hash_finish(h, elpis_load64(t), elpis_load64(t + 8), n);
+        h = elpis_hash_step(h, elpis_load64(t), elpis_load64(t + 8));
+        i += 16;
+    }
+}
+
 /* ================================================================== */
 static void test_simd(void)
 {
@@ -145,6 +172,44 @@ static void test_simd(void)
     }
     if (n > 260)
         g_pass += 3;
+
+    /*
+     * The hash must match the byte-at-a-time reference at every length and
+     * alignment.  Each name ends exactly where its allocation does, so a
+     * kernel reading past it trips ASan; at offset 0 so does one reading
+     * before it.
+     */
+    {
+        uint8_t src[300 + 16];
+        uint32_t x = 0x9E3779B9u;
+        size_t off;
+        int ok = 1;
+
+        for (i = 0; i < sizeof src; i++) {
+            x = x * 1664525u + 1013904223u;
+            src[i] = (uint8_t)(x >> 24);
+            if ((x & 0x300u) == 0)                /* plenty of A-Z and a-z */
+                src[i] = (uint8_t)("AZaz@[`{"[(x >> 12) & 7u]);
+            else if ((x & 0x300u) == 0x100u)
+                src[i] = (uint8_t)('A' + (x >> 12) % 26u + ((x >> 20) & 1u) * 32u);
+        }
+        for (n = 0; n <= 300 && ok; n++)
+            for (off = 0; off < 16 && ok; off++) {
+                uint8_t *buf = (uint8_t *)elpis_malloc(off + n);
+                uint64_t want;
+
+                memcpy(buf + off, src + off, n);
+                want = ref_hash_ci(buf + off, n, n * 131u + off);
+                if (elpis_scalar_hash_ci(buf + off, n, n * 131u + off) != want ||
+                    elpis_simd_hash_ci(buf + off, n, n * 131u + off) != want) {
+                    CHECK(0, "hash differs from the reference at n=%zu off=%zu", n, off);
+                    ok = 0;
+                }
+                elpis_free(buf);
+            }
+        if (ok)
+            g_pass++;
+    }
 
     /* Case folding must be exactly ASCII A-Z, nothing else. */
     {
