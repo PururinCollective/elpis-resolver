@@ -1,0 +1,41 @@
+# local.mk -- your own settings for every build of this tree.
+#
+#   cp local.mk.example local.mk
+#
+# Then uncomment what you need.  make reads local.mk before anything else,
+# and git ignores it, so a pull never touches it.  It also reaches the builds
+# that do not get your shell's environment: `sudo make install`, and
+# contrib/elpis-update.sh, which runs as root.
+#
+# Precedence, strongest first: `make NAME=value` on the command line, then
+# this file, then the environment, then the Makefile's own defaults.  Every
+# setting is described in docs/COMPILING.md.  A changed setting rebuilds
+# whatever it affects; no `make clean` is needed.
+
+# Tuned for the CPU this runs on.  Keep -fno-strict-aliasing.
+# OPT = -O3 -fno-strict-aliasing -march=native
+# OPT = -O3 -fno-strict-aliasing -march=znver3 -mtune=znver3
+
+# OPT for `make static`, if it should differ from OPT.
+# STATIC_OPT = -O3 -fno-strict-aliasing -march=x86-64-v3
+
+# The compiler.
+# CC = clang
+
+# Where `make install` puts it, and where the binary looks for a config after
+# its own directory.
+# PREFIX = /opt/elpis-resolver
+# SYSCONFDIR = /etc
+
+# The Ed25519 public key deployment licences are checked against, as
+# `elpis-licence keygen` printed it (docs/licensing.md).  Here rather than in
+# your shell: sudo and elpis-update would build without it, and a binary with
+# no issuer key rejects every licence.
+# LICENCE_ISSUER = 6cd740f1...dd6315
+
+# Cross builds: the target architecture, and the compiler for it.
+# UNAME_M = aarch64
+# CC = aarch64-linux-gnu-gcc
+
+# The compiler for `make fuzz`.
+# FUZZ_CC = clang

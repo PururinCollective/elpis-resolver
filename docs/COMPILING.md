@@ -92,7 +92,8 @@ every object is compiled with.
 
 ## Build variables
 
-Pass these on the make command line, for example `make OPT="-O2"`.
+Pass these on the make command line, for example `make OPT="-O2"`, or keep
+them in `local.mk` (below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -110,6 +111,37 @@ Pass these on the make command line, for example `make OPT="-O2"`.
 
 Keep `-fno-strict-aliasing` when you replace `OPT`. It is in the default,
 and it is what the code is built and tested with.
+
+### Keeping them in `local.mk`
+
+Settings you want on every build go in `local.mk` at the top of the tree, one
+`NAME = value` per line:
+
+```bash
+cp local.mk.example local.mk
+```
+
+```make
+OPT = -O3 -fno-strict-aliasing -march=znver3 -mtune=znver3
+LICENCE_ISSUER = 6cd740f1...dd6315
+```
+
+Git ignores the file, so a pull never touches it, and `make` says which
+settings it took from it:
+
+```
+  local.mk sets: OPT LICENCE_ISSUER
+```
+
+It also reaches the builds that do not get your shell's environment:
+`sudo make install`, and `contrib/elpis-update.sh`, which runs as root. A
+variable set in `.bashrc` is lost in both, and that matters most for
+`LICENCE_ISSUER`, because a binary built without the key rejects every
+licence.
+
+A value on the command line still wins over `local.mk`, and `local.mk` wins
+over the environment. Changing it needs no `make clean`: the flags and the
+issuer key are watched, and whatever they affect is rebuilt.
 
 ## Tuning for your CPU
 
