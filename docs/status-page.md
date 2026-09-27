@@ -165,6 +165,19 @@ location / {
 nginx holds the key, Elpis stays on loopback, and the certificate is the same
 one the rest of the host uses. Nothing has to be copied or kept in step.
 
+It does not need the whole host. Mounted under a path of its own, next to
+whatever else the site serves — Apache here:
+
+```apache
+ProxyPass /elpis/ http://127.0.0.1:8082/
+```
+
+The page makes every request relative to the address it was loaded from, and
+the session cookie is scoped to that path, so Elpis never needs to know the
+prefix and never hands its session to the rest of the host. Mounting it
+without the trailing slash, `ProxyPass /elpis http://127.0.0.1:8082`, works
+too.
+
 ## The password
 
 | config | what happens |

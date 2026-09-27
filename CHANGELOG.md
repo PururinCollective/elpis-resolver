@@ -10,6 +10,27 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**The status page works behind a reverse proxy that mounts it under a path.**
+Proxied as `https://host/elpis/`, the page loaded but then asked for
+`/api/status` at the root of the host, which the proxy did not pass to Elpis,
+so logging in never got past the login box. The page now makes every request
+relative to where it was loaded from. The session cookie is no longer set with
+`Path=/`, either: it is scoped to the path the page sits under, so it is not
+sent to every other application on that host.
+
+### Changed
+
+**Stopping elpis under the shipped systemd unit starts systemd-resolved
+again.** Starting elpis already stopped resolved through `Conflicts=`, and
+stopping it left the host with no resolver at all. Now `ExecStopPost=` starts
+resolved again when elpis stops and is not coming back. A restart, a crash
+that `Restart=` recovers from, and a system shutdown leave resolved alone, and
+so does a resolved you have disabled. Reinstall the unit to pick this up.
+
 ## 2.0.2 — 2026-09-25
 
 ### Fixed

@@ -92,7 +92,9 @@ Set `stop-systemd-resolved: no` to have it refuse instead. Nothing else is
 ever stopped — an unrelated daemon on the port is reported and Elpis exits.
 Under the shipped systemd unit it runs as `elpis`, not root, so it cannot stop
 anything; the unit uses `Conflicts=systemd-resolved.service` and lets systemd
-do it.
+do it. Stopping elpis starts resolved again, so the host is not left with no
+resolver at all — unless resolved is disabled, in which case it stays off. A
+restart, or a crash that `Restart=` recovers from, leaves it stopped.
 
 ## Malformed input
 

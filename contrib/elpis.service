@@ -41,8 +41,9 @@ Wants=network-online.target
 
 # Running under this unit, elpis is not root and cannot stop anything itself.
 # Let systemd do it: starting elpis stops systemd-resolved, and the two can
-# never be active at once fighting over port 53.  Drop these two lines if you
-# keep resolved and run elpis on another port.
+# never be active at once fighting over port 53.  Stopping elpis starts
+# resolved again -- see ExecStopPost below.  Drop these two lines, and that
+# one, if you keep resolved and run elpis on another port.
 #
 # Remember that stopping resolved leaves /etc/resolv.conf pointing at a stub
 # that is no longer listening -- repoint it at elpis, or at 127.0.0.1.
@@ -55,6 +56,26 @@ ExecStart=/opt/elpis-resolver/bin/elpis -d
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3s
+
+# Hand port 53 back to systemd-resolved when elpis stops, so the host is not
+# left with no resolver at all.  OnSuccess= looks like the tool for this and
+# is not: on a restart it starts resolved while elpis is on its way back up,
+# and systemd lets both run.  So this starts it only when elpis is not coming
+# back -- a clean exit (a crash is Restart='s business), no start or restart
+# queued for this unit, the host not shutting down -- and only if resolved is
+# enabled, so one you disabled on purpose stays off.  "+" runs it as root and
+# outside the sandbox, which blocks the AF_UNIX socket systemctl talks over;
+# "-" keeps a failure here from counting as elpis failing.  --no-block because
+# resolved's start waits for this stop to finish.
+#
+# If Restart= is changed to always, a clean exit restarts elpis too, and the
+# first test below no longer means what it says.
+ExecStopPost=-+/bin/sh -c '\
+    [ "$$SERVICE_RESULT" = success ] || exit 0; \
+    systemctl is-enabled -q systemd-resolved.service || exit 0; \
+    [ "$(systemctl is-system-running)" != stopping ] || exit 0; \
+    case "$(systemctl list-jobs --no-legend %n)" in *start*) exit 0;; esac; \
+    exec systemctl --no-block start systemd-resolved.service'
 
 User=elpis
 Group=elpis

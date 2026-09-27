@@ -939,8 +939,15 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
             return;
         }
         session_new(tok, sizeof tok);
+        /*
+         * No Path: the browser then scopes the cookie to the directory this
+         * request came through -- "/api" here, "/elpis/api" behind a proxy
+         * that mounts the page at /elpis/.  "Path=/" would hand the session
+         * to every other application on that host, and two status pages
+         * proxied side by side would log each other out.
+         */
         snprintf(set, sizeof set,
-                 "Set-Cookie: elpis=%s; Path=/; HttpOnly; SameSite=Strict; "
+                 "Set-Cookie: elpis=%s; HttpOnly; SameSite=Strict; "
                  "Max-Age=%u\r\n", tok, (unsigned)SESSION_SECS);
         respond(fd, "200 OK", "application/json", set, "{\"ok\":true}", 11);
         return;
@@ -949,7 +956,7 @@ static void handle_conn(elpis_ctx_t *ctx, int fd)
     if (strncmp(req, "POST /api/logout", 16) == 0) {
         session_drop(tok);
         respond(fd, "200 OK", "application/json",
-                "Set-Cookie: elpis=; Path=/; HttpOnly; Max-Age=0\r\n",
+                "Set-Cookie: elpis=; HttpOnly; Max-Age=0\r\n",
                 "{\"ok\":true}", 11);
         return;
     }
