@@ -45,12 +45,26 @@ void bn_mul(bn_t *r, const bn_t *a, const bn_t *b);
 /* r = a mod m, by shift-and-subtract. */
 void bn_mod(bn_t *r, const bn_t *a, const bn_t *m);
 
+/*
+ * 64-bit limbs where the compiler has a 128-bit product (GCC and Clang on
+ * every 64-bit target), for moduli of an even number of 32-bit limbs: R is
+ * the same 2^(32k) either way, so the two paths are interchangeable and the
+ * portable one stays for everything else.
+ */
+#if defined(__SIZEOF_INT128__)
+#define BN_HAVE_U128 1
+#endif
+
 /* Montgomery arithmetic modulo an odd m. */
 typedef struct {
     bn_t     m;
     bn_t     rr;       /* R^2 mod m, R = 2^(32 * m.n)      */
     uint32_t m0inv;    /* -m^-1 mod 2^32                    */
     unsigned k;        /* limb count of m                   */
+#ifdef BN_HAVE_U128
+    uint64_t m64[BN_MAX_LIMBS / 2];   /* m in 64-bit limbs, when k is even */
+    uint64_t m0inv64;                 /* -m^-1 mod 2^64                    */
+#endif
 } mont_t;
 
 int  mont_init(mont_t *c, const bn_t *m);
