@@ -759,6 +759,44 @@ static uint32_t hold_for(const elpis_worker_t *w, const elpis_outq_t *q)
     return w->ctx->conf.server_hold_s;
 }
 
+/*
+ * Tell the status page a server has been held, and on whose behalf.  The
+ * query may be a child lookup's -- a nameserver's address, a DNSKEY -- so the
+ * client is the one at the top of the chain, if one is still waiting.
+ */
+static void note_hold(elpis_worker_t *w, const elpis_outq_t *q,
+                      const elpis_task_t *t)
+{
+    elpis_tmhold_t h;
+    elpis_infra_info_t inf;
+    const elpis_task_t *top = t;
+
+    if (!elpis_tm_enabled)
+        return;
+    elpis_infra_get(w->ctx->infra, &q->server, &inf);
+    memset(&h, 0, sizeof h);
+    h.server = &q->server;
+    h.streak = inf.silent_since;
+    h.types  = inf.silent_types;
+    h.now    = elpis_cached_now_s();
+    if (t == NULL) {
+        h.who = "nobody waiting";
+    } else {
+        while (top->parent != NULL)
+            top = top->parent;
+        if (t->have_deleg)
+            h.zone = &t->deleg.zone;
+        h.qname = &top->orig_qname;
+        h.qtype = top->orig_qtype;
+        if (top->has_client)
+            h.client = &top->client;
+        else
+            h.who = top->prefetch ? "prefetch" :
+                    top->warming  ? "warming"  : "internal";
+    }
+    elpis_tm_held(&h);
+}
+
 static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_outq_t *q = (elpis_outq_t *)tm->data;
@@ -773,8 +811,9 @@ static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
         return;
     }
 
-    elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
-                        elpis_cached_now_s(), hold_for(w, q));
+    if (elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
+                            elpis_cached_now_s(), hold_for(w, q)))
+        note_hold(w, q, t);
     elpis_stat_inc(&w->stats.timeouts, 1);
 
     others = (t != NULL && out_unhook(t, q) != NULL);
@@ -860,8 +899,9 @@ static void tcp_fail(elpis_worker_t *w, elpis_outq_t *q, int ede)
     if (t != NULL) {
         t->out = NULL;
         q->task = NULL;
-        elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
-                            elpis_cached_now_s(), hold_for(w, q));
+        if (elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
+                                elpis_cached_now_s(), hold_for(w, q)))
+            note_hold(w, q, t);
         elpis_resolver_on_error(t, q, ede);
     }
     elpis_out_free(w, q);

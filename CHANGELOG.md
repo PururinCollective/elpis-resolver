@@ -45,8 +45,10 @@ SERVFAIL (EDE 22) at once instead of after `query-total-timeout`. Before this,
 each new name under `spectrum.com`, whose Charter servers answer nothing from
 some networks, cost sixteen queries and up to 20 s. Holds are per question
 type, so a server that drops only HTTPS is still asked for A. The status page
-and SIGUSR1 count these answers as **servers held**. Set `0` to turn holds
-off. See
+counts these answers as **cut short by a hold**, and SIGUSR1 as `held=`. A new
+**Held servers** window lists each server held, the zone, the types it is held
+for, a countdown to its next try, and the client and name whose query set the
+hold off. Set `0` to turn holds off. See
 [a zone whose servers never answer](docs/troubleshooting.md#a-zone-whose-servers-never-answer).
 
 ### Changed

@@ -631,6 +631,106 @@ static void json_roots(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, "],");
 }
 
+/*
+ * Servers held down, what each is doing now, and whose query set it off.
+ *
+ * The rows say who and when; the infra cache says what the hold is doing at
+ * this moment, which is what the resolver itself goes by.  A server that has
+ * answered again stays listed for a while, marked so, and then drops off.
+ */
+#define HELD_SHOW_CLEARED_S 600u
+
+static void json_asker(buf_t *b, const char *name, const elpis_tmasker_t *a,
+                       uint32_t now)
+{
+    bputq(b, name);
+    bputs(b, ":{\"client\":"); bputq(b, a->client);
+    bputs(b, ",\"real\":");    bputs(b, a->is_client ? "true" : "false");
+    bputs(b, ",\"name\":");    bputq(b, a->qname);
+    bputs(b, ",\"type\":");    bputq(b, a->qname[0] ? elpis_type_name(a->qtype) : "");
+    bputs(b, ",\"ago\":");     bputu(b, now > a->at ? now - a->at : 0);
+    bputs(b, "}");
+}
+
+static void json_types(buf_t *b, uint8_t types)
+{
+    static const struct { uint8_t bit; const char *name; } k[4] = {
+        { ELPIS_QC_A, "A" }, { ELPIS_QC_AAAA, "AAAA" },
+        { ELPIS_QC_SVCB, "HTTPS/SVCB" }, { ELPIS_QC_OTHER, "other" }
+    };
+    unsigned i, n = 0;
+
+    bputs(b, "[");
+    for (i = 0; i < 4; i++)
+        if (types & k[i].bit) {
+            if (n++) bputs(b, ",");
+            bputq(b, k[i].name);
+        }
+    bputs(b, "]");
+}
+
+static void json_holds(elpis_ctx_t *ctx, buf_t *b)
+{
+    static elpis_tmheld_t rows[ELPIS_TM_HELD];
+    static elpis_tmrow_t  turned[ELPIS_TM_HELD];
+    uint32_t now = elpis_now_s();
+    unsigned n, nt, i, j, out = 0;
+
+    n  = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    nt = elpis_tm_top(ELPIS_TOP_HELD_ZONE, turned, ELPIS_TM_HELD);
+
+    bputs(b, "\"holds\":{\"hold\":"); bputu(b, ctx->conf.server_hold_s);
+    bputs(b, ",\"cut\":");            bputu(b, ctx->stats.held);
+    bputs(b, ",\"rows\":[");
+    for (i = 0; i < n; i++) {
+        const elpis_tmheld_t *r = &rows[i];
+        elpis_infra_info_t inf;
+        const char *state;
+        uint64_t zone_turned = 0;
+        uint32_t eta = 0;
+        uint8_t types;
+        char ab[80];
+
+        elpis_infra_get(ctx->infra, &r->server, &inf);
+        if (inf.hold_until == 0) {
+            if (now - r->last.at > HELD_SHOW_CLEARED_S)
+                continue;
+            state = "answering";
+            types = r->types;
+        } else if (now < inf.hold_until) {
+            state = "held";
+            eta   = inf.hold_until - now;
+            types = inf.silent_types;
+        } else {
+            state = "due";              /* the next query is the probe */
+            types = inf.silent_types;
+        }
+        for (j = 0; j < nt; j++)
+            if (r->zone[0] && !strcmp(turned[j].key, r->zone))
+                zone_turned = turned[j].count;
+
+        if (out++) bputs(b, ",");
+        elpis_addr_str(&r->server, ab, sizeof ab);
+        bputs(b, "{\"server\":");   bputq(b, ab);
+        bputs(b, ",\"zone\":");     bputq(b, r->zone);
+        bputs(b, ",\"state\":");    bputq(b, state);
+        bputs(b, ",\"eta\":");      bputu(b, eta);
+        bputs(b, ",\"types\":");    json_types(b, types);
+        bputs(b, ",\"silent\":");
+        bputu(b, inf.silent_since && now > inf.silent_since
+                 ? now - inf.silent_since : 0);
+        bputs(b, ",\"timeouts\":"); bputu(b, inf.timeouts);
+        bputs(b, ",\"holds\":");    bputu(b, r->holds);
+        bputs(b, ",\"turned\":");   bputu(b, zone_turned);
+        bputs(b, ",");
+        json_asker(b, "by", &r->first, now);
+        bputs(b, ",");
+        json_asker(b, "last", &r->last, now);
+        bputs(b, "}");
+    }
+    bputs(b, "]},");
+}
+
 static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 {
     const elpis_stats_t *s = &ctx->stats;
@@ -701,6 +801,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, "},");
 
     json_roots(ctx, b);
+    json_holds(ctx, b);
 
     bputs(b, "\"loop\":{\"turns\":");
     bputu(b, ctx->loop.turns);

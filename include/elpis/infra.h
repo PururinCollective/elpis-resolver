@@ -105,9 +105,10 @@ void elpis_infra_rtt_ok(elpis_cache_t *c, const elpis_addr_t *a, uint32_t rtt_ms
  * A question of type `qtype` went unanswered at `now`.  `hold_s` is how long
  * to hold the server if this makes it due, and 0 when it must not be held:
  * holds are off, or nobody else answered either, so the silence may well be
- * this host's own network.
+ * this host's own network.  Returns 1 when this timeout held the server, or
+ * held it for longer.
  */
-void elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a,
+int  elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a,
                          uint16_t qtype, uint32_t now, uint32_t hold_s);
 /* The ELPIS_QC_* class a question type is held under. */
 unsigned elpis_infra_qclass(uint16_t qtype);
