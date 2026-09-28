@@ -29,7 +29,11 @@ now answers a Malaysian subnet and a Singaporean one with different addresses.
 An answer tailored to one subnet is cached for that subnet alone and never
 enters the shared RRset cache. The root and TLDs are never sent a subnet, and
 a server that ignores it is sent none for an hour. `ecs-zone:` narrows it to
-chosen zones. The client's option is echoed back with the answer's scope. See
+chosen zones. The client's option is echoed back with the answer's scope. When
+a query carries more than one ECS option, the last one is used. AdGuard Home
+appends the client's subnet to the `0.0.0.0/0` Firefox's DNS over HTTPS sends.
+The first build refused such queries with FORMERR, and Firefox in TRR-only mode
+then could not resolve any name it had not cached. See
 [EDNS Client Subnet](docs/configuration.md#edns-client-subnet).
 
 **`make` merges new shipped defaults into `bin/elpis.conf`.** The config used
