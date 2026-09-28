@@ -13,6 +13,7 @@ typedef struct {
     unsigned want_nsid : 1;
     unsigned have_cookie : 1;
     unsigned have_keepalive : 1;
+    unsigned have_ecs : 1;      /* write `ecs` as an RFC 7871 option */
     uint8_t  cookie[40];
     uint8_t  cookie_len;
     int      ede_code;          /* -1 for none */
@@ -20,6 +21,7 @@ typedef struct {
     uint16_t keepalive;         /* idle timeout, 100 ms units */
     uint16_t pad_to;            /* pad the message to a multiple; 0 = off */
     const char *nsid;           /* server identifier to echo back */
+    elpis_ecs_t ecs;
 } elpis_edns_t;
 
 void elpis_edns_init(elpis_edns_t *e, uint16_t bufsize, int do_bit);

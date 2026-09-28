@@ -1295,6 +1295,21 @@ static int build_set(elpis_task_t *t, unsigned i, elpis_rrset_buf_t *set)
     return set->count > 0;
 }
 
+/*
+ * Write the verdict on the RRset led by `i` back into the RRset cache.  Not
+ * for records an authority tailored to one client subnet: the shared cache
+ * never held them and must not start now.  And marked as the view from here
+ * when that is what the answer was (see ELPIS_RRF_ECS_LOCAL).
+ */
+static void put_verdict(elpis_task_t *t, unsigned i, elpis_rrset_buf_t *set)
+{
+    if (t->ans.rr[i].tailored)
+        return;
+    if (t->ecs_local)
+        set->flags |= ELPIS_RRF_ECS_LOCAL;
+    elpis_rcache_put_buf(t->w->ctx->rcache, set, t->w->ctx->conf.serve_stale, 0);
+}
+
 /* The signer of the RRset led by index `i`, if it has one. */
 static int set_signer(elpis_task_t *t, unsigned i, elpis_name_t *out)
 {
@@ -1680,8 +1695,7 @@ static void collect_unsigned_zones(elpis_task_t *t, val_t *v)
             v->status[i] = SS_INSECURE;
             if (build_set(t, i, set)) {
                 set->sec = (uint8_t)ELPIS_SEC_INSECURE;
-                elpis_rcache_put_buf(t->w->ctx->rcache, set,
-                                     t->w->ctx->conf.serve_stale, 0);
+                put_verdict(t, i, set);
             }
             continue;
         }
@@ -1746,7 +1760,7 @@ static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached
          */
         if (build_set(t, i, set)) {
             set->sec = (uint8_t)ELPIS_SEC_INSECURE;
-            elpis_rcache_put_buf(w->ctx->rcache, set, w->ctx->conf.serve_stale, 0);
+            put_verdict(t, i, set);
         }
     }
 }
@@ -1781,7 +1795,7 @@ static void verify_for_current(elpis_task_t *t, val_t *v)
              * the same data carries AD without walking the chain again.
              */
             set->sec = (uint8_t)ELPIS_SEC_SECURE;
-            elpis_rcache_put_buf(w->ctx->rcache, set, w->ctx->conf.serve_stale, 0);
+            put_verdict(t, i, set);
         } else {
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
@@ -1817,7 +1831,7 @@ static void mark_insecure_for_current(elpis_task_t *t, val_t *v)
          */
         if (build_set(t, i, set)) {
             set->sec = (uint8_t)ELPIS_SEC_INSECURE;
-            elpis_rcache_put_buf(w->ctx->rcache, set, w->ctx->conf.serve_stale, 0);
+            put_verdict(t, i, set);
         }
     }
 }

@@ -33,8 +33,29 @@ typedef struct {
     uint8_t        kflags;
     uint16_t       qtype;
     uint16_t       qclass;
+    /*
+     * EDNS Client Subnet.  A family of 0 is the entry every client shares;
+     * otherwise this is an answer an authority tailored to the subnet
+     * ecs.addr/ecs.source (RFC 7871), which only that subnet may be given.
+     * SCOPE is not part of the key.
+     */
+    elpis_ecs_t    ecs;
+    /*
+     * Lookups only, and only of the shared entry: pass over one learned
+     * without a subnet from a server that may tailor its answers.  That is
+     * the answer for wherever this resolver is, and a client with a subnet
+     * of its own should get one for where it is.
+     */
+    uint8_t        shared_only;
     uint64_t       hash;        /* filled by elpis_mkey_hash()     */
 } elpis_mkey_t;
+
+/* Zero the ECS part of a key: the shared entry. */
+ELPIS_INLINE void elpis_mkey_shared(elpis_mkey_t *k)
+{
+    memset(&k->ecs, 0, sizeof k->ecs);
+    k->shared_only = 0;
+}
 
 void elpis_mkey_hash(elpis_mkey_t *k);
 
@@ -48,6 +69,7 @@ typedef struct {
     unsigned dropped_ns: 1;
     unsigned want_prefetch : 1; /* nearly expired; refresh it      */
     uint16_t ancount, nscount, arcount;
+    uint8_t  ecs_scope;         /* SCOPE the authority gave it     */
 } elpis_mserve_t;
 
 elpis_cache_t *elpis_mcache_new(uint64_t bytes, unsigned shards);
@@ -91,12 +113,18 @@ int elpis_mcache_rcode(elpis_cache_t *c, const elpis_mkey_t *k);
 int elpis_mcache_refresh_outcome(elpis_cache_t *c, const elpis_mkey_t *k,
                                  int outcome, unsigned nx_confirm);
 
+/*
+ * `ecs_scope` is the SCOPE a tailored answer came back with.  `ecs_local`
+ * marks a shared entry as the view from here -- learned without a subnet from
+ * a server that may tailor -- which a lookup with shared_only passes over.
+ */
 int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint8_t *wire, size_t len, size_t qend,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale);
+                       uint32_t ttl, uint32_t max_stale,
+                       uint8_t ecs_scope, int ecs_local);
 
 /* ================================================================== */
 /* RRset cache                                                         */
@@ -148,6 +176,13 @@ typedef struct {
  * a client is never answered from it.
  */
 #define ELPIS_RRF_REFERRAL 0x20u
+/*
+ * Learned, for want of a client subnet, from a server that would have been
+ * sent one (EDNS Client Subnet): the answer for wherever this resolver is.
+ * A resolution with a subnet of its own passes over it.  Tailored answers
+ * never come here at all.
+ */
+#define ELPIS_RRF_ECS_LOCAL 0x40u
 
 elpis_cache_t *elpis_rcache_new(uint64_t bytes, unsigned shards);
 

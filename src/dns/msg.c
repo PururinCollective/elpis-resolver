@@ -140,6 +140,14 @@ static int parse_opt(elpis_msg_t *m, const elpis_rr_t *rr, unsigned flags,
             break;
         case ELPIS_OPT_ECS:
             if (olen < 4) { *drop = ELPIS_DROP_EDNS; return ELPIS_EFORMAT; }
+            /*
+             * Anything else wrong with it is kept, not dropped: whether a
+             * bad subnet is worth a FORMERR depends on whether ECS is on,
+             * and that is for the server to say.  A second option is as bad
+             * as a malformed one (RFC 7871).
+             */
+            if (m->have_ecs || elpis_ecs_parse(&m->ecs, m->wire + p, olen) != ELPIS_OK)
+                m->ecs_bad = 1;
             m->have_ecs = 1;
             break;
         default:

@@ -69,6 +69,16 @@ struct elpis_outq {
     unsigned       caps_test   : 1;   /* sent as-is to see if 0x20 is why  */
     /* Timed out, and kept a while longer in case the answer is only late. */
     unsigned       late        : 1;
+    /*
+     * EDNS Client Subnet.  used_ecs: `ecs` went out with the query.
+     * ecs_local: it did not, for want of a subnet, to a server that would
+     * have been sent one -- so the answer is the view from here.  ecs_scope
+     * is the SCOPE the answer came back with, once it has been checked.
+     */
+    unsigned       used_ecs    : 1;
+    unsigned       ecs_local   : 1;
+    uint8_t        ecs_scope;
+    elpis_ecs_t    ecs;
     uint32_t       timeout_ms;
 
     elpis_timer_t  timer;
@@ -153,6 +163,39 @@ struct elpis_task {
     unsigned         client_edns : 1, client_cookie_ok : 1;
     uint8_t          client_cookie[40];
     uint8_t          client_cookie_len;
+    /*
+     * The ECS option the client sent, to echo back (RFC 7871); ecs_echo is
+     * clear when there is none to echo.  ecs_own: the subnet below is the
+     * client's own, not this resolver's standing in for it, so a SCOPE may
+     * be passed on.
+     */
+    unsigned         ecs_echo : 1, ecs_own : 1;
+    elpis_ecs_t      ecs_client;
+
+    /*
+     * ---- EDNS Client Subnet, with ecs-ip-type: client ----
+     *
+     * `ecs` is the subnet this resolution is for, sent to every authority
+     * that takes one; a family of 0 means there is none.  Only top-level
+     * resolutions have one -- the nameserver and DNSSEC lookups they spawn
+     * are the same for every client -- and DNS64's A lookup, which is part of
+     * the answer.
+     *
+     * Once an authority tailors an answer to it (SCOPE above 0), what comes
+     * back is for that subnet alone: ecs_tailored is set, ecs_scope keeps the
+     * longest SCOPE seen, and none of it goes into the shared RRset cache or
+     * the shared message-cache entry.  ecs_local is the opposite case: the
+     * answer came, for want of a subnet, from a server that would have taken
+     * one, so it is the view from here and is marked as such.
+     *
+     * resp_tailored and resp_local say the same of the response being
+     * processed right now, for the code that caches its records.
+     * ecs_refresh_tailored: this refresh is of a tailored entry.
+     */
+    elpis_ecs_t      ecs;
+    uint8_t          ecs_scope;
+    unsigned         ecs_tailored : 1, ecs_local : 1, ecs_refresh_tailored : 1;
+    unsigned         resp_tailored : 1, resp_local : 1;
 
     /* ---- what is being resolved right now ---- */
     elpis_name_t    qname;
@@ -384,6 +427,12 @@ int  elpis_axfr_root(elpis_ctx_t *ctx);
 int  elpis_probe_roots(elpis_ctx_t *ctx);
 /* Find our public addresses and network, through our own recursion. */
 int  elpis_selfinfo_start(elpis_worker_t *w);
+/*
+ * This resolver's public subnet, for ecs-ip-type: this and for clients that
+ * have none of their own: IPv4 when known, otherwise IPv6, cut to the
+ * configured prefix.  Returns 0 while neither has been found.
+ */
+int  elpis_selfinfo_ecs(elpis_ctx_t *ctx, elpis_ecs_t *out);
 
 /* ---- helpers shared between the modules ---- */
 /* Labels in the configured stub-zone or forward-zone that `name` is inside

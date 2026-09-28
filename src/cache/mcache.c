@@ -30,19 +30,36 @@ typedef struct {
     uint32_t ar_off;       /* blob-relative start of the additional section*/
     uint32_t prefetch_at;  /* last time a refresh was triggered, monotonic */
     /*
+     * EDNS Client Subnet, all zero for the shared entry.  These four bytes
+     * sit in what was the struct's tail padding, so they cost nothing.
+     */
+    uint8_t  ecs_family;
+    uint8_t  ecs_source;
+    uint8_t  ecs_scope;
+    uint8_t  ecs_local;    /* shared, but the view from here: see store.h */
+    /*
      * Trailing payload, in this order:
      *   uint8_t  qname[qnamelen]
+     *   uint8_t  ecs_addr[ELPIS_ECS_ADDRLEN(ecs_source)]   (tailored only)
      *   uint32_t ttl_off[nttl]      (blob-relative, ascending)
      *   uint32_t ttl_val[nttl]
      *   uint8_t  blob[bloblen]
      */
 } ment_t;
 
+/* The key bytes after the struct: the name, then any subnet address. */
+ELPIS_INLINE size_t ment_keylen(uint8_t qnamelen, uint8_t ecs_family,
+                                uint8_t ecs_source)
+{
+    return (size_t)qnamelen + (ecs_family ? ELPIS_ECS_ADDRLEN(ecs_source) : 0u);
+}
+
 ELPIS_INLINE uint8_t *ment_qname(ment_t *e) { return (uint8_t *)(e + 1); }
 ELPIS_INLINE const uint8_t *ment_qname_c(const ment_t *e) { return (const uint8_t *)(e + 1); }
 ELPIS_INLINE uint32_t *ment_ttloff(ment_t *e)
 {
-    return (uint32_t *)(void *)(ment_qname(e) + ((e->qnamelen + 3u) & ~3u));
+    size_t kl = ment_keylen(e->qnamelen, e->ecs_family, e->ecs_source);
+    return (uint32_t *)(void *)(ment_qname(e) + ((kl + 3u) & ~(size_t)3u));
 }
 ELPIS_INLINE uint32_t *ment_ttlval(ment_t *e) { return ment_ttloff(e) + e->nttl; }
 ELPIS_INLINE uint8_t  *ment_blob(ment_t *e)
@@ -50,9 +67,9 @@ ELPIS_INLINE uint8_t  *ment_blob(ment_t *e)
     return (uint8_t *)(void *)(ment_ttlval(e) + e->nttl);
 }
 
-static size_t ment_size(uint8_t qnamelen, unsigned nttl, size_t bloblen)
+static size_t ment_size(size_t keylen, unsigned nttl, size_t bloblen)
 {
-    return sizeof(ment_t) + ((qnamelen + 3u) & ~3u) +
+    return sizeof(ment_t) + ((keylen + 3u) & ~(size_t)3u) +
            (size_t)nttl * 8u + bloblen;
 }
 
@@ -63,9 +80,16 @@ static int ment_eq(const void *entry, const void *key)
     const ment_t *e = (const ment_t *)entry;
     const elpis_mkey_t *k = (const elpis_mkey_t *)key;
 
-    return e->qtype == k->qtype && e->qclass == k->qclass &&
-           e->kflags == k->kflags && e->qnamelen == k->qnamelen &&
-           memcmp(ment_qname_c(e), k->qname, k->qnamelen) == 0;
+    if (e->qtype != k->qtype || e->qclass != k->qclass ||
+        e->kflags != k->kflags || e->qnamelen != k->qnamelen ||
+        e->ecs_family != k->ecs.family)
+        return 0;
+    if (memcmp(ment_qname_c(e), k->qname, k->qnamelen) != 0)
+        return 0;
+    return e->ecs_family == 0 ||
+           (e->ecs_source == k->ecs.source &&
+            memcmp(ment_qname_c(e) + e->qnamelen, k->ecs.addr,
+                   ELPIS_ECS_ADDRLEN(e->ecs_source)) == 0);
 }
 
 void elpis_mkey_hash(elpis_mkey_t *k)
@@ -75,6 +99,15 @@ void elpis_mkey_hash(elpis_mkey_t *k)
                     ((uint64_t)k->qclass << 16) ^
                     (uint64_t)k->kflags;
     k->hash = elpis_simd_hash_ci(k->qname, k->qnamelen, seed);
+    /* A tailored entry hashes apart from the shared one and from every
+     * other subnet's, so the subnets of one name spread over the shards. */
+    if (k->ecs.family != 0) {
+        uint64_t sub[3] = { 0, 0, 0 };
+        memcpy(sub, k->ecs.addr, sizeof k->ecs.addr);
+        sub[2] = ((uint64_t)k->ecs.family << 8) | k->ecs.source;
+        k->hash = elpis_mix64(k->hash ^ elpis_mix64(sub[0] ^
+                                                    elpis_mix64(sub[1] ^ sub[2])));
+    }
 }
 
 elpis_cache_t *elpis_mcache_new(uint64_t bytes, unsigned shards)
@@ -114,6 +147,8 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
     e = (ment_t *)elpis_cache_read_begin(c, k->hash, k, &shard);
     if (e == NULL)
         return ELPIS_ENOTFOUND;
+    if (k->shared_only && e->ecs_local)
+        goto out;
 
     rem = remaining_ttl(e, now, &elapsed);
     if (rem == 0 && elapsed > e->ttl + serve_stale)
@@ -124,6 +159,7 @@ int elpis_mcache_serve(elpis_cache_t *c, const elpis_mkey_t *k,
     info->sec   = (elpis_sec_t)e->sec;
     info->ttl   = rem;
     info->stale = (rem == 0) ? 1u : 0u;
+    info->ecs_scope = e->ecs_scope;
 
     /*
      * Ask for a refresh when the entry is stale or nearly so.  The timestamp
@@ -268,10 +304,11 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
                        const uint32_t *ttl_off, const uint32_t *ttl_val,
                        unsigned nttl, size_t ns_off, size_t ar_off,
                        unsigned rcode, uint16_t flags, elpis_sec_t sec,
-                       uint32_t ttl, uint32_t max_stale)
+                       uint32_t ttl, uint32_t max_stale,
+                       uint8_t ecs_scope, int ecs_local)
 {
     ment_t *e;
-    size_t bloblen, sz;
+    size_t bloblen, sz, keylen;
     unsigned i, kept = 0;
     uint32_t *toff, *tval;
     uint32_t prev = 0;
@@ -305,7 +342,8 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
         kept++;
     }
 
-    sz = ment_size(k->qnamelen, kept, bloblen);
+    keylen = ment_keylen(k->qnamelen, k->ecs.family, k->ecs.source);
+    sz = ment_size(keylen, kept, bloblen);
     e = (ment_t *)elpis_malloc(sz);
     if (e == NULL)
         return ELPIS_ENOMEM;
@@ -336,8 +374,18 @@ int elpis_mcache_store(elpis_cache_t *c, const elpis_mkey_t *k,
     if (e->ns_off > bloblen) e->ns_off = (uint32_t)bloblen;
     if (e->ar_off > bloblen) e->ar_off = (uint32_t)bloblen;
     if (e->ar_off < e->ns_off) e->ar_off = e->ns_off;
+    if (k->ecs.family != 0) {
+        e->ecs_family = k->ecs.family;
+        e->ecs_source = k->ecs.source;
+        e->ecs_scope  = ecs_scope;
+    } else {
+        e->ecs_local  = ecs_local ? 1u : 0u;
+    }
 
     memcpy(ment_qname(e), k->qname, k->qnamelen);
+    if (e->ecs_family != 0)
+        memcpy(ment_qname(e) + k->qnamelen, k->ecs.addr,
+               ELPIS_ECS_ADDRLEN(e->ecs_source));
 
     toff = ment_ttloff(e);
     tval = ment_ttlval(e);

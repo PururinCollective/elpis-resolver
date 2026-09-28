@@ -52,6 +52,15 @@ int elpis_edns_write(elpis_bld_t *b, const elpis_edns_t *e, unsigned rcode)
         if (elpis_bld_bytes(b, e->cookie, e->cookie_len) != ELPIS_OK) goto trunc;
     }
 
+    if (e->have_ecs) {
+        uint8_t opt[4u + 16u];
+        size_t n = elpis_ecs_encode(&e->ecs, opt, sizeof opt);
+        if (n == 0) goto trunc;
+        if (elpis_bld_u16(b, ELPIS_OPT_ECS) != ELPIS_OK)  goto trunc;
+        if (elpis_bld_u16(b, (uint16_t)n) != ELPIS_OK)    goto trunc;
+        if (elpis_bld_bytes(b, opt, n) != ELPIS_OK)       goto trunc;
+    }
+
     if (e->nsid != NULL && e->want_nsid) {
         size_t n = strlen(e->nsid);
         if (n > 255) n = 255;

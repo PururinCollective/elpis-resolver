@@ -30,6 +30,12 @@ typedef struct {
      * that actually produced it.  ELPIS_ZONE_STAMP() makes one.
      */
     uint8_t  zone_labels;
+    /*
+     * 1 when the record came from an answer an authority tailored to one
+     * client subnet (EDNS Client Subnet, SCOPE above 0).  It belongs to that
+     * subnet alone and never goes into the shared RRset cache.
+     */
+    uint8_t  tailored;
 } elpis_trr_t;
 
 /*
@@ -49,6 +55,7 @@ typedef struct {
     /* Stamped onto the next record added, then cleared: set it immediately
      * before each add, or the record is marked as unknown provenance. */
     uint8_t      zone_labels;
+    uint8_t      tailored;        /* the same, for elpis_trr_t.tailored */
 } elpis_rrlist_t;
 
 void elpis_rrlist_init(elpis_rrlist_t *l);

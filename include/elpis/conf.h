@@ -23,6 +23,12 @@
 #define ELPIS_MAX_FORWARD 8
 #define ELPIS_MAX_STUB   16
 #define ELPIS_MAX_OUT_SRC 8
+#define ELPIS_MAX_ECS_ZONES 32
+
+/* ecs-ip-type: what goes in the EDNS Client Subnet option sent upstream. */
+#define ELPIS_ECS_TYPE_NONE    0   /* a /0: tailor to nobody             */
+#define ELPIS_ECS_TYPE_CLIENT  1   /* the subnet of the client who asked */
+#define ELPIS_ECS_TYPE_THIS    2   /* this resolver's own public subnet  */
 
 /*
  * The default name of the identity probe.  It sits in an undelegated TLD on
@@ -161,6 +167,19 @@ typedef struct {
     uint8_t      have_src4;             /* count, not a flag */
     uint8_t      have_src6;
 
+    /*
+     * EDNS Client Subnet (RFC 7871): see ecs.h.  Off by default, because it
+     * hands part of each client's address to every authority that asks for
+     * it.  Never sent to the root or a TLD, and with ecs-zone: set, only for
+     * names under those zones.
+     */
+    uint8_t      ecs;
+    uint8_t      ecs_ip_type;           /* ELPIS_ECS_TYPE_*          */
+    uint8_t      ecs_v4_bits;           /* longest prefix sent, IPv4 */
+    uint8_t      ecs_v6_bits;
+    elpis_name_t ecs_zone[ELPIS_MAX_ECS_ZONES];
+    unsigned     necs_zone;
+
     /* --- forwarders / stubs --------------------------------------- */
     elpis_zoneroute_t route[ELPIS_MAX_FORWARD + ELPIS_MAX_STUB];
     unsigned     nroute;
@@ -231,6 +250,10 @@ int  elpis_conf_load(elpis_conf_t *c, const char *explicit_path);
 int  elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
                            unsigned lineno);
 void elpis_conf_dump(const elpis_conf_t *c);
+/* "none", "client" or "this". */
+const char *elpis_ecs_type_name(unsigned type);
+/* May a query for `qname` carry a subnet, as far as ecs-zone: goes? */
+int  elpis_conf_ecs_zone_ok(const elpis_conf_t *c, const elpis_name_t *qname);
 /* 1 when `a` may query us; sets *snoop when RD-clear queries are allowed. */
 int  elpis_conf_acl_check(const elpis_conf_t *c, const elpis_addr_t *a,
                           int *snoop);

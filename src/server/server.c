@@ -21,9 +21,79 @@ static void tcp_close(elpis_tcpconn_t *c);
 static void tcp_resolved(elpis_tcpconn_t *c);
 static void fail_note(const elpis_task_t *t);
 
+/*
+ * EDNS Client Subnet, as it applies to one client query.  `subnet` is what the
+ * resolution is for (family 0 for none); see client_ecs().
+ */
+typedef struct {
+    elpis_ecs_t subnet;
+    unsigned    own  : 1;       /* the client's own, not ours standing in */
+    unsigned    echo : 1;       /* it sent an option: answer with one     */
+    elpis_ecs_t client;         /* that option, as sent                   */
+} client_ecs_t;
+
+/*
+ * With ecs-ip-type: client, the subnet a query is resolved for: the one in
+ * the client's own ECS option -- a forwarder such as AdGuard Home sends its
+ * client's -- or else the address the query came from, cut to ecs-ipv4-prefix
+ * or ecs-ipv6-prefix.  A private address, or a client that asked for no
+ * subnet (SOURCE 0), gets this resolver's own public one: that is what the
+ * authority would have gone by without ECS, and it lets every such client
+ * share one answer.  With none or this, the subnet is picked per query as it
+ * goes out, the same for every client, so there is nothing to do here.
+ */
+static void client_ecs(elpis_worker_t *w, const elpis_msg_t *m,
+                       const elpis_addr_t *from, client_ecs_t *ce)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+
+    memset(ce, 0, sizeof *ce);
+    if (!c->ecs)
+        return;
+    if (m->have_ecs && !m->ecs_bad) {
+        ce->echo   = 1;
+        ce->client = m->ecs;
+    }
+    if (c->ecs_ip_type != ELPIS_ECS_TYPE_CLIENT)
+        return;
+
+    if (m->have_ecs) {
+        if (!m->ecs_bad && elpis_ecs_is_public(&m->ecs))
+            elpis_ecs_truncate(&ce->subnet, &m->ecs, c->ecs_v4_bits,
+                               c->ecs_v6_bits);
+    } else {
+        elpis_ecs_t whole;
+        if (elpis_ecs_from_addr(&whole, from, 32, 128) &&
+            elpis_ecs_is_public(&whole))
+            elpis_ecs_truncate(&ce->subnet, &whole, c->ecs_v4_bits,
+                               c->ecs_v6_bits);
+    }
+    /* A prefix length of 0 in the config means "not this family". */
+    if (ce->subnet.source > 0)
+        ce->own = 1;
+    else
+        (void)elpis_selfinfo_ecs(w->ctx, &ce->subnet);
+}
+
+/* The ECS option for a reply to `ce`: the client's own, with the SCOPE the
+ * answer had -- 0 unless it was tailored to the client's own subnet. */
+static void echo_ecs(elpis_edns_t *e, const client_ecs_t *ce, int tailored,
+                     unsigned scope)
+{
+    if (!ce->echo)
+        return;
+    e->have_ecs = 1;
+    e->ecs = ce->client;
+    e->ecs.scope = 0;
+    if (tailored && ce->own)
+        e->ecs.scope = (uint8_t)(scope < ce->client.source ? scope
+                                                           : ce->client.source);
+}
+
 /* Kick off a background refresh of the name just served from cache. */
 static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
-                                 uint8_t kflags)
+                                 uint8_t kflags, const elpis_ecs_t *subnet,
+                                 int tailored)
 {
     elpis_task_t *t;
 
@@ -47,6 +117,13 @@ static void elpis_prefetch_start(elpis_worker_t *w, const elpis_msg_t *m,
      */
     t->client_do = (kflags & ELPIS_MK_DO) ? 1u : 0u;
     t->client_cd = (kflags & ELPIS_MK_CD) ? 1u : 0u;
+    /*
+     * And for the subnet of the client whose hit set it off.  A tailored
+     * entry is refreshed for its own subnet; a shared one comes back shared
+     * if the authority still gives everyone the same answer.
+     */
+    t->ecs = *subnet;
+    t->ecs_refresh_tailored = tailored ? 1u : 0u;
     elpis_stat_inc(&w->stats.prefetches, 1);
     elpis_task_start(t);
 }
@@ -90,6 +167,14 @@ static void fill_edns(elpis_task_t *t, elpis_edns_t *e, unsigned rcode)
         memcpy(e->cookie, full, sizeof full);
         e->cookie_len = (uint8_t)sizeof full;
         e->have_cookie = 1;
+    }
+    if (t->ecs_echo) {
+        client_ecs_t ce;
+        memset(&ce, 0, sizeof ce);
+        ce.echo   = 1;
+        ce.own    = t->ecs_own;
+        ce.client = t->ecs_client;
+        echo_ecs(e, &ce, t->ecs_tailored, t->ecs_scope);
     }
     (void)rcode;
 }
@@ -179,6 +264,7 @@ void elpis_task_respond(elpis_task_t *t)
      * be one; see below. */
     if (t->client_edns) {
         size_t opt = 11 + (e.have_cookie ? 4u + e.cookie_len : 0u) +
+                     (e.have_ecs ? ELPIS_ECS_OPTLEN(e.ecs.source) : 0u) +
                      (e.ede_code >= 0 ? 6u : 0u) +
                      (e.want_nsid && e.nsid ? 4u + strlen(e.nsid) : 0u);
         if (budget > opt)
@@ -481,6 +567,7 @@ static void fail_note(const elpis_task_t *t)
 
 static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
                           const elpis_addr_t *to, uint8_t kflags, int over_tcp,
+                          const client_ecs_t *ce,
                           uint8_t *out, size_t outcap, size_t *outlen)
 {
     const elpis_conf_t *c = &w->ctx->conf;
@@ -492,6 +579,7 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
     elpis_bld_t b;
     elpis_edns_t e;
     size_t opt_reserve;
+    int tailored = 0;
 
     memcpy(folded, m->qname.d, m->qname.len);
     elpis_simd_lower(folded, folded, m->qname.len);
@@ -501,6 +589,13 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
     k.qtype    = m->qtype;
     k.qclass   = m->qclass;
     k.kflags   = kflags;
+    elpis_mkey_shared(&k);
+    /* A client with a subnet looks for an answer tailored to it first. */
+    if (ce->subnet.family != 0) {
+        k.ecs = ce->subnet;
+        k.ecs.scope = 0;
+        tailored = 1;
+    }
     elpis_mkey_hash(&k);
 
     if (over_tcp) {
@@ -512,17 +607,32 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
     }
 
     opt_reserve = m->have_opt ? 48u : 0u;
+    if (m->have_opt && ce->echo)
+        opt_reserve += ELPIS_ECS_OPTLEN(ce->client.source);
     if (budget > opt_reserve)
         budget -= opt_reserve;
 
-    if (elpis_mcache_serve(w->ctx->mcache, &k, m->hdr.id, m->qname.d,
-                           (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA |
-                                      (m->hdr.flags & ELPIS_FLAG_RD) |
-                                      (m->hdr.flags & ELPIS_FLAG_CD)),
-                           budget, c->serve_stale, c->serve_stale_reply_ttl,
-                           c->prefetch ? c->prefetch_pct : 0u,
-                           out, outcap, &len, &info) != ELPIS_OK)
-        return 0;
+    for (;;) {
+        if (elpis_mcache_serve(w->ctx->mcache, &k, m->hdr.id, m->qname.d,
+                               (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA |
+                                          (m->hdr.flags & ELPIS_FLAG_RD) |
+                                          (m->hdr.flags & ELPIS_FLAG_CD)),
+                               budget, c->serve_stale, c->serve_stale_reply_ttl,
+                               c->prefetch ? c->prefetch_pct : 0u,
+                               out, outcap, &len, &info) == ELPIS_OK)
+            break;
+        if (!tailored)
+            return 0;
+        /*
+         * Then the answer everyone shares -- the usual case, since most
+         * authorities give the same answer to every subnet -- but not one
+         * that is only the view from here.
+         */
+        elpis_mkey_shared(&k);
+        k.shared_only = 1;
+        elpis_mkey_hash(&k);
+        tailored = 0;
+    }
 
     /* Re-open the buffer as a builder so the OPT record can be appended. */
     elpis_bld_init(&b, out, outcap, NULL, 0);
@@ -544,6 +654,7 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
             e.cookie_len = (uint8_t)sizeof full;
             e.have_cookie = 1;
         }
+        echo_ecs(&e, ce, tailored, info.ecs_scope);
         elpis_edns_write(&b, &e, info.rcode);
     }
     elpis_bld_finish(&b);
@@ -563,7 +674,7 @@ static int try_cache_fast(elpis_worker_t *w, const elpis_msg_t *m,
      * entry being served stale forever.
      */
     if (info.want_prefetch)
-        elpis_prefetch_start(w, m, kflags);
+        elpis_prefetch_start(w, m, kflags, &ce->subnet, tailored);
     return 1;
 }
 
@@ -578,6 +689,7 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     elpis_task_t *t;
     size_t outlen = 0;
     uint8_t kflags;
+    client_ecs_t ce;
     /* Only when the status page is on: a cache hit is a few microseconds of
      * work, so the clock read would otherwise be a visible share of it. */
     uint64_t t0 = elpis_tm_enabled ? elpis_now_us() : 0;
@@ -619,6 +731,15 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     if (m.have_opt && m.edns_version != 0) {
         /* RFC 6891 section 6.1.3: answer BADVERS, do not guess. */
         reply_error(w, fd, &m, ELPIS_RC_BADVERS, from, to, conn);
+        return;
+    }
+    /*
+     * RFC 7871: a malformed subnet is refused, FORMERR.  Only while ECS
+     * is on; with it off the option means nothing here and is ignored, as
+     * any option this server does not implement would be.
+     */
+    if (c->ecs && m.have_ecs && m.ecs_bad) {
+        reply_error(w, fd, &m, ELPIS_RC_FORMERR, from, to, conn);
         return;
     }
     if (m.qclass != ELPIS_CLASS_IN && m.qclass != ELPIS_CLASS_CH) {
@@ -676,6 +797,7 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
 
     kflags = (uint8_t)((m.do_bit ? ELPIS_MK_DO : 0) |
                        ((m.hdr.flags & ELPIS_FLAG_CD) ? ELPIS_MK_CD : 0));
+    client_ecs(w, &m, from, &ce);
 
     /*
      * The message cache holds A answers as the zone gave them; with
@@ -684,7 +806,7 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
      */
     if (!elpis_dns64_strips(&w->ctx->conf, m.qtype, m.do_bit,
                             (m.hdr.flags & ELPIS_FLAG_CD) != 0) &&
-        try_cache_fast(w, &m, to, kflags, conn != NULL,
+        try_cache_fast(w, &m, to, kflags, conn != NULL, &ce,
                        w->txbuf, ELPIS_MAX_MSG, &outlen)) {
         /*
          * A cache hit never becomes a task, so this is the only place it can
@@ -757,6 +879,10 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
         memcpy(t->client_cookie, m.cookie, m.cookie_len);
         t->client_cookie_len = m.cookie_len;
     }
+    t->ecs        = ce.subnet;
+    t->ecs_own    = ce.own;
+    t->ecs_echo   = ce.echo;
+    t->ecs_client = ce.client;
 
     t->qname  = m.qname;
     elpis_name_lower(&t->qname);

@@ -255,6 +255,16 @@ void elpis_infra_set_flag(elpis_cache_t *c, const elpis_addr_t *a,
     infra_update(c, a, fn_flag, &arg);
 }
 
+static void fn_ecs_off(elpis_infra_info_t *i, void *ctx)
+{
+    i->ecs_off_until = *(const uint32_t *)ctx;
+}
+
+void elpis_infra_ecs_off(elpis_cache_t *c, const elpis_addr_t *a, uint32_t until)
+{
+    infra_update(c, a, fn_ecs_off, &until);
+}
+
 typedef struct { const uint8_t *p; size_t n; } cookie_arg_t;
 
 static void fn_cookie(elpis_infra_info_t *i, void *ctx)
