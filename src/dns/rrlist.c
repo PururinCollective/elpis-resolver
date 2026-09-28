@@ -20,6 +20,7 @@ void elpis_rrlist_clear(elpis_rrlist_t *l)
     l->n = 0;
     l->plen = 0;
     l->zone_labels = 0;
+    l->tailored = 0;
 }
 
 void elpis_rrlist_free(elpis_rrlist_t *l)
@@ -96,6 +97,8 @@ int elpis_rrlist_add(elpis_rrlist_t *l, elpis_section_t sec,
      */
     e->zone_labels = l->zone_labels;
     l->zone_labels = 0;
+    e->tailored = l->tailored;
+    l->tailored = 0;
     l->n++;
     return ELPIS_OK;
 }

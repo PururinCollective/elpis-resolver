@@ -75,7 +75,7 @@ LIBS      := -lm
 # DNS wire format: names, messages, record data, EDNS and cookies.
 DNS_SRC := \
   src/dns/name.c src/dns/msg.c src/dns/rdata.c src/dns/edns.c \
-  src/dns/rrlist.c src/dns/cookie.c
+  src/dns/rrlist.c src/dns/cookie.c src/dns/ecs.c
 
 # The shared hash table and the caches built on it.
 CACHE_SRC := \

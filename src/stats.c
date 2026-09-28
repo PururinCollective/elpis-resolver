@@ -68,6 +68,10 @@ void elpis_stats_report(elpis_ctx_t *ctx)
                (unsigned long long)s->tcp_queries,
                (unsigned long long)s->truncated,
                (unsigned long long)s->dns64_synth);
+    if (ctx->conf.ecs)
+        elpis_info("  ecs sent=%llu tailored=%llu",
+                   (unsigned long long)s->ecs_sent,
+                   (unsigned long long)s->ecs_tailored);
     if (s->cookie_ok || s->cookie_bad)
         elpis_info("  cookies verified=%llu rejected=%llu",
                    (unsigned long long)s->cookie_ok,

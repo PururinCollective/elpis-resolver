@@ -110,6 +110,11 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->prefer_ipv6      = 0;
     c->tcp_upstream     = 1;
 
+    c->ecs              = 0;
+    c->ecs_ip_type      = ELPIS_ECS_TYPE_CLIENT;
+    c->ecs_v4_bits      = 24;          /* what RFC 7871 recommends */
+    c->ecs_v6_bits      = 56;
+
     c->client_qps       = 0;
     c->nxdomain_qps     = 0;
     c->max_udp_size_reply = ELPIS_EDNS_SAFE;
@@ -486,6 +491,49 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("do-ipv6"))       return want_bool(&p, key, val, &c->do_ipv6);
     if (KEY("prefer-ipv6"))   return want_bool(&p, key, val, &c->prefer_ipv6);
     if (KEY("tcp-upstream"))  return want_bool(&p, key, val, &c->tcp_upstream);
+    if (KEY("ecs") || KEY("edns-client-subnet"))
+        return want_bool(&p, key, val, &c->ecs);
+    if (KEY("ecs-ip-type")) {
+        if (!elpis_strcasecmp_ascii(val, "none"))
+            c->ecs_ip_type = ELPIS_ECS_TYPE_NONE;
+        else if (!elpis_strcasecmp_ascii(val, "client"))
+            c->ecs_ip_type = ELPIS_ECS_TYPE_CLIENT;
+        else if (!elpis_strcasecmp_ascii(val, "this"))
+            c->ecs_ip_type = ELPIS_ECS_TYPE_THIS;
+        else {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        return ELPIS_OK;
+    }
+    if (KEY("ecs-ipv4-prefix") || KEY("ecs-ipv6-prefix")) {
+        uint32_t v;
+        uint32_t max = KEY("ecs-ipv4-prefix") ? 32u : 128u;
+        if (want_u32(&p, key, val, &v) != 0)
+            return ELPIS_ERR;
+        if (v > max) {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        if (max == 32u)
+            c->ecs_v4_bits = (uint8_t)v;
+        else
+            c->ecs_v6_bits = (uint8_t)v;
+        return ELPIS_OK;
+    }
+    if (KEY("ecs-zone")) {
+        if (c->necs_zone >= ELPIS_ARRAY_LEN(c->ecs_zone)) {
+            elpis_warn("%s:%u: too many ecs-zone entries", src, lineno);
+            return ELPIS_OK;
+        }
+        if (elpis_name_from_text(&c->ecs_zone[c->necs_zone], val) != ELPIS_OK) {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        elpis_name_lower(&c->ecs_zone[c->necs_zone]);
+        c->necs_zone++;
+        return ELPIS_OK;
+    }
     if (KEY("outgoing-interface")) {
         elpis_addr_t a;
         if (elpis_addr_parse(&a, val, 0) != 0) { perr(&p, key, val); return ELPIS_ERR; }
@@ -778,6 +826,27 @@ int elpis_conf_acl_check(const elpis_conf_t *c, const elpis_addr_t *a, int *snoo
     return (int)c->acl[best].allow;
 }
 
+const char *elpis_ecs_type_name(unsigned type)
+{
+    switch (type) {
+    case ELPIS_ECS_TYPE_NONE: return "none";
+    case ELPIS_ECS_TYPE_THIS: return "this";
+    default:                  return "client";
+    }
+}
+
+int elpis_conf_ecs_zone_ok(const elpis_conf_t *c, const elpis_name_t *qname)
+{
+    unsigned i;
+
+    if (c->necs_zone == 0)
+        return 1;
+    for (i = 0; i < c->necs_zone; i++)
+        if (elpis_name_is_subdomain(qname, &c->ecs_zone[i]))
+            return 1;
+    return 0;
+}
+
 void elpis_conf_dump(const elpis_conf_t *c)
 {
     char buf[80];
@@ -813,6 +882,17 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  %s %s -> %s",
                    c->route[i].is_stub ? "stub-zone   " : "forward-zone",
                    c->route[i].name, list);
+    }
+    if (c->ecs) {
+        elpis_info("  ecs=yes ecs-ip-type=%s prefix=/%u (IPv4) /%u (IPv6)%s",
+                   elpis_ecs_type_name(c->ecs_ip_type),
+                   (unsigned)c->ecs_v4_bits, (unsigned)c->ecs_v6_bits,
+                   c->necs_zone ? "" : ", every zone below the TLDs");
+        for (i = 0; i < c->necs_zone; i++) {
+            char zb[ELPIS_MAX_NAME * 4];
+            elpis_info("  ecs-zone %s",
+                       elpis_name_str(&c->ecs_zone[i], zb, sizeof zb));
+        }
     }
     for (i = 0; i < c->nquirk; i++) {
         char zb[ELPIS_MAX_NAME * 4], fb[64];

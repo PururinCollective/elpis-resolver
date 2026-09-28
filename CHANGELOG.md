@@ -14,6 +14,24 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**EDNS Client Subnet (`ecs: yes`, RFC 7871).** Off by default. A content
+network picks a server near whoever asks, and without this the one asking is
+Elpis. So AdGuard in Malaysia with an Elpis in Singapore among its upstreams
+got Singapore's servers for every question that went there. With ECS on, a /24
+or /56 of the client's address goes with the query. `www.taobao.com`, for one,
+now answers a Malaysian subnet and a Singaporean one with different addresses.
+`ecs-ip-type` picks the address:
+- `client`: the client's own subnet, from its ECS option or its source address.
+  A private address gets this resolver's.
+- `this`: this resolver's public subnet.
+- `none`: a /0.
+
+An answer tailored to one subnet is cached for that subnet alone and never
+enters the shared RRset cache. The root and TLDs are never sent a subnet, and
+a server that ignores it is sent none for an hour. `ecs-zone:` narrows it to
+chosen zones. The client's option is echoed back with the answer's scope. See
+[EDNS Client Subnet](docs/configuration.md#edns-client-subnet).
+
 **`make` merges new shipped defaults into `bin/elpis.conf`.** The config used
 to be seeded once and never touched again, so a setting added in a new release
 never reached a config that already existed, and nobody was told. When a pull

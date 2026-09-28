@@ -163,6 +163,51 @@ static void apply_0x20(uint8_t *name, size_t len)
     }
 }
 
+/*
+ * Does this query carry an EDNS Client Subnet option, and with what?  Returns
+ * 1 with q->ecs filled in.  Sets q->ecs_local instead when the resolution has
+ * no subnet to give a server that would have been sent one.
+ */
+static int ecs_decide(elpis_worker_t *w, elpis_outq_t *q,
+                      const elpis_task_t *t, const elpis_infra_info_t *inf)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+
+    if (!c->ecs)
+        return 0;
+    /*
+     * Never to the root or a TLD, which only ever refer onwards: a subnet
+     * there tells them something for nothing.  A forwarder is asked for
+     * everything, so it is asked with a subnet for everything.
+     */
+    if (!t->forwarding && (!t->have_deleg || t->deleg.zone.labels < 2u))
+        return 0;
+    /* A QNAME-minimisation probe is after a delegation, not an answer. */
+    if (t->qmin_probe)
+        return 0;
+    if (!elpis_conf_ecs_zone_ok(c, &t->qname))
+        return 0;
+    if (inf->ecs_off_until != 0 && elpis_cached_now_s() < inf->ecs_off_until)
+        return 0;
+
+    memset(&q->ecs, 0, sizeof q->ecs);
+    switch (c->ecs_ip_type) {
+    case ELPIS_ECS_TYPE_NONE:
+        q->ecs.family = ELPIS_ECS_IPV4;         /* 0.0.0.0/0 */
+        return 1;
+    case ELPIS_ECS_TYPE_THIS:
+        return elpis_selfinfo_ecs(w->ctx, &q->ecs);
+    default:
+        if (t->ecs.family == 0) {
+            q->ecs_local = 1;
+            return 0;
+        }
+        q->ecs = t->ecs;
+        q->ecs.scope = 0;
+        return 1;
+    }
+}
+
 static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
                           const elpis_task_t *t, uint8_t *buf, size_t cap,
                           const elpis_infra_info_t *inf)
@@ -225,9 +270,17 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
             e.have_cookie = 1;
             q->used_cookie = 1;
         }
+        q->ecs_local = 0;
+        if (ecs_decide(w, q, t, inf)) {
+            e.ecs = q->ecs;
+            e.have_ecs = 1;
+        }
         if (elpis_edns_write(&b, &e, 0) == ELPIS_OK) {
             q->used_edns = 1;
             q->edns_size = bufsize;
+            q->used_ecs  = e.have_ecs;
+            if (q->used_ecs)
+                elpis_stat_inc(&w->stats.ecs_sent, 1);
         }
     }
 
@@ -573,6 +626,62 @@ static void learn_0x20(elpis_worker_t *w, const elpis_outq_t *q)
     }
 }
 
+/*
+ * What the server made of the subnet it was sent.  Returns 1 when the reply
+ * cannot be used and the question should go again without one; the server
+ * is already marked, so the next query to it carries none.
+ */
+static int ecs_answer(elpis_worker_t *w, elpis_outq_t *q, const elpis_msg_t *m)
+{
+    unsigned rcode = elpis_msg_rcode(m);
+    uint32_t off = elpis_cached_now_s() + ELPIS_ECS_OFF_S;
+
+    /* Truncated, and often without its OPT: the answer over TCP will say. */
+    if (m->hdr.flags & ELPIS_FLAG_TC)
+        return 0;
+    if (rcode == ELPIS_RC_FORMERR || rcode == ELPIS_RC_NOTIMP) {
+        elpis_infra_ecs_off(w->ctx->infra, &q->server, off);
+        return 1;
+    }
+    if (!m->have_ecs) {
+        /*
+         * A server that tailors its answers says how, so this one does not,
+         * and the next hour of queries to it can keep the subnet to
+         * themselves.  Not with ecs-ip-type: none, though: that /0 is there
+         * to stop a forwarder adding a subnet of its own, whether or not it
+         * says it read it.
+         */
+        if ((rcode == ELPIS_RC_NOERROR || rcode == ELPIS_RC_NXDOMAIN) &&
+            w->ctx->conf.ecs_ip_type != ELPIS_ECS_TYPE_NONE)
+            elpis_infra_ecs_off(w->ctx->infra, &q->server, off);
+        return 0;
+    }
+    /*
+     * FAMILY, SOURCE and ADDRESS have to come back as they went, or the
+     * answer is for some other subnet and is not used (RFC 7871).  A /0 is a
+     * /0 in any family; some servers echo it as family 0.
+     */
+    if (m->ecs_bad ||
+        (!(q->ecs.source == 0 && m->ecs.source == 0) &&
+         !elpis_ecs_same_subnet(&m->ecs, &q->ecs))) {
+        char ab[80], sb[64], rb[64];
+        elpis_logf_rl(ELPIS_LOG_INFO, ELPIS_DROP_EDNS, __FILE__, __LINE__,
+                      "ecs: %s answered for %s when asked for %s; asking "
+                      "again without a subnet",
+                      elpis_addr_str(&q->server, ab, sizeof ab),
+                      m->ecs_bad ? "a malformed subnet"
+                                 : elpis_ecs_str(&m->ecs, rb, sizeof rb),
+                      elpis_ecs_str(&q->ecs, sb, sizeof sb));
+        elpis_infra_ecs_off(w->ctx->infra, &q->server, off);
+        return 1;
+    }
+    /* A SCOPE longer than what was sent cannot be told apart from it. */
+    q->ecs_scope = m->ecs.scope < q->ecs.source ? m->ecs.scope : q->ecs.source;
+    if (q->ecs_scope > 0)
+        elpis_stat_inc(&w->stats.ecs_tailored, 1);
+    return 0;
+}
+
 static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
                            const elpis_msg_t *m)
 {
@@ -580,6 +689,7 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     elpis_outq_t *other;
     unsigned rcode = elpis_msg_rcode(m);
     uint32_t rtt;
+    int ecs_retry = 0;
 
     if (t == NULL && !q->probe) {
         elpis_out_free(w, q);
@@ -597,12 +707,19 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         if (m->have_opt) {
             elpis_infra_set_edns(w->ctx->infra, &q->server, ELPIS_EDNS_YES,
                                  q->edns_size);
-        } else if (elpis_msg_rcode(m) == ELPIS_RC_FORMERR ||
-                   elpis_msg_rcode(m) == ELPIS_RC_NOTIMP) {
-            /* The peer does not understand EDNS; remember and retry plain. */
+        } else if ((elpis_msg_rcode(m) == ELPIS_RC_FORMERR ||
+                    elpis_msg_rcode(m) == ELPIS_RC_NOTIMP) && !q->used_ecs) {
+            /*
+             * The peer does not understand EDNS; remember and retry plain.
+             * Not when the query carried a subnet: that is the likelier
+             * thing to have upset it, and ecs_answer() tries without it
+             * first, rather than give up on EDNS -- and DNSSEC -- for good.
+             */
             elpis_infra_set_edns(w->ctx->infra, &q->server, ELPIS_EDNS_NO, 0);
         }
     }
+    if (q->used_ecs)
+        ecs_retry = ecs_answer(w, q, m);
 
     /* A probe was sent to be measured, and now it has been. */
     if (t == NULL) {
@@ -630,6 +747,17 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         }
         out_to_probe(other);
         t->out = NULL;
+    }
+
+    /* The subnet was refused or garbled: the same question, without it. */
+    if (ecs_retry) {
+        elpis_addr_t server = q->server;
+        int tcp = q->over_tcp;
+        elpis_out_free(w, q);
+        t->sends++;
+        if (elpis_task_resend(t, &server, tcp) != ELPIS_OK)
+            elpis_resolver_on_error(t, NULL, ELPIS_EDE_NETWORK_ERROR);
+        return;
     }
 
     /*

@@ -62,7 +62,10 @@ and point their upstream at Elpis:
 ```
 
 List two or more Elpis instances as upstreams, and AdGuard spreads the load
-and fails over between them. Each Elpis is happiest in its own LXC container
+and fails over between them. If they are in different places, turn on
+[EDNS Client Subnet](docs/configuration.md#edns-client-subnet) (`ecs: yes`), so
+a content network answers for where your clients are rather than for whichever
+Elpis they happened to ask. Each Elpis is happiest in its own LXC container
 or VM, with its own IPv6 address: easy to firewall, easy to move, and easy to
 spot in a packet capture.
 

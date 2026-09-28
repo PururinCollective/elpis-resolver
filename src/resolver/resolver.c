@@ -339,6 +339,7 @@ static int rrlist_add_stamped(elpis_task_t *t, elpis_section_t sec,
     t->ans.zone_labels =
         (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
             ? ELPIS_ZONE_STAMP(&t->deleg.zone) : 0;
+    t->ans.tailored = t->resp_tailored;
     return elpis_rrlist_add(&t->ans, sec, &owner, type, klass, ttl, rd, rdlen);
 }
 
@@ -406,6 +407,23 @@ static void chain_sec(elpis_task_t *t, uint8_t link)
 }
 
 /*
+ * May this cached RRset go into this resolution's answer?  One learned for
+ * want of a subnet from a server that may tailor is the answer for wherever
+ * this resolver is: not for a resolution with a client subnet of its own,
+ * which goes and asks for one.  A resolution without a subnet may use it,
+ * and what it builds from it is then the view from here as well.
+ */
+static int ecs_usable(elpis_task_t *t, const elpis_rrset_buf_t *b)
+{
+    if (!(b->flags & ELPIS_RRF_ECS_LOCAL))
+        return 1;
+    if (t->ecs.family != 0)
+        return 0;
+    t->ecs_local = 1;
+    return 1;
+}
+
+/*
  * Returns 1 when the caches could answer outright.  CNAME chains are followed
  * here too, so a fully cached chain costs no network traffic at all.
  */
@@ -425,7 +443,7 @@ static int cache_try(elpis_task_t *t)
          * SOA to answer with. */
         if (elpis_rcache_get(w->ctx->rcache, &t->qname, t->qtype, t->qclass,
                              now, c->serve_stale, b) == ELPIS_OK &&
-            !(b->flags & ELPIS_RRF_REFERRAL)) {
+            !(b->flags & ELPIS_RRF_REFERRAL) && ecs_usable(t, b)) {
             /*
              * A negative entry is never anything but unchecked -- its proof is
              * kept for the validator's own use, not replayed into answers --
@@ -465,7 +483,8 @@ static int cache_try(elpis_task_t *t)
         if (t->qtype != ELPIS_T_CNAME &&
             elpis_rcache_get(w->ctx->rcache, &t->qname, ELPIS_T_CNAME,
                              t->qclass, now, c->serve_stale, b) == ELPIS_OK &&
-            b->count > 0 && !(b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))) {
+            b->count > 0 && !(b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) &&
+            ecs_usable(t, b)) {
             elpis_name_t target;
             if (elpis_rdata_target(ELPIS_T_CNAME, b->data + b->off[0],
                                    b->len[0], &target) != ELPIS_OK)
@@ -495,7 +514,7 @@ static int cache_try(elpis_task_t *t)
             if ((int)t->qname.labels > routed &&
                 elpis_rcache_get(w->ctx->rcache, &t->qname, ELPIS_T_NXNAME,
                                  t->qclass, now, 0, b) == ELPIS_OK &&
-                (b->flags & ELPIS_RRF_NXDOMAIN)) {
+                (b->flags & ELPIS_RRF_NXDOMAIN) && ecs_usable(t, b)) {
                 t->rcode = ELPIS_RC_NXDOMAIN;
                 add_negative_soa(t, b);
                 chain_sec(t, b->sec);
@@ -1358,6 +1377,7 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
     t->ans.zone_labels =
         (t->have_deleg && elpis_name_covers(&t->deleg.zone, &owner))
             ? ELPIS_ZONE_STAMP(&t->deleg.zone) : 0;
+    t->ans.tailored = t->resp_tailored;
     return elpis_rrlist_add(&t->ans, sec, &owner, rr->type, rr->klass,
                             elpis_clamp_ttl(&t->w->ctx->conf, rr->ttl),
                             rd, (uint16_t)rdlen);
@@ -1375,6 +1395,10 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
     unsigned done[64];
     unsigned ndone = 0;
     unsigned idx = 0;
+
+    /* Tailored to one client subnet: see elpis_task's ECS fields. */
+    if (t->resp_tailored)
+        return;
 
     elpis_rr_iter(&it, m, sec);
     while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
@@ -1407,7 +1431,8 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
          * Verdicts go back into this cache from the validator, per RRset.
          */
         elpis_rrset_buf_init(b, &rr.name, rr.type, rr.klass, ttl);
-        b->flags = ELPIS_RRF_AUTH;
+        b->flags = (uint8_t)(ELPIS_RRF_AUTH |
+                             (t->resp_local ? ELPIS_RRF_ECS_LOCAL : 0u));
         /* Which zone served it, as accept_rr() stamps the live copy. */
         b->zone_labels = ELPIS_ZONE_STAMP(zone);
 
@@ -1559,7 +1584,8 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
          * signed zone was.  The proof goes into the answer either way; only
          * the cache entry is skipped.
          */
-        if (ttl == 0 || 1u + rr.name.len + rdlen > sizeof blob)
+        if (ttl == 0 || 1u + rr.name.len + rdlen > sizeof blob ||
+            t->resp_tailored)
             goto answer;
         blob[0] = rr.name.len;
         memcpy(blob + 1, rr.name.d, rr.name.len);
@@ -1572,6 +1598,8 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
                              nxdomain ? (uint16_t)ELPIS_T_NXNAME : t->qtype,
                              t->qclass, ttl);
         b->flags = nxdomain ? ELPIS_RRF_NXDOMAIN : ELPIS_RRF_NODATA;
+        if (t->resp_local)
+            b->flags |= ELPIS_RRF_ECS_LOCAL;
         elpis_rrset_buf_add(b, rdp, rdl);
         /*
          * Keep the proof with the marker, not just the SOA.  The descent
@@ -1751,6 +1779,21 @@ static void synth_nodata(elpis_task_t *t)
     t->state = ELPIS_TS_VALIDATE;
 }
 
+/*
+ * This response is part of the answer: carry what its subnet made of it into
+ * the task, so the answer is cached where it belongs.
+ */
+static void note_ecs(elpis_task_t *t, const elpis_outq_t *q)
+{
+    if (t->resp_tailored) {
+        t->ecs_tailored = 1;
+        if (q->ecs_scope > t->ecs_scope)
+            t->ecs_scope = q->ecs_scope;
+    }
+    if (t->resp_local)
+        t->ecs_local = 1;
+}
+
 static void next_server(elpis_task_t *t, int ede)
 {
     if (t->ede < 0)
@@ -1772,6 +1815,14 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
     /* A final reply, whatever it says -- a truncated one or a BADCOOKIE is
      * a request to ask again, and never gets here. */
     elpis_task_note_answered(t, &q->server);
+
+    /*
+     * Tailored to this resolution's client subnet, or the view from here for
+     * want of one: what caches the records below needs to know which.
+     */
+    t->resp_tailored = (q->used_ecs && q->ecs_scope > 0 && t->ecs.family != 0)
+                           ? 1u : 0u;
+    t->resp_local = q->ecs_local;
 
     zone = t->have_deleg ? t->deleg.zone : elpis_name_root;
 
@@ -1919,6 +1970,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
             {
                 uint8_t cn[ELPIS_MAX_NAME];
                 memcpy(cn, newname.d, newname.len);
+                t->ans.tailored = t->resp_tailored;
                 elpis_rrlist_add(&t->ans, ELPIS_SEC_ANSWER, &t->qname,
                                  ELPIS_T_CNAME, t->qclass,
                                  elpis_clamp_ttl(&w->ctx->conf, rr.ttl),
@@ -1932,6 +1984,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
             return;
         }
 
+        note_ecs(t, q);
         cache_message_rrsets(t, m, &zone, ELPIS_SEC_ANSWER);
 
         elpis_name_lower(&newname);
@@ -1989,6 +2042,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
                 rr.type != ELPIS_T_CNAME)
                 accept_rr(t, ELPIS_SEC_ANSWER, m, &rr);
         }
+        note_ecs(t, q);
         cache_message_rrsets(t, m, &zone, ELPIS_SEC_ANSWER);
 
         if (rcode == ELPIS_RC_NXDOMAIN) {
@@ -2029,6 +2083,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
                 continue;
             accept_rr(t, ELPIS_SEC_ANSWER, m, &rr);
         }
+        note_ecs(t, q);
         cache_message_rrsets(t, m, &zone, ELPIS_SEC_ANSWER);
         t->aa = (m->hdr.flags & ELPIS_FLAG_AA) ? 1u : 0u;
         t->rcode = ELPIS_RC_NOERROR;
@@ -2039,6 +2094,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
 
     case RESP_NXDOMAIN:
         t->rcode = ELPIS_RC_NXDOMAIN;
+        note_ecs(t, q);
         cache_negative(t, m, 1);
         cache_message_rrsets(t, m, &zone, ELPIS_SEC_AUTHORITY);
         t->state = ELPIS_TS_VALIDATE;
@@ -2047,6 +2103,7 @@ void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,
 
     case RESP_NODATA:
         t->rcode = ELPIS_RC_NOERROR;
+        note_ecs(t, q);
         cache_negative(t, m, 0);
         cache_message_rrsets(t, m, &zone, ELPIS_SEC_AUTHORITY);
         t->state = ELPIS_TS_VALIDATE;
@@ -2419,6 +2476,13 @@ static void task_mkey(const elpis_task_t *t, elpis_mkey_t *k, uint8_t *folded)
     k->qclass   = t->qclass;
     k->kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0u) |
                             (t->client_cd ? ELPIS_MK_CD : 0u));
+    elpis_mkey_shared(k);
+    /* An answer tailored to the client subnet, or a refresh of one, is filed
+     * under that subnet and nowhere else. */
+    if (t->ecs.family != 0 && (t->ecs_tailored || t->ecs_refresh_tailored)) {
+        k->ecs = t->ecs;
+        k->ecs.scope = 0;
+    }
     elpis_mkey_hash(k);
 }
 
@@ -2500,6 +2564,10 @@ static void task_finish(elpis_task_t *t)
                 elpis_name_t owner;
                 if (t->ans.rr[k2].type == ELPIS_T_RRSIG ||
                     t->ans.rr[k2].type == ELPIS_T_OPT)
+                    continue;
+                /* Never cached, so nothing to take out -- and what is under
+                 * that name is somebody else's answer. */
+                if (t->ans.rr[k2].tailored)
                     continue;
                 if (elpis_trr_get_name(&t->ans, k2, &owner) != ELPIS_OK)
                     continue;
@@ -2741,17 +2809,12 @@ static void cache_store_answer(elpis_task_t *t)
     if (b.overflow)
         return;
 
-    k.qname    = folded;
-    k.qnamelen = t->orig_qname.len;
-    k.qtype    = t->orig_qtype;
-    k.qclass   = t->qclass;
-    k.kflags   = (uint8_t)((t->client_do ? ELPIS_MK_DO : 0) |
-                           (t->client_cd ? ELPIS_MK_CD : 0));
-    elpis_mkey_hash(&k);
+    task_mkey(t, &k, folded);
 
     elpis_mcache_store(w->ctx->mcache, &k, w->txbuf, b.len, qend,
                        w->ttl_off, w->ttl_val, b.nttl, ns_off, ar_off,
                        t->rcode,
                        (uint16_t)(t->sec == ELPIS_SEC_SECURE ? ELPIS_FLAG_AD : 0),
-                       t->sec, ttl, c->serve_stale);
+                       t->sec, ttl, c->serve_stale,
+                       t->ecs_scope, t->ecs_local);
 }

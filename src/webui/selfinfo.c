@@ -127,6 +127,85 @@ static int is_public_v6(const char *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* The addresses as bytes, for EDNS Client Subnet                      */
+/* ------------------------------------------------------------------ */
+
+/* Parse the two text addresses and publish them for every worker. */
+static void publish_addrs(elpis_selfinfo_t *si)
+{
+    uint8_t ip4[4], ip6[16];
+    uint32_t pub4 = 0, have = 0;
+    uint64_t pub6[2] = { 0, 0 };
+    uint32_t seq;
+
+    if (si->v4[0] != '\0' && elpis_pton4(si->v4, ip4) == 0) {
+        memcpy(&pub4, ip4, sizeof pub4);
+        have |= 1u;
+    }
+    if (si->v6[0] != '\0' && elpis_pton6(si->v6, ip6) == 0) {
+        memcpy(pub6, ip6, sizeof pub6);
+        have |= 2u;
+    }
+
+    seq = __atomic_load_n(&si->seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&si->seq, seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&si->pub4, pub4, __ATOMIC_RELAXED);
+    __atomic_store_n(&si->pub6[0], pub6[0], __ATOMIC_RELAXED);
+    __atomic_store_n(&si->pub6[1], pub6[1], __ATOMIC_RELAXED);
+    __atomic_store_n(&si->have, have, __ATOMIC_RELAXED);
+    __atomic_store_n(&si->seq, seq + 2u, __ATOMIC_RELEASE);
+}
+
+int elpis_selfinfo_ecs(elpis_ctx_t *ctx, elpis_ecs_t *out)
+{
+    elpis_selfinfo_t *si = &ctx->self;
+    uint32_t pub4 = 0, have = 0;
+    uint64_t pub6[2] = { 0, 0 };
+    unsigned tries;
+    elpis_addr_t a;
+
+    memset(out, 0, sizeof *out);
+    for (tries = 0; tries < 8u; tries++) {
+        uint32_t s1 = __atomic_load_n(&si->seq, __ATOMIC_ACQUIRE);
+        if (s1 & 1u)
+            continue;
+        pub4    = __atomic_load_n(&si->pub4, __ATOMIC_RELAXED);
+        pub6[0] = __atomic_load_n(&si->pub6[0], __ATOMIC_RELAXED);
+        pub6[1] = __atomic_load_n(&si->pub6[1], __ATOMIC_RELAXED);
+        have    = __atomic_load_n(&si->have, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&si->seq, __ATOMIC_RELAXED) == s1)
+            break;
+        have = 0;
+    }
+
+    if (have & 1u) {
+        uint8_t ip4[4];
+        memcpy(ip4, &pub4, sizeof ip4);
+        elpis_addr_from4(&a, ip4, 0);
+    } else if (have & 2u) {
+        uint8_t ip6[16];
+        memcpy(ip6, pub6, sizeof ip6);
+        elpis_addr_from6(&a, ip6, 0);
+    } else {
+        return 0;
+    }
+    {
+        elpis_ecs_t whole;
+        elpis_ecs_from_addr(&whole, &a, 32, 128);
+        if (elpis_ecs_is_public(&whole))
+            elpis_ecs_truncate(out, &whole, ctx->conf.ecs_v4_bits,
+                               ctx->conf.ecs_v6_bits);
+    }
+    if (out->source == 0) {
+        memset(out, 0, sizeof *out);
+        return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Cymru query names                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -261,6 +340,7 @@ static void si_done(elpis_task_t *child, void *ctx)
     case SI_V4:
         if (child->rcode == ELPIS_RC_NOERROR)
             (void)first_a(child, si->v4, sizeof si->v4);
+        publish_addrs(si);
         s->stage = SI_ORIGIN;
         break;
 
@@ -397,6 +477,7 @@ static void si_tick(elpis_loop_t *lp, elpis_timer_t *tm)
         if (outbound_addr(AF_INET6, a6, sizeof a6) && is_public_v6(a6))
             elpis_strlcpy(si->v6, a6, sizeof si->v6);
     }
+    publish_addrs(si);
 
     s->stage  = SI_V4;
     s->asn[0] = '\0';

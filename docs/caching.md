@@ -28,6 +28,13 @@ re-encoded and no name is re-compressed. On a not-especially-quiet eight-core
 VM that path measures **600,000–780,000 queries/s** at a 100% hit rate, and
 around 200,000 on a single thread.
 
+With [EDNS Client Subnet](configuration.md#edns-client-subnet) on, an answer
+an authority tailored to one client subnet is kept apart. It goes into the
+message cache under that subnet and never into the RRset cache, where every
+client would find it. An answer learned without a subnet, from a server that
+would have taken one, is the view from wherever Elpis is. It is kept too, but
+a client with a subnet of its own passes it over and asks for one of its own.
+
 Entries are refreshed in the background before they expire, so a popular name
 never goes cold. The refresh starts when `prefetch-threshold` percent of the
 original TTL is left — 10 by default, so a 300-second record is refreshed with

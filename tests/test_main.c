@@ -2503,6 +2503,316 @@ static void test_localzone(void)
 }
 
 /* ================================================================== */
+/*
+ * EDNS Client Subnet (RFC 7871): the option on the wire, the subnets that are
+ * worth sending, the configuration, and the message cache keeping a tailored
+ * answer to the subnet it was made for.
+ */
+static uint8_t ecs_query(uint8_t *buf, size_t cap, const uint8_t *opt,
+                         size_t optlen, size_t *len)
+{
+    elpis_bld_t b;
+    elpis_name_t qn, root;
+    size_t rdpos;
+
+    elpis_name_from_text(&qn, "www.example.com.");
+    elpis_name_init_root(&root);
+    elpis_bld_init(&b, buf, cap, NULL, 0);
+    elpis_bld_header(&b, 7, ELPIS_FLAG_RD);
+    elpis_bld_question(&b, &qn, ELPIS_T_A, ELPIS_CLASS_IN);
+    elpis_bld_rr_begin(&b, &root, ELPIS_T_OPT, 1232, 0, &rdpos);
+    elpis_bld_u16(&b, ELPIS_OPT_ECS);
+    elpis_bld_u16(&b, (uint16_t)optlen);
+    elpis_bld_bytes(&b, opt, optlen);
+    elpis_bld_rr_end(&b, rdpos);
+    elpis_bld_count(&b, ELPIS_SEC_ADDITIONAL, 1);
+    elpis_bld_finish(&b);
+    *len = b.len;
+    return 1;
+}
+
+static void test_ecs(void)
+{
+    elpis_ecs_t e, t;
+    elpis_addr_t a;
+    uint8_t wire[64];
+    char sb[64];
+
+    section("edns client subnet");
+
+    {   /* 198.51.100.0/24, scope 0 */
+        static const uint8_t opt[] = { 0, 1, 24, 0, 198, 51, 100 };
+        CHECK(elpis_ecs_parse(&e, opt, sizeof opt) == ELPIS_OK &&
+              e.family == ELPIS_ECS_IPV4 && e.source == 24 && e.scope == 0 &&
+              e.addr[0] == 198 && e.addr[2] == 100 && e.addr[3] == 0,
+              "an IPv4 /24 parses");
+        CHECK(elpis_ecs_encode(&e, wire, sizeof wire) == sizeof opt &&
+              memcmp(wire, opt, sizeof opt) == 0, "and encodes back the same");
+        CHECK(strcmp(elpis_ecs_str(&e, sb, sizeof sb), "198.51.100.0/24") == 0,
+              "and prints as a prefix (%s)", sb);
+    }
+    {
+        static const uint8_t extra[] = { 0, 1, 24, 0, 198, 51, 100, 0 };
+        static const uint8_t trail[] = { 0, 1, 20, 0, 198, 51, 101 };
+        static const uint8_t fam[]   = { 0, 3, 8, 0, 10 };
+        static const uint8_t wide[]  = { 0, 1, 33, 0, 1, 2, 3, 4, 5 };
+        static const uint8_t zero[]  = { 0, 0, 0, 0 };
+        static const uint8_t v6[]    = { 0, 2, 56, 0, 0x24, 0x02, 0x4e, 0x20,
+                                         0x0b, 0x00, 0xb0 };
+        CHECK(elpis_ecs_parse(&e, extra, sizeof extra) == ELPIS_EFORMAT,
+              "more address octets than the prefix needs are refused");
+        CHECK(elpis_ecs_parse(&e, trail, sizeof trail) == ELPIS_EFORMAT,
+              "bits set past the prefix are refused");
+        CHECK(elpis_ecs_parse(&e, fam, sizeof fam) == ELPIS_EFORMAT,
+              "an unknown family is refused");
+        CHECK(elpis_ecs_parse(&e, wide, sizeof wide) == ELPIS_EFORMAT,
+              "a prefix longer than the family is refused");
+        CHECK(elpis_ecs_parse(&e, zero, sizeof zero) == ELPIS_OK &&
+              e.family == 0 && e.source == 0, "family 0 /0 means no subnet");
+        CHECK(elpis_ecs_parse(&e, v6, sizeof v6) == ELPIS_OK &&
+              e.family == ELPIS_ECS_IPV6 && e.source == 56, "an IPv6 /56 parses");
+    }
+
+    /* From a client address, cut to the configured prefix. */
+    elpis_addr_parse(&a, "203.0.113.77", 53);
+    CHECK(elpis_ecs_from_addr(&e, &a, 24, 56) && e.family == ELPIS_ECS_IPV4 &&
+          e.source == 24 && e.addr[2] == 113 && e.addr[3] == 0,
+          "an IPv4 client is cut to /24");
+    elpis_addr_parse(&a, "::ffff:198.51.100.9", 53);
+    CHECK(elpis_ecs_from_addr(&e, &a, 24, 56) && e.family == ELPIS_ECS_IPV4 &&
+          e.addr[0] == 198 && e.addr[3] == 0,
+          "an IPv4-mapped client counts as IPv4");
+    elpis_addr_parse(&a, "2402:4e20:b00b:1234:5678::1", 53);
+    CHECK(elpis_ecs_from_addr(&e, &a, 24, 56) && e.family == ELPIS_ECS_IPV6 &&
+          e.source == 56 && e.addr[6] == 0x12 && e.addr[7] == 0 &&
+          e.addr[8] == 0, "an IPv6 client is cut to /56");
+    elpis_ecs_truncate(&t, &e, 24, 48);
+    CHECK(t.source == 48 && t.addr[6] == 0 && t.addr[5] == 0x0b,
+          "a client's own option is cut to our prefix");
+    elpis_ecs_truncate(&t, &e, 24, 64);
+    CHECK(t.source == 56, "but never lengthened");
+
+    /* Only subnets that say where a client is are worth sending. */
+    {
+        static const char *const private_[] = {
+            "10.1.2.3", "192.168.1.9", "172.20.0.1", "100.64.3.4", "127.0.0.1",
+            "169.254.1.1", "192.0.2.1", "::1", "fd00::1", "fe80::1",
+            "2001:db8::1",
+        };
+        static const char *const public_[] = {
+            "151.158.198.49", "8.8.8.8", "2402:4e20:b00b::1", "2001:4860::1",
+        };
+        unsigned i;
+        int ok = 1;
+        for (i = 0; i < ELPIS_ARRAY_LEN(private_); i++) {
+            elpis_addr_parse(&a, private_[i], 53);
+            elpis_ecs_from_addr(&e, &a, 32, 128);
+            elpis_ecs_from_addr(&t, &a, 24, 56);
+            if (elpis_ecs_is_public(&e) || elpis_ecs_is_public(&t)) {
+                printf("  %s counted as public\n", private_[i]);
+                ok = 0;
+            }
+        }
+        CHECK(ok, "private, loopback and documentation ranges are not sent");
+        ok = 1;
+        for (i = 0; i < ELPIS_ARRAY_LEN(public_); i++) {
+            elpis_addr_parse(&a, public_[i], 53);
+            elpis_ecs_from_addr(&e, &a, 24, 56);
+            if (!elpis_ecs_is_public(&e)) {
+                printf("  %s counted as private\n", public_[i]);
+                ok = 0;
+            }
+        }
+        CHECK(ok, "public addresses are");
+        elpis_addr_parse(&a, "8.8.8.8", 53);
+        elpis_ecs_from_addr(&e, &a, 0, 0);
+        CHECK(!elpis_ecs_is_public(&e), "and a /0 says nothing");
+    }
+
+    /* In a message: parsed, kept, and a malformed one flagged, not dropped. */
+    {
+        static const uint8_t good[] = { 0, 1, 24, 0, 198, 51, 100 };
+        static const uint8_t bad[]  = { 0, 1, 20, 0, 198, 51, 101 };
+        uint8_t buf[512];
+        size_t len;
+        elpis_msg_t m;
+        int drop = 0;
+
+        ecs_query(buf, sizeof buf, good, sizeof good, &len);
+        CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_QUERY, &drop) == ELPIS_OK &&
+              m.have_ecs && !m.ecs_bad && m.ecs.source == 24,
+              "a query's ECS option is read");
+        ecs_query(buf, sizeof buf, bad, sizeof bad, &len);
+        CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_QUERY, &drop) == ELPIS_OK &&
+              m.have_ecs && m.ecs_bad,
+              "a malformed one is flagged for the server to refuse");
+    }
+
+    /* Written by the OPT builder and read back. */
+    {
+        uint8_t buf[512];
+        elpis_bld_t b;
+        elpis_edns_t ed;
+        elpis_name_t qn;
+        elpis_msg_t m;
+        int drop = 0;
+
+        elpis_name_from_text(&qn, "cdn.example.");
+        elpis_bld_init(&b, buf, sizeof buf, NULL, 0);
+        elpis_bld_header(&b, 9, ELPIS_FLAG_QR);
+        elpis_bld_question(&b, &qn, ELPIS_T_A, ELPIS_CLASS_IN);
+        elpis_edns_init(&ed, 1232, 1);
+        ed.have_ecs = 1;
+        elpis_addr_parse(&a, "203.0.113.77", 53);
+        elpis_ecs_from_addr(&ed.ecs, &a, 24, 56);
+        ed.ecs.scope = 20;
+        elpis_edns_write(&b, &ed, 0);
+        elpis_bld_finish(&b);
+        CHECK(elpis_msg_parse(&m, buf, b.len, ELPIS_PARSE_RESPONSE, &drop) ==
+                  ELPIS_OK && m.have_ecs && !m.ecs_bad &&
+              elpis_ecs_same_subnet(&m.ecs, &ed.ecs) && m.ecs.scope == 20,
+              "the OPT builder writes the option, SCOPE and all");
+    }
+
+    /* Configuration. */
+    {
+        elpis_conf_t c;
+        char line[128];
+        elpis_name_t n;
+
+        elpis_conf_defaults(&c);
+        CHECK(!c.ecs && c.ecs_ip_type == ELPIS_ECS_TYPE_CLIENT &&
+              c.ecs_v4_bits == 24 && c.ecs_v6_bits == 56,
+              "off by default; client, /24 and /56 when on");
+        elpis_strlcpy(line, "ecs: yes", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && c.ecs,
+              "ecs: yes");
+        elpis_strlcpy(line, "ecs-ip-type: this", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+              c.ecs_ip_type == ELPIS_ECS_TYPE_THIS, "ecs-ip-type: this");
+        elpis_strlcpy(line, "ecs-ip-type: none", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+              c.ecs_ip_type == ELPIS_ECS_TYPE_NONE, "ecs-ip-type: none");
+        elpis_strlcpy(line, "ecs-ip-type: somewhere", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK,
+              "anything else is an error");
+        elpis_strlcpy(line, "ecs-ipv4-prefix: 20", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+              c.ecs_v4_bits == 20, "ecs-ipv4-prefix");
+        elpis_strlcpy(line, "ecs-ipv4-prefix: 33", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK &&
+              c.ecs_v4_bits == 20, "an IPv4 prefix past 32 is an error");
+        elpis_strlcpy(line, "ecs-ipv6-prefix: 129", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK,
+              "an IPv6 prefix past 128 is an error");
+
+        elpis_name_from_text(&n, "www.shopee.com.my.");
+        CHECK(elpis_conf_ecs_zone_ok(&c, &n), "no ecs-zone: every name");
+        elpis_strlcpy(line, "ecs-zone: tbcache.com", sizeof line);
+        CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+              c.necs_zone == 1, "ecs-zone parses");
+        CHECK(!elpis_conf_ecs_zone_ok(&c, &n), "then only names under it");
+        elpis_name_from_text(&n, "www.taobao.com.danuoyi.TBCACHE.com.");
+        CHECK(elpis_conf_ecs_zone_ok(&c, &n), "in any case");
+        elpis_name_from_text(&n, "nottbcache.com.");
+        CHECK(!elpis_conf_ecs_zone_ok(&c, &n), "on a label boundary");
+    }
+
+    /* The message cache keeps a tailored answer to its own subnet. */
+    {
+        elpis_cache_t *mc = elpis_mcache_new(4 * 1024 * 1024, 4);
+        uint8_t msg[128], out[512];
+        uint8_t qn[] = "\3cdn\7example\0";
+        uint32_t toff[1], tval[1];
+        size_t len, outlen = 0, qend;
+        elpis_mkey_t k;
+        elpis_mserve_t info;
+        elpis_ecs_t s1, s2;
+
+        CHECK(mc != NULL, "message cache created");
+        if (mc == NULL)
+            return;
+
+        /* A bare NOERROR reply with one A record, question included. */
+        memset(msg, 0, sizeof msg);
+        elpis_put16(msg + 2, ELPIS_FLAG_QR);
+        elpis_put16(msg + 4, 1);
+        elpis_put16(msg + 6, 1);
+        memcpy(msg + 12, qn, sizeof qn);
+        len = 12 + sizeof qn;
+        elpis_put16(msg + len, ELPIS_T_A); len += 2;
+        elpis_put16(msg + len, ELPIS_CLASS_IN); len += 2;
+        qend = len;
+        msg[len++] = 0xC0; msg[len++] = 12;
+        elpis_put16(msg + len, ELPIS_T_A); len += 2;
+        elpis_put16(msg + len, ELPIS_CLASS_IN); len += 2;
+        toff[0] = (uint32_t)len; tval[0] = 300;
+        elpis_put32(msg + len, 300); len += 4;
+        elpis_put16(msg + len, 4); len += 2;
+        msg[len++] = 192; msg[len++] = 0; msg[len++] = 2; msg[len++] = 1;
+
+        elpis_addr_parse(&a, "203.0.113.77", 53);
+        elpis_ecs_from_addr(&s1, &a, 24, 56);
+        elpis_addr_parse(&a, "198.51.100.77", 53);
+        elpis_ecs_from_addr(&s2, &a, 24, 56);
+
+        memset(&k, 0, sizeof k);
+        k.qname = qn; k.qnamelen = sizeof qn; k.qtype = ELPIS_T_A;
+        k.qclass = ELPIS_CLASS_IN;
+        k.ecs = s1;
+        elpis_mkey_hash(&k);
+        CHECK(elpis_mcache_store(mc, &k, msg, len, qend, toff, tval, 1,
+                                 len, len, ELPIS_RC_NOERROR, 0,
+                                 ELPIS_SEC_INSECURE, 300, 0, 24, 0) == ELPIS_OK,
+              "a tailored answer is stored");
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_OK &&
+              info.ecs_scope == 24, "its own subnet is served it, with its SCOPE");
+
+        k.ecs = s2;
+        elpis_mkey_hash(&k);
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_ENOTFOUND,
+              "another subnet is not");
+        elpis_mkey_shared(&k);
+        elpis_mkey_hash(&k);
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_ENOTFOUND,
+              "nor is a client with no subnet");
+
+        /* The view from here: shared, but not for a client with a subnet. */
+        CHECK(elpis_mcache_store(mc, &k, msg, len, qend, toff, tval, 1,
+                                 len, len, ELPIS_RC_NOERROR, 0,
+                                 ELPIS_SEC_INSECURE, 300, 0, 0, 1) == ELPIS_OK,
+              "a local answer is stored");
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_OK,
+              "a client without a subnet is served it");
+        k.shared_only = 1;
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_ENOTFOUND,
+              "a client with one passes it over");
+        k.shared_only = 0;
+        CHECK(elpis_mcache_store(mc, &k, msg, len, qend, toff, tval, 1,
+                                 len, len, ELPIS_RC_NOERROR, 0,
+                                 ELPIS_SEC_INSECURE, 300, 0, 0, 0) == ELPIS_OK,
+              "an answer that is the same for everyone replaces it");
+        k.shared_only = 1;
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_OK &&
+              info.ecs_scope == 0, "and every client is served that");
+
+        k.ecs = s1;
+        k.shared_only = 0;
+        elpis_mkey_hash(&k);
+        CHECK(elpis_mcache_serve(mc, &k, 1, qn, ELPIS_FLAG_QR, 512, 0, 30, 0,
+                                 out, sizeof out, &outlen, &info) == ELPIS_OK,
+              "the tailored one is still there beside it");
+        elpis_cache_free(mc);
+    }
+}
+
+/* ================================================================== */
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -2536,6 +2846,7 @@ int main(void)
     test_task_ceiling();
     test_quirks();
     test_localzone();
+    test_ecs();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

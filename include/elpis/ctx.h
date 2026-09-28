@@ -45,6 +45,11 @@ typedef struct {
      * that were not held had their turn.
      */
     uint64_t held;
+    /*
+     * EDNS Client Subnet: queries sent with a subnet, and answers that came
+     * back tailored to it (SCOPE above 0).
+     */
+    uint64_t ecs_sent, ecs_tailored;
 } elpis_stats_t;
 
 /*
@@ -59,6 +64,15 @@ typedef struct {
     char     asn[24];
     char     asname[160];
     uint64_t at_ms;
+    /*
+     * The same two addresses as bytes, for ecs-ip-type: this, which every
+     * worker reads on its send path.  selfinfo.c writes them under `seq`
+     * (odd while a write is under way) so no reader takes half of one.
+     */
+    uint32_t seq;
+    uint32_t pub4;          /* network order; valid when have & 1 */
+    uint64_t pub6[2];       /* network order; valid when have & 2 */
+    uint32_t have;
 } elpis_selfinfo_t;
 
 typedef struct {

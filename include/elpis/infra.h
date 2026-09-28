@@ -90,7 +90,19 @@ typedef struct {
     uint32_t silent_since; /* first of those timeouts, seconds; 0 = none     */
     uint32_t hold_until;   /* held types are not asked before this; 0 = none */
     uint32_t last_used;
+    /*
+     * No EDNS Client Subnet to this server before this time; 0 = send it.
+     * Set when it refused the option (FORMERR), echoed back a subnet that was
+     * not the one sent, or answered without one at all -- which a server
+     * that uses ECS does not do: it says what SCOPE it used.  A time rather
+     * than a flag, because a busy server's entry never expires, and a server
+     * that starts tailoring answers should be noticed eventually.
+     */
+    uint32_t ecs_off_until;
 } elpis_infra_info_t;
+
+/* How long a server that will not take ECS goes without it. */
+#define ELPIS_ECS_OFF_S      3600u
 
 elpis_cache_t *elpis_infra_new(uint64_t bytes, unsigned shards);
 
@@ -126,6 +138,8 @@ void elpis_infra_set_flag(elpis_cache_t *c, const elpis_addr_t *a,
                           uint8_t flag, int on);
 void elpis_infra_set_cookie(elpis_cache_t *c, const elpis_addr_t *a,
                             const uint8_t *cookie, size_t len);
+/* Send the server no ECS option before `until`. */
+void elpis_infra_ecs_off(elpis_cache_t *c, const elpis_addr_t *a, uint32_t until);
 
 /* Effective selection cost: srtt plus a penalty for recent timeouts. */
 uint32_t elpis_infra_cost(const elpis_infra_info_t *i);

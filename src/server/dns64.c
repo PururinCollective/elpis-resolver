@@ -102,6 +102,15 @@ static void dns64_child_done(elpis_task_t *child, void *ctxp)
         return;
     pfx = &p->w->ctx->conf.dns64_prefix;
 
+    /* The A records become part of this answer, tailored or not. */
+    if (child->ecs_tailored) {
+        p->ecs_tailored = 1;
+        if (child->ecs_scope > p->ecs_scope)
+            p->ecs_scope = child->ecs_scope;
+    }
+    if (child->ecs_local)
+        p->ecs_local = 1;
+
     if (child->rcode == ELPIS_RC_NOERROR) {
         for (i = 0; i < child->ans.n; i++) {
             const elpis_trr_t *rr = &child->ans.rr[i];
@@ -154,9 +163,15 @@ int elpis_dns64_start(elpis_task_t *t)
 {
     elpis_name_t n = t->orig_qname;
 
+    elpis_task_t *c;
+
     t->dns64_tried = 1;
-    if (elpis_task_child(t, &n, ELPIS_T_A, dns64_child_done, NULL) == NULL)
+    c = elpis_task_child(t, &n, ELPIS_T_A, dns64_child_done, NULL);
+    if (c == NULL)
         return ELPIS_ERR;
+    /* Asked for the same client as the AAAA was: it starts on the next turn
+     * of the loop, so this is in time. */
+    c->ecs = t->ecs;
     return ELPIS_OK;
 }
 

@@ -242,6 +242,84 @@ They are used round-robin across the outbound socket pool. An off-path
 attacker forging a reply then has to guess the source address as well as the
 port and the message ID.
 
+## EDNS Client Subnet
+
+```
+ecs: yes
+ecs-ip-type: client
+```
+
+A content network picks a server near whoever asks, and without ECS the one
+asking is Elpis. That is right when Elpis sits beside its clients, and wrong
+when it does not. If AdGuard Home in Malaysia lists an Elpis in Singapore as
+one of its upstreams, every question it sends there gets Singapore's servers.
+With ECS on, part of an address goes with each query, so the network can answer
+for where the client really is. That part is a /24 for IPv4 or a /56 for IPv6,
+never a whole address.
+
+`ecs-ip-type` says whose address is sent:
+
+| value | what the authority is sent |
+|---|---|
+| `client` | the client's subnet (the default) |
+| `this` | this resolver's own public subnet, the same for every client |
+| `none` | a /0, which asks for an answer tailored to nobody |
+
+With `client`, the subnet comes from the client's own ECS option when it sends
+one. Otherwise it comes from the address the query arrived from. A private,
+CGNAT or loopback address says nothing about where a client is, so a client
+with one gets this resolver's own subnet instead. So does a client that sends a
+/0 to opt out. This resolver's own address is the one the status page shows. It
+is looked up a few seconds after startup, and until then those clients are
+sent no subnet at all.
+
+`this` suits Elpis behind a forwarder or a NAT whose egress is somewhere else.
+`none` suits `forward-zone` to a public resolver that would otherwise add a
+subnet of its own from Elpis's address.
+
+```
+ecs-ipv4-prefix: 24      # 0 to 32; 0 sends no IPv4 subnet
+ecs-ipv6-prefix: 56      # 0 to 128
+ecs-zone: tbcache.com    # repeatable; only names under these zones
+```
+
+A client that sends a longer prefix than these is cut down to them. With no
+`ecs-zone:` lines, a subnet can go to the servers of any zone below the TLDs.
+
+### Behind AdGuard Home
+
+If AdGuard Home reaches Elpis across the internet, nothing is needed on its
+side: the address Elpis sees is AdGuard's public one, which is where its
+clients are. If it reaches Elpis over a VPN or a private network, the address
+Elpis sees is a private one. Then turn on **Use EDNS Client Subnet** in
+AdGuard's DNS settings, with **Use custom IP for EDNS** set to the site's
+public address, so the subnet arrives in the query itself.
+
+### What it costs
+
+- **Privacy.** A prefix of each client's address goes to every authority that
+  takes one. The root and the TLDs are never sent one. A server that answers
+  without saying how it used the subnet, as a server that ignores ECS does, is
+  sent none for the next hour. `ecs-zone` narrows it further. (With `none`
+  the /0 keeps going regardless, since its job is to stop a forwarder adding a
+  subnet of its own.)
+- **Cache.** An answer an authority tailored to one subnet (a SCOPE above 0 in
+  its reply) is cached for that subnet alone, and each subnet asks for its own.
+  Most authorities give every subnet the same answer, and those answers stay
+  shared. The statistics count both: `ecs sent=` and `tailored=`.
+
+### Checking it
+
+Google's `o-o.myaddr.l.google.com` answers with the subnet it was sent:
+
+```bash
+dig @127.0.0.1 -p 5335 o-o.myaddr.l.google.com TXT +subnet=175.139.1.0/24
+```
+
+The reply should carry `"edns0-client-subnet 175.139.1.0/24"`. With `this`, it
+shows this resolver's own subnet; with `none`, `"edns0-client-subnet was not
+used"`.
+
 ## Zones whose servers misbehave
 
 ```

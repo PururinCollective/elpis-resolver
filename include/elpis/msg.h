@@ -11,6 +11,7 @@
 
 #include "elpis/name.h"
 #include "elpis/log.h"
+#include "elpis/ecs.h"
 
 /* ------------------------------------------------------------------ */
 /* Parsing                                                             */
@@ -57,7 +58,10 @@ typedef struct {
     unsigned       have_opt : 1;
     unsigned       do_bit   : 1;
     unsigned       have_cookie : 1;
+    /* An ECS option was present (RFC 7871); `ecs` holds it when it was well
+     * formed, and ecs_bad is set when it was not. */
     unsigned       have_ecs : 1;
+    unsigned       ecs_bad  : 1;
     uint16_t       edns_bufsize;
     uint8_t        edns_version;
     uint8_t        edns_rcode_hi;      /* upper 8 bits of the ext. rcode */
@@ -67,6 +71,7 @@ typedef struct {
     uint16_t       opt_rdlen;
     uint8_t        cookie[40];
     uint8_t        cookie_len;
+    elpis_ecs_t    ecs;
 } elpis_msg_t;
 
 ELPIS_INLINE unsigned elpis_msg_rcode(const elpis_msg_t *m)
