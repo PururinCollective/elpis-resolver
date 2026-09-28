@@ -327,8 +327,8 @@ int elpis_probe_roots(elpis_ctx_t *ctx)
                 elpis_infra_rtt_ok(ctx->infra, &t[i].addr, t[i].best_ms);
             if (t[i].family == AF_INET) ok4++; else ok6++;
         } else if (t[i].sent > 0) {
-            elpis_infra_timeout(ctx->infra, &t[i].addr, ELPIS_T_SOA,
-                                elpis_now_s(), 0);
+            (void)elpis_infra_timeout(ctx->infra, &t[i].addr, ELPIS_T_SOA,
+                                      elpis_now_s(), 0);
         }
     }
 

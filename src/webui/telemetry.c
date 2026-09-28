@@ -41,6 +41,9 @@ static struct {
 static uint32_t g_cpu_milli;
 static uint64_t g_rss_bytes;
 
+/* Held servers; a row whose server family is 0 is free. */
+static elpis_tmheld_t g_held[ELPIS_TM_HELD];
+
 /* Merged from every worker's counters, which only ever grow. */
 static uint64_t g_rx_total, g_tx_total, g_rtt_sum_us, g_rtt_count;
 static uint64_t g_verify_total;
@@ -57,6 +60,7 @@ void elpis_tm_init(int enabled)
     g_hist_n = g_hist_head = 0;
     g_log_n = g_log_head = 0;
     memset(&g_prev, 0, sizeof g_prev);
+    memset(g_held, 0, sizeof g_held);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -277,6 +281,83 @@ void elpis_tm_timeout(elpis_wtm_t *w, const elpis_addr_t *server)
     /* The port is kept here: it identifies which instance went quiet. */
     bump_addr(&w->tab[ELPIS_TOP_TIMEOUT], server, 1);
     w->dirty = 1;
+}
+
+void elpis_tm_turned_away(elpis_wtm_t *w, const elpis_name_t *zone)
+{
+    if (!elpis_tm_enabled || w == NULL || zone == NULL)
+        return;
+    bump_name(&w->tab[ELPIS_TOP_HELD_ZONE], zone);
+    w->dirty = 1;
+}
+
+void elpis_tm_name_text(const elpis_name_t *n, char *out, size_t outsz)
+{
+    elpis_name_t tmp = *n;
+
+    /* Exactly what bump_name() writes, so the two can be matched up. */
+    elpis_name_lower(&tmp);
+    elpis_name_str(&tmp, out, outsz);
+}
+
+static void asker_fill(elpis_tmasker_t *a, const elpis_tmhold_t *h)
+{
+    memset(a, 0, sizeof *a);
+    if (h->client != NULL) {
+        addr_only(h->client, a->client, sizeof a->client);
+        a->is_client = 1;
+    } else
+        elpis_strlcpy(a->client, h->who ? h->who : "", sizeof a->client);
+    if (h->qname != NULL)
+        elpis_tm_name_text(h->qname, a->qname, sizeof a->qname);
+    a->qtype = h->qtype;
+    a->at    = h->now;
+}
+
+/*
+ * One row per server address.  A row belongs to one silence: when the server
+ * answers and later goes quiet again, the new hold starts the row afresh
+ * rather than crediting the old trigger with it.  When every row is taken,
+ * the one held longest ago gives way.
+ */
+void elpis_tm_held(const elpis_tmhold_t *h)
+{
+    elpis_tmheld_t *row = NULL, *oldest = NULL;
+    unsigned i;
+
+    if (!elpis_tm_enabled || h == NULL || h->server == NULL)
+        return;
+
+    pthread_mutex_lock(&g_lock);
+    for (i = 0; i < ELPIS_TM_HELD; i++) {
+        elpis_tmheld_t *r = &g_held[i];
+        if (r->server.u.sa.sa_family == 0) {
+            if (oldest == NULL || oldest->server.u.sa.sa_family != 0)
+                oldest = r;
+            continue;
+        }
+        if (elpis_addr_eq(&r->server, h->server)) {
+            row = r;
+            break;
+        }
+        if (oldest == NULL || (oldest->server.u.sa.sa_family != 0 &&
+                               r->last.at < oldest->last.at))
+            oldest = r;
+    }
+    if (row == NULL || row->streak != h->streak) {
+        if (row == NULL)
+            row = oldest;
+        memset(row, 0, sizeof *row);
+        row->server = *h->server;
+        row->streak = h->streak;
+        asker_fill(&row->first, h);
+    }
+    if (h->zone != NULL)
+        elpis_tm_name_text(h->zone, row->zone, sizeof row->zone);
+    asker_fill(&row->last, h);
+    row->types = h->types;
+    row->holds++;
+    pthread_mutex_unlock(&g_lock);
 }
 
 void elpis_tm_bytes(elpis_wtm_t *w, uint64_t rx, uint64_t tx)
@@ -516,6 +597,29 @@ unsigned elpis_tm_top(elpis_top_t which, elpis_tmrow_t *out, unsigned max)
         if (j < max) {
             elpis_strlcpy(out[j].key, s->key, sizeof out[j].key);
             out[j].count = s->count;
+            if (n < max)
+                n++;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return n;
+}
+
+unsigned elpis_tm_held_rows(elpis_tmheld_t *out, unsigned max)
+{
+    unsigned n = 0, i, j;
+
+    pthread_mutex_lock(&g_lock);
+    for (i = 0; i < ELPIS_TM_HELD; i++) {
+        const elpis_tmheld_t *r = &g_held[i];
+        if (r->server.u.sa.sa_family == 0)
+            continue;
+        for (j = n; j > 0 && out[j - 1].last.at < r->last.at; j--) {
+            if (j < max)
+                out[j] = out[j - 1];
+        }
+        if (j < max) {
+            out[j] = *r;
             if (n < max)
                 n++;
         }

@@ -68,7 +68,9 @@ servers kept answering, is now held for `server-hold-down` seconds (30 by
 default). A zone whose servers are all held is answered SERVFAIL, extended
 error 22 (No Reachable Authority), at once. When the hold runs out, one query
 goes through to see whether the server is back. The status page counts these
-answers as **servers held**, and so does `held=` in the SIGUSR1 statistics.
+answers as **cut short by a hold**, and so does `held=` in the SIGUSR1
+statistics. Its **Held servers** window lists each server held, what for, when
+it will next be tried, and which client's query set the hold off.
 
 Holds are per question type, so a server that drops only HTTPS is still asked
 for A. Silence while nothing else answers does not count, so an outage on this

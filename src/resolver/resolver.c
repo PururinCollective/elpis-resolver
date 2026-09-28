@@ -2302,8 +2302,10 @@ void elpis_task_step(elpis_task_t *t)
                  * a while, so this is the SERVFAIL the full wait would have
                  * ended in, sooner and without the queries.
                  */
-                if (chosen < 0)
+                if (chosen < 0) {
                     elpis_stat_inc(&w->stats.held, 1);
+                    elpis_tm_turned_away(&w->tm, &t->deleg.zone);
+                }
                 elpis_task_fail(t, ELPIS_RC_SERVFAIL, ELPIS_EDE_NO_REACHABLE_AUTH);
                 return;
             }

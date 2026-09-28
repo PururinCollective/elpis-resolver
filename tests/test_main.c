@@ -623,6 +623,111 @@ static void test_infra_hold(void)
 }
 
 /* ================================================================== */
+/*
+ * The status page's list of held servers: one row per server and silence,
+ * the query that set the hold off kept apart from the latest one, and the
+ * zone written the way the turned-away tally writes it so the two join up.
+ */
+static void test_held_rows(void)
+{
+    static elpis_tmheld_t rows[ELPIS_TM_HELD];
+    elpis_tmrow_t top[4];
+    elpis_wtm_t *w;
+    elpis_tmhold_t h;
+    elpis_addr_t s1, s2, cl, extra;
+    elpis_name_t zone, qn;
+    unsigned n, i;
+    int found;
+
+    section("held servers on the status page");
+
+    elpis_tm_init(1);
+    elpis_addr_parse(&s1, "24.216.90.1", 53);
+    elpis_addr_parse(&s2, "24.216.90.2", 53);
+    elpis_addr_parse(&cl, "10.1.2.3@40000", 53);
+    elpis_name_from_text(&zone, "Spectrum.COM.");
+    elpis_name_from_text(&qn, "024-231-165-138.res.spectrum.com.");
+
+    memset(&h, 0, sizeof h);
+    h.server = &s1;
+    h.zone   = &zone;
+    h.qname  = &qn;
+    h.qtype  = ELPIS_T_A;
+    h.client = &cl;
+    h.streak = 1000;
+    h.types  = ELPIS_QC_A;
+    h.now    = 1010;
+    elpis_tm_held(&h);
+    n = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    CHECK(n == 1 && rows[0].holds == 1 && rows[0].first.is_client &&
+          !strcmp(rows[0].first.client, "10.1.2.3") &&
+          rows[0].first.qtype == ELPIS_T_A && rows[0].first.at == 1010,
+          "a hold is listed with the client that set it off, without its port");
+    CHECK(strstr(rows[0].zone, "spectrum.com") == rows[0].zone &&
+          strstr(rows[0].first.qname, "024-231-165-138.res.spectrum.com") ==
+          rows[0].first.qname,
+          "zone and question are kept, in lowercase");
+
+    h.client = NULL;
+    h.who    = "prefetch";
+    h.types  = ELPIS_QC_A | ELPIS_QC_OTHER;
+    h.now    = 1040;
+    elpis_tm_held(&h);
+    n = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    CHECK(n == 1 && rows[0].holds == 2 &&
+          !strcmp(rows[0].first.client, "10.1.2.3") &&
+          !strcmp(rows[0].last.client, "prefetch") && !rows[0].last.is_client &&
+          rows[0].types == (ELPIS_QC_A | ELPIS_QC_OTHER),
+          "held again in the same silence: the first trigger stays, the latest moves");
+
+    h.client = &cl;
+    h.streak = 2000;
+    h.now    = 2010;
+    elpis_tm_held(&h);
+    n = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    CHECK(n == 1 && rows[0].holds == 1 && rows[0].first.at == 2010,
+          "a new silence starts the row afresh");
+
+    h.server = &s2;
+    h.now    = 2020;
+    elpis_tm_held(&h);
+    n = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    CHECK(n == 2 && elpis_addr_eq(&rows[0].server, &s2) &&
+          elpis_addr_eq(&rows[1].server, &s1),
+          "rows come most recently held first");
+
+    for (i = 0; i < ELPIS_TM_HELD - 1u; i++) {
+        uint8_t ip[4] = { 192, 0, 2, (uint8_t)(i + 1u) };
+        elpis_addr_from4(&extra, ip, 53);
+        h.server = &extra;
+        h.now    = 3000 + i;
+        elpis_tm_held(&h);
+    }
+    n = elpis_tm_held_rows(rows, ELPIS_TM_HELD);
+    found = 0;
+    for (i = 0; i < n; i++)
+        if (elpis_addr_eq(&rows[i].server, &s1))
+            found = 1;
+    CHECK(n == ELPIS_TM_HELD && !found,
+          "when the list is full, the server held longest ago gives way");
+
+    w = (elpis_wtm_t *)elpis_calloc(1, sizeof *w);
+    CHECK(w != NULL, "worker tallies allocated");
+    if (w != NULL) {
+        elpis_tm_turned_away(w, &zone);
+        elpis_tm_turned_away(w, &zone);
+        elpis_tm_turned_away(w, &zone);
+        elpis_tm_publish(w);
+        n = elpis_tm_top(ELPIS_TOP_HELD_ZONE, top, 4);
+        CHECK(n == 1 && top[0].count == 3 && !strcmp(top[0].key, rows[0].zone),
+              "lookups turned away are counted by zone, keyed as the rows are");
+        elpis_free(w);
+    }
+
+    elpis_tm_init(0);
+}
+
+/* ================================================================== */
 static void test_cache(void)
 {
     elpis_cache_t *rc;
@@ -2413,6 +2518,7 @@ int main(void)
     test_msg();
     test_cache();
     test_infra_hold();
+    test_held_rows();
     test_hashes();
     test_signatures();
     test_bignum();

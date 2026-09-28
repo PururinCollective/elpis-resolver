@@ -32,6 +32,7 @@ typedef enum {
     ELPIS_TOP_CLIENT_FAIL,    /* clients being handed SERVFAIL            */
     ELPIS_TOP_CLIENT_BOGUS,   /* clients asking for bogus names           */
     ELPIS_TOP_TIMEOUT,        /* upstream servers that stopped answering  */
+    ELPIS_TOP_HELD_ZONE,      /* zones answered SERVFAIL because held     */
     ELPIS_TOP__COUNT
 } elpis_top_t;
 
@@ -76,6 +77,51 @@ typedef struct {
 } elpis_tmrow_t;
 
 /*
+ * Servers held down (server-hold-down), and what set each one off.
+ *
+ * Kept apart from the top-N tables because a hold is an event with a story,
+ * not a count: which zone was being asked, for which client, and when.  It is
+ * also rare -- a held server is not asked again until its hold runs out -- so
+ * the worker writes it under the lock directly instead of batching it.
+ *
+ * What the hold is doing now is not kept here.  The infra cache has that, and
+ * the page reads it from there, so the two cannot disagree.
+ */
+#define ELPIS_TM_HELD     64u
+#define ELPIS_TM_ADDRLEN  48u
+
+typedef struct {
+    char     client[ELPIS_TM_ADDRLEN];   /* address, or what asked instead */
+    char     qname[ELPIS_TM_KEYLEN + 1]; /* the client's question          */
+    uint16_t qtype;
+    uint8_t  is_client;                  /* `client` is an address         */
+    uint32_t at;                         /* monotonic seconds              */
+} elpis_tmasker_t;
+
+typedef struct {
+    elpis_addr_t    server;
+    char            zone[ELPIS_TM_KEYLEN + 1];  /* "" when not known       */
+    uint32_t        streak;    /* the server's silent_since: one silence   */
+    uint32_t        holds;     /* times held or held longer in it          */
+    uint8_t         types;     /* ELPIS_QC_* held, at the latest hold      */
+    elpis_tmasker_t first;     /* whose query first held it                */
+    elpis_tmasker_t last;      /* ... and most recently                    */
+} elpis_tmheld_t;
+
+/* What was waiting on the query whose timeout held a server. */
+typedef struct {
+    const elpis_addr_t *server;
+    const elpis_name_t *zone;      /* the delegation being asked, or NULL  */
+    const elpis_name_t *qname;     /* the client's question, or NULL       */
+    uint16_t            qtype;
+    const elpis_addr_t *client;    /* NULL when no client was waiting ...  */
+    const char         *who;       /* ... and this says what asked instead */
+    uint32_t            streak;
+    uint8_t             types;
+    uint32_t            now;
+} elpis_tmhold_t;
+
+/*
  * Counting every query exactly is worth about a tenth of peak throughput, so
  * nothing is counted at all until the status page is switched on.  The flag is
  * read on the hot path and never written after startup.
@@ -103,6 +149,10 @@ void elpis_tm_answer(elpis_wtm_t *w, const elpis_name_t *qname,
                      const elpis_addr_t *client, unsigned rcode, int bogus);
 /* Record an upstream server that failed to answer. */
 void elpis_tm_timeout(elpis_wtm_t *w, const elpis_addr_t *server);
+/* A server was held, or held for longer.  Takes the lock; see above. */
+void elpis_tm_held(const elpis_tmhold_t *h);
+/* A resolution in `zone` ended at once because its servers were held. */
+void elpis_tm_turned_away(elpis_wtm_t *w, const elpis_name_t *zone);
 /* Bytes on the wire, counted where they are already being measured. */
 void elpis_tm_bytes(elpis_wtm_t *w, uint64_t rx, uint64_t tx);
 
@@ -119,6 +169,12 @@ unsigned elpis_tm_history(elpis_tmsample_t *out, unsigned max);
 
 /* Copy the top `max` rows of one table, largest first. */
 unsigned elpis_tm_top(elpis_top_t which, elpis_tmrow_t *out, unsigned max);
+
+/* Copy the held-server rows, most recently held first. */
+unsigned elpis_tm_held_rows(elpis_tmheld_t *out, unsigned max);
+
+/* A zone name as the tables write it: lowercase, truncated to fit. */
+void elpis_tm_name_text(const elpis_name_t *n, char *out, size_t outsz);
 
 /* Recent log lines, oldest first. */
 unsigned elpis_tm_log(char out[][ELPIS_TM_LOGLEN], unsigned max);

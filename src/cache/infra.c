@@ -134,11 +134,16 @@ void elpis_infra_rtt_ok(elpis_cache_t *c, const elpis_addr_t *a, uint32_t rtt_ms
     infra_update(c, a, fn_rtt_ok, &rtt_ms);
 }
 
-typedef struct { uint16_t qtype; uint32_t now; uint32_t hold_s; } timeout_arg_t;
+typedef struct {
+    uint16_t qtype;
+    uint32_t now;
+    uint32_t hold_s;
+    int      held;          /* out: this timeout set the hold */
+} timeout_arg_t;
 
 static void fn_timeout(elpis_infra_info_t *i, void *ctx)
 {
-    const timeout_arg_t *t = (const timeout_arg_t *)ctx;
+    timeout_arg_t *t = (timeout_arg_t *)ctx;
 
     if (i->timeouts == 0 || i->silent_since == 0)
         i->silent_since = t->now ? t->now : 1u;
@@ -156,18 +161,22 @@ static void fn_timeout(elpis_infra_info_t *i, void *ctx)
      * can be silent for ten seconds without having missed anything.
      */
     if (t->hold_s != 0 && i->timeouts >= ELPIS_HOLD_AFTER &&
-        t->now >= i->silent_since + ELPIS_HOLD_SILENT_S)
+        t->now >= i->silent_since + ELPIS_HOLD_SILENT_S) {
         i->hold_until = t->now + t->hold_s;
+        t->held = 1;
+    }
 }
 
-void elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a,
-                         uint16_t qtype, uint32_t now, uint32_t hold_s)
+int elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a,
+                        uint16_t qtype, uint32_t now, uint32_t hold_s)
 {
     timeout_arg_t arg;
     arg.qtype  = qtype;
     arg.now    = now;
     arg.hold_s = hold_s;
+    arg.held   = 0;
     infra_update(c, a, fn_timeout, &arg);
+    return arg.held;
 }
 
 unsigned elpis_infra_qclass(uint16_t qtype)

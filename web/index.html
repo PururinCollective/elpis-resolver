@@ -228,6 +228,14 @@ function dur(s){
       m = Math.floor(s%3600/60);
   return (d ? d+'d ' : '') + h + 'h ' + m + 'm';
 }
+/* To the second, for things that count down while you watch: "45 s",
+   "4 m 12 s", "2 h 3 m". */
+function secs(s){
+  s = Math.max(0, Math.round(Number(s)||0));
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s/60) + ' m ' + (s%60) + ' s';
+  return Math.floor(s/3600) + ' h ' + Math.floor(s%3600/60) + ' m';
+}
 function last(a){ return (a && a.length) ? a[a.length-1] : 0; }
 /* The instruction set and the CPU the binary was compiled for, as the startup
    line has them: "x86_64 znver3".  A build that asked for no particular CPU
@@ -724,7 +732,7 @@ var VIEWS = [
         "<b>SERVFAIL</b><span>" + num(st.servfail) + "</span>" +
         "<b>REFUSED</b><span>" + num(st.refused) + "</span>" +
         "<b>timeouts</b><span>" + num(st.timeouts) + "</span>" +
-        "<b>servers held</b><span>" + num(st.held) + "</span>" +
+        "<b>cut short by a hold</b><span>" + num(st.held) + "</span>" +
         "<b>dropped</b><span>" + num(st.dropped) + "</span>" +
         "<b>bad cookie</b><span>" + num(st.cookiebad) + "</span>" +
       "</div></div>" +
@@ -935,6 +943,74 @@ var VIEWS = [
       "<div><h4>Asking for bogus</h4>" + rows(d.top.clientbogus, 'client') + "</div>" +
       "<div><h4>Upstream not answering</h4>" + rows(d.top.timeout, 'server') + "</div>" +
       "</div>";
+  }},
+
+/*
+ * Servers held down by server-hold-down: what each is held for, when it will
+ * next be tried, and whose query set it off.  "Next try" is the hold's own
+ * clock in the infra cache.  When it runs out the server is not asked at
+ * once: the next query that needs it goes through as the probe.
+ */
+{ id:'held', title:'Held servers', w:820, h:400,
+  icon:"<svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='9'/><path d='M10 9v6M14 9v6'/></svg>",
+  render: function(b, d){
+    var H = d.holds || { hold: 0, cut: 0, rows: [] }, r = H.rows || [];
+    var now = r.filter(function(x){ return x.state !== 'answering'; }).length;
+    var dim = "style='color:var(--dim)'";
+    function who(a){
+      var c = a.real ? esc(a.client)
+            : "<i " + dim + ">" + esc(a.client || 'unknown') + "</i>";
+      return c + "<br><span " + dim + ">" +
+             (a.name ? esc(a.name) + ' ' + esc(a.type) + ' &middot; ' : '') +
+             secs(a.ago) + " ago</span>";
+    }
+
+    var h = "<div style='margin-bottom:8px'>" +
+      (H.hold ? "<b>" + num(now) + "</b> held now &middot; <b>" + num(H.cut) +
+                "</b> lookups cut short since start &middot; hold " + H.hold + " s"
+              : "<span style='color:var(--warn)'>Holds are off " +
+                "(server-hold-down: 0).</span>") + "</div>";
+    h += "<table><tr><th>server</th><th>zone</th><th>held for</th>" +
+         "<th>next try</th><th class='n'>silent</th><th>set off by</th></tr>";
+    if (!r.length)
+      h += "<tr><td colspan='6' " + dim + ">no server has been held</td></tr>";
+    r.forEach(function(x){
+      var next;
+      if (x.state === 'held') {
+        var wd = H.hold ? Math.max(2, Math.round(Math.min(1, x.eta / H.hold) * 60)) : 0;
+        next = "<span style='display:inline-block;height:7px;width:" + wd +
+               "px;background:var(--warn);vertical-align:middle;margin-right:6px'>" +
+               "</span>in " + secs(x.eta);
+      } else if (x.state === 'due') {
+        next = "<span style='color:var(--warn)'>on the next query</span>";
+      } else {
+        next = "<span style='color:var(--ok)'>answering again</span>";
+      }
+      var types = (x.types || []).map(function(t){
+        return "<span class='pill " + (x.state === 'answering' ? '' : 'warn') +
+               "'>" + esc(t) + "</span>";
+      }).join(' ');
+      var byLast = x.holds > 1 &&
+        (x.last.client !== x.by.client || x.last.name !== x.by.name)
+        ? "<div style='margin-top:3px'><span " + dim + ">latest:</span> " +
+          who(x.last) + "</div>" : '';
+      h += "<tr" + (x.state === 'answering' ? " " + dim : '') + ">" +
+           "<td>" + esc(x.server) + "</td>" +
+           "<td>" + (x.zone ? esc(x.zone) : "<span " + dim + ">unknown</span>") +
+             (x.turned ? "<br><span " + dim + ">" + num(x.turned) +
+                         " turned away</span>" : '') + "</td>" +
+           "<td>" + types + "</td>" +
+           "<td>" + next + "</td>" +
+           "<td class='n'>" + (x.silent ? secs(x.silent) : '&ndash;') +
+             "<br><span " + dim + ">" + num(x.timeouts) + " timeouts</span></td>" +
+           "<td>" + who(x.by) + byLast + "</td></tr>";
+    });
+    b.innerHTML = h + "</table><div style='color:var(--dim);margin-top:8px'>" +
+      "A server silent for 10 s and three queries in a row, while others " +
+      "answered, is not asked that kind of question until its hold runs " +
+      "out. Then the next query that needs it goes through to see if it " +
+      "is back. <b>Set off by</b> is the client whose query timed out and " +
+      "held it. A server that answers again is listed for ten minutes.</div>";
   }},
 
 { id:'log', title:'Log', w:640, h:330, nofit: true,
