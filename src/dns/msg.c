@@ -143,11 +143,23 @@ static int parse_opt(elpis_msg_t *m, const elpis_rr_t *rr, unsigned flags,
             /*
              * Anything else wrong with it is kept, not dropped: whether a
              * bad subnet is worth a FORMERR depends on whether ECS is on,
-             * and that is for the server to say.  A second option is as bad
-             * as a malformed one (RFC 7871).
+             * and that is for the server to say.
+             *
+             * More than one is not wrong, only untidy, and the last one wins.
+             * A forwarder that adds a subnet appends its option to whatever
+             * the client sent -- AdGuard Home's dnsproxy does -- so behind it
+             * Firefox's 0.0.0.0/0 arrives first and the client's real /24
+             * after it.  Refusing that as malformed answered every such query
+             * FORMERR, and Firefox, with no fallback in TRR-only mode, said
+             * the site did not exist.
              */
-            if (m->have_ecs || elpis_ecs_parse(&m->ecs, m->wire + p, olen) != ELPIS_OK)
-                m->ecs_bad = 1;
+            {
+                elpis_ecs_t e;
+                if (elpis_ecs_parse(&e, m->wire + p, olen) != ELPIS_OK)
+                    m->ecs_bad = 1;
+                else
+                    m->ecs = e;
+            }
             m->have_ecs = 1;
             break;
         default:

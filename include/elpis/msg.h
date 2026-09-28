@@ -58,8 +58,8 @@ typedef struct {
     unsigned       have_opt : 1;
     unsigned       do_bit   : 1;
     unsigned       have_cookie : 1;
-    /* An ECS option was present (RFC 7871); `ecs` holds it when it was well
-     * formed, and ecs_bad is set when it was not. */
+    /* An ECS option was present (RFC 7871); `ecs` holds it -- the last one,
+     * when there were several -- and ecs_bad is set when any was malformed. */
     unsigned       have_ecs : 1;
     unsigned       ecs_bad  : 1;
     uint16_t       edns_bufsize;

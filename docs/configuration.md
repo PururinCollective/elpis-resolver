@@ -295,6 +295,11 @@ Elpis sees is a private one. Then turn on **Use EDNS Client Subnet** in
 AdGuard's DNS settings, with **Use custom IP for EDNS** set to the site's
 public address, so the subnet arrives in the query itself.
 
+Firefox's own DNS over HTTPS puts `0.0.0.0/0` on every query, asking not to
+have its subnet used. AdGuard Home ignores that and adds the client's subnet
+after it, so the query reaches Elpis with two ECS options. Elpis uses the last
+one: the subnet AdGuard added.
+
 ### What it costs
 
 - **Privacy.** A prefix of each client's address goes to every authority that

@@ -2508,6 +2508,27 @@ static void test_localzone(void)
  * worth sending, the configuration, and the message cache keeping a tailored
  * answer to the subnet it was made for.
  */
+/* A query whose OPT rdata is `rdata` verbatim: any number of options. */
+static void ecs_query_raw(uint8_t *buf, size_t cap, const uint8_t *rdata,
+                          size_t rdlen, size_t *len)
+{
+    elpis_bld_t b;
+    elpis_name_t qn, root;
+    size_t rdpos;
+
+    elpis_name_from_text(&qn, "www.example.com.");
+    elpis_name_init_root(&root);
+    elpis_bld_init(&b, buf, cap, NULL, 0);
+    elpis_bld_header(&b, 0, ELPIS_FLAG_RD);
+    elpis_bld_question(&b, &qn, ELPIS_T_A, ELPIS_CLASS_IN);
+    elpis_bld_rr_begin(&b, &root, ELPIS_T_OPT, 4096, 0, &rdpos);
+    elpis_bld_bytes(&b, rdata, rdlen);
+    elpis_bld_rr_end(&b, rdpos);
+    elpis_bld_count(&b, ELPIS_SEC_ADDITIONAL, 1);
+    elpis_bld_finish(&b);
+    *len = b.len;
+}
+
 static uint8_t ecs_query(uint8_t *buf, size_t cap, const uint8_t *opt,
                          size_t optlen, size_t *len)
 {
@@ -2646,6 +2667,31 @@ static void test_ecs(void)
         CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_QUERY, &drop) == ELPIS_OK &&
               m.have_ecs && m.ecs_bad,
               "a malformed one is flagged for the server to refuse");
+    }
+    /*
+     * Two of them, as AdGuard Home sends: it appends the client's /24 to the
+     * 0.0.0.0/0 Firefox puts on every DoH query.  That was refused FORMERR,
+     * and Firefox in TRR-only mode could resolve nothing through it.
+     */
+    {
+        static const uint8_t two[] = { 0, 8, 0, 4, 0, 1, 0, 0,
+                                       0, 8, 0, 7, 0, 1, 24, 0, 175, 139, 1 };
+        static const uint8_t onebad[] = { 0, 8, 0, 4, 0, 1, 0, 0,
+                                          0, 8, 0, 7, 0, 1, 20, 0, 175, 139, 255 };
+        uint8_t buf[512];
+        size_t len;
+        elpis_msg_t m;
+        int drop = 0;
+
+        ecs_query_raw(buf, sizeof buf, two, sizeof two, &len);
+        CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_QUERY, &drop) == ELPIS_OK &&
+              m.have_ecs && !m.ecs_bad && m.ecs.family == ELPIS_ECS_IPV4 &&
+              m.ecs.source == 24 && m.ecs.addr[0] == 175,
+              "a forwarder's subnet after the client's /0 is taken, not refused");
+        ecs_query_raw(buf, sizeof buf, onebad, sizeof onebad, &len);
+        CHECK(elpis_msg_parse(&m, buf, len, ELPIS_PARSE_QUERY, &drop) == ELPIS_OK &&
+              m.have_ecs && m.ecs_bad,
+              "but a malformed one among them is still refused");
     }
 
     /* Written by the OPT builder and read back. */
