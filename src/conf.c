@@ -97,6 +97,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
      */
     c->query_total_ms   = 20000;
     c->max_retries      = 3;
+    c->server_hold_s    = 30;
     c->max_pending_auto = 1;
     c->max_referrals    = ELPIS_MAX_REFERRALS;
     c->qname_minimisation = 1;
@@ -456,6 +457,11 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("query-timeout"))      return want_u32(&p, key, val, &c->query_timeout_ms);
     if (KEY("query-total-timeout")) return want_u32(&p, key, val, &c->query_total_ms);
     if (KEY("max-retries"))        return want_u32(&p, key, val, &c->max_retries);
+    if (KEY("server-hold-down")) {
+        if (want_u32(&p, key, val, &c->server_hold_s) != 0) return ELPIS_ERR;
+        c->server_hold_s = ELPIS_MIN(c->server_hold_s, 3600u);
+        return ELPIS_OK;
+    }
     if (KEY("max-pending")) {
         uint32_t v;
         if (!elpis_strcasecmp_ascii(val, "auto")) {

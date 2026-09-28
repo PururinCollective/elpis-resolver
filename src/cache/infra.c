@@ -2,6 +2,7 @@
  * infra.c -- per-nameserver state cache.
  */
 #include "elpis/infra.h"
+#include "elpis/dns.h"
 #include "elpis/log.h"
 #include "elpis/simd.h"
 
@@ -122,6 +123,9 @@ static void fn_rtt_ok(elpis_infra_info_t *i, void *ctx)
     if (i->srtt > ELPIS_RTT_MAX)
         i->srtt = ELPIS_RTT_MAX;
     i->timeouts = 0;
+    i->silent_types = 0;
+    i->silent_since = 0;
+    i->hold_until   = 0;
     i->queries++;
 }
 
@@ -130,21 +134,77 @@ void elpis_infra_rtt_ok(elpis_cache_t *c, const elpis_addr_t *a, uint32_t rtt_ms
     infra_update(c, a, fn_rtt_ok, &rtt_ms);
 }
 
+typedef struct { uint16_t qtype; uint32_t now; uint32_t hold_s; } timeout_arg_t;
+
 static void fn_timeout(elpis_infra_info_t *i, void *ctx)
 {
-    (void)ctx;
+    const timeout_arg_t *t = (const timeout_arg_t *)ctx;
+
+    if (i->timeouts == 0 || i->silent_since == 0)
+        i->silent_since = t->now ? t->now : 1u;
     if (i->timeouts < 1000u)
         i->timeouts++;
+    i->silent_types = (uint8_t)(i->silent_types | elpis_infra_qclass(t->qtype));
     /* Back off exponentially but keep the estimate bounded. */
     i->srtt = i->srtt * 2u;
     if (i->srtt > ELPIS_RTT_MAX)
         i->srtt = ELPIS_RTT_MAX;
     i->queries++;
+    /*
+     * Both conditions, not either.  A burst of queries in flight when a path
+     * blips can time out three at a time; and a server asked once a minute
+     * can be silent for ten seconds without having missed anything.
+     */
+    if (t->hold_s != 0 && i->timeouts >= ELPIS_HOLD_AFTER &&
+        t->now >= i->silent_since + ELPIS_HOLD_SILENT_S)
+        i->hold_until = t->now + t->hold_s;
 }
 
-void elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a)
+void elpis_infra_timeout(elpis_cache_t *c, const elpis_addr_t *a,
+                         uint16_t qtype, uint32_t now, uint32_t hold_s)
 {
-    infra_update(c, a, fn_timeout, NULL);
+    timeout_arg_t arg;
+    arg.qtype  = qtype;
+    arg.now    = now;
+    arg.hold_s = hold_s;
+    infra_update(c, a, fn_timeout, &arg);
+}
+
+unsigned elpis_infra_qclass(uint16_t qtype)
+{
+    switch (qtype) {
+    case ELPIS_T_A:     return ELPIS_QC_A;
+    case ELPIS_T_AAAA:  return ELPIS_QC_AAAA;
+    case ELPIS_T_HTTPS:
+    case ELPIS_T_SVCB:  return ELPIS_QC_SVCB;
+    default:            return ELPIS_QC_OTHER;
+    }
+}
+
+int elpis_infra_held(const elpis_infra_info_t *i, uint16_t qtype, uint32_t now)
+{
+    return i->hold_until != 0 && now < i->hold_until &&
+           (i->silent_types & elpis_infra_qclass(qtype)) != 0;
+}
+
+int elpis_infra_probe_due(const elpis_infra_info_t *i, uint16_t qtype,
+                          uint32_t now)
+{
+    return i->hold_until != 0 && now >= i->hold_until &&
+           (i->silent_types & elpis_infra_qclass(qtype)) != 0;
+}
+
+static void fn_hold(elpis_infra_info_t *i, void *ctx)
+{
+    uint32_t until = *(const uint32_t *)ctx;
+    /* An answer may have landed since the caller looked. */
+    if (i->hold_until != 0)
+        i->hold_until = until;
+}
+
+void elpis_infra_hold(elpis_cache_t *c, const elpis_addr_t *a, uint32_t until)
+{
+    infra_update(c, a, fn_hold, &until);
 }
 
 typedef struct { uint8_t state; uint16_t maxsize; } edns_arg_t;

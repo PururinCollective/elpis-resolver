@@ -37,6 +37,18 @@ rejects every licence, and nothing says so. `make` lists the settings it took
 from the file. A value on the command line still wins. `UNAME_M` can now be
 set there too; it was always recomputed.
 
+**Servers that stop answering are held down (`server-hold-down: 30`).** A
+server silent for 10 s and three queries in a row, while other servers kept
+answering, is not asked again for 30 s. After that, one query goes through to
+see if it is back. When every server a zone has is held, the query gets
+SERVFAIL (EDE 22) at once instead of after `query-total-timeout`. Before this,
+each new name under `spectrum.com`, whose Charter servers answer nothing from
+some networks, cost sixteen queries and up to 20 s. Holds are per question
+type, so a server that drops only HTTPS is still asked for A. The status page
+and SIGUSR1 count these answers as **servers held**. Set `0` to turn holds
+off. See
+[a zone whose servers never answer](docs/troubleshooting.md#a-zone-whose-servers-never-answer).
+
 ### Changed
 
 **`contrib/elpis-update.sh` leaves `OPT` to `local.mk` unless `MARCH` is

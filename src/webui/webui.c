@@ -729,6 +729,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, ",\"servfail\":");  bputu(b, s->servfail);
     bputs(b, ",\"refused\":");   bputu(b, s->refused);
     bputs(b, ",\"timeouts\":");  bputu(b, s->timeouts);
+    bputs(b, ",\"held\":");      bputu(b, s->held);
     bputs(b, ",\"tcp\":");       bputu(b, s->tcp_queries);
     bputs(b, ",\"truncated\":"); bputu(b, s->truncated);
     bputs(b, ",\"secure\":");    bputu(b, s->dnssec_secure);

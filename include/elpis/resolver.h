@@ -291,6 +291,9 @@ struct elpis_worker {
 
     elpis_timer_t   maint;
     elpis_stats_t   stats;
+    /* When an upstream last answered this worker anything at all.  A server
+     * is only held down for its silence while others are heard from. */
+    uint64_t        last_answer_ms;
     elpis_wtm_t     tm;          /* status-page tallies, worker-local */
 
     /* Last second of event-loop behaviour; see report_spin() in main.c. */

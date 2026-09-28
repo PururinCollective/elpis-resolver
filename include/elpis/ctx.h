@@ -38,6 +38,12 @@ typedef struct {
     uint64_t races;
     /* Queries answered SERVFAIL at once because max-pending was reached. */
     uint64_t overload;
+    /*
+     * Resolutions ended at once, SERVFAIL, because every server left in the
+     * zone was held down (server-hold-down).  Each is one that would have
+     * spent query-total-timeout asking servers that were not answering.
+     */
+    uint64_t held;
 } elpis_stats_t;
 
 /*

@@ -443,6 +443,17 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
     q->timeout_ms = timeout;
     elpis_timer_add(w->loop, &q->timer, timeout, out_timeout, q);
 
+    /*
+     * The first query to a held server after its hold runs out is the probe.
+     * It takes the next hold now, before it is answered, or every query in
+     * the next second or so would be let through behind it.  An answer
+     * clears the hold whenever it comes.
+     */
+    if (c->server_hold_s != 0 &&
+        elpis_infra_probe_due(&inf, q->qtype, elpis_cached_now_s()))
+        elpis_infra_hold(w->ctx->infra, server,
+                         elpis_cached_now_s() + c->server_hold_s);
+
     return q;
 }
 
@@ -575,7 +586,8 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         return;
     }
 
-    rtt = (uint32_t)(elpis_cached_now_ms() - q->sent_ms);
+    w->last_answer_ms = elpis_cached_now_ms();
+    rtt = (uint32_t)(w->last_answer_ms - q->sent_ms);
     elpis_infra_rtt_ok(w->ctx->infra, &q->server, rtt);
     absorb_cookie(w, q, m);
     if (q->used_0x20 || q->caps_test)
@@ -733,6 +745,20 @@ static void out_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
     }
 }
 
+/*
+ * How long to hold `q`'s server if this timeout makes it due: 0 unless some
+ * other server has answered since the query went out.  When nobody has, the
+ * silence is as likely to be this host's own link, and a hold would outlast
+ * the outage by up to server-hold-down seconds for every server that was
+ * being asked when it began.
+ */
+static uint32_t hold_for(const elpis_worker_t *w, const elpis_outq_t *q)
+{
+    if (w->last_answer_ms < q->sent_ms)
+        return 0;
+    return w->ctx->conf.server_hold_s;
+}
+
 static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
 {
     elpis_outq_t *q = (elpis_outq_t *)tm->data;
@@ -747,7 +773,8 @@ static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
         return;
     }
 
-    elpis_infra_timeout(w->ctx->infra, &q->server);
+    elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
+                        elpis_cached_now_s(), hold_for(w, q));
     elpis_stat_inc(&w->stats.timeouts, 1);
 
     others = (t != NULL && out_unhook(t, q) != NULL);
@@ -833,7 +860,8 @@ static void tcp_fail(elpis_worker_t *w, elpis_outq_t *q, int ede)
     if (t != NULL) {
         t->out = NULL;
         q->task = NULL;
-        elpis_infra_timeout(w->ctx->infra, &q->server);
+        elpis_infra_timeout(w->ctx->infra, &q->server, q->qtype,
+                            elpis_cached_now_s(), hold_for(w, q));
         elpis_resolver_on_error(t, q, ede);
     }
     elpis_out_free(w, q);
