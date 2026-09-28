@@ -23,6 +23,7 @@
 #include "elpis/resolver.h"
 #include "elpis/ctx.h"
 #include "elpis/deleg.h"
+#include "elpis/infra.h"
 #include "elpis/conflict.h"
 #include "elpis/quirks.h"
 #include "simd/simd_internal.h"
@@ -524,6 +525,101 @@ static void test_msg(void)
                   "non-ascending windows rejected");
         }
     }
+}
+
+/* ================================================================== */
+/*
+ * Holding down a silent server (infra.h).  What matters is what does not
+ * hold: a burst, a silence nobody else broke either, and a type the server
+ * still answers.
+ */
+static void test_infra_hold(void)
+{
+    elpis_cache_t *c;
+    elpis_addr_t a, b;
+    elpis_infra_info_t inf;
+    const uint32_t t0 = 100000;
+
+    section("infra hold-down");
+
+    c = elpis_infra_new(2 * 1024 * 1024, 4);
+    CHECK(c != NULL, "infra cache created");
+    if (c == NULL)
+        return;
+    elpis_addr_parse(&a, "192.0.2.53", 53);
+    elpis_addr_parse(&b, "198.51.100.53", 53);
+
+    /* Three at once, as when a path blips with queries in flight. */
+    elpis_infra_timeout(c, &a, ELPIS_T_A, t0, 30);
+    elpis_infra_timeout(c, &a, ELPIS_T_A, t0, 30);
+    elpis_infra_timeout(c, &a, ELPIS_T_A, t0 + 1, 30);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(inf.timeouts == 3 && elpis_infra_cost(&inf) == ELPIS_RTT_BAN,
+          "three timeouts ban the server as before");
+    CHECK(!elpis_infra_held(&inf, ELPIS_T_A, t0 + 1),
+          "but a burst inside a second does not hold it");
+
+    /* Silent for ten seconds, but nobody else was answering either. */
+    elpis_infra_timeout(c, &a, ELPIS_T_A, t0 + 10, 0);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(!elpis_infra_held(&inf, ELPIS_T_A, t0 + 10),
+          "a silence nobody else broke does not hold it");
+
+    elpis_infra_timeout(c, &a, ELPIS_T_A, t0 + 11, 30);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(elpis_infra_held(&inf, ELPIS_T_A, t0 + 11),
+          "silent 11 s while others answered: held for A");
+    CHECK(!elpis_infra_held(&inf, ELPIS_T_AAAA, t0 + 11) &&
+          !elpis_infra_held(&inf, ELPIS_T_HTTPS, t0 + 11) &&
+          !elpis_infra_held(&inf, ELPIS_T_DNSKEY, t0 + 11),
+          "and only for A");
+    CHECK(elpis_infra_held(&inf, ELPIS_T_A, t0 + 40) &&
+          !elpis_infra_held(&inf, ELPIS_T_A, t0 + 41),
+          "for server-hold-down seconds");
+    CHECK(!elpis_infra_probe_due(&inf, ELPIS_T_A, t0 + 40) &&
+          elpis_infra_probe_due(&inf, ELPIS_T_A, t0 + 41) &&
+          !elpis_infra_probe_due(&inf, ELPIS_T_AAAA, t0 + 41),
+          "then the next A query is the probe");
+
+    elpis_infra_hold(c, &a, t0 + 71);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(elpis_infra_held(&inf, ELPIS_T_A, t0 + 42),
+          "the probe takes the next hold as it goes out");
+
+    /* Still silent, so another type times out once and is held with it. */
+    elpis_infra_timeout(c, &a, ELPIS_T_HTTPS, t0 + 50, 30);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(elpis_infra_held(&inf, ELPIS_T_HTTPS, t0 + 50) &&
+          elpis_infra_held(&inf, ELPIS_T_SVCB, t0 + 50) &&
+          !elpis_infra_held(&inf, ELPIS_T_AAAA, t0 + 50),
+          "HTTPS and SVCB share a hold; AAAA is still asked");
+
+    elpis_infra_rtt_ok(c, &a, 20);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(!elpis_infra_held(&inf, ELPIS_T_A, t0 + 51) &&
+          !elpis_infra_held(&inf, ELPIS_T_HTTPS, t0 + 51) &&
+          inf.timeouts == 0 && inf.silent_types == 0 && inf.hold_until == 0,
+          "one answer clears every hold");
+    elpis_infra_hold(c, &a, t0 + 200);
+    elpis_infra_get(c, &a, &inf);
+    CHECK(inf.hold_until == 0,
+          "a probe that lost the race to an answer takes no hold");
+
+    /* A server that drops HTTPS and answers A: its HTTPS silence runs on
+     * while A comes from the cache, and A must still be asked. */
+    elpis_infra_rtt_ok(c, &b, 20);
+    elpis_infra_timeout(c, &b, ELPIS_T_HTTPS, t0, 30);
+    elpis_infra_timeout(c, &b, ELPIS_T_HTTPS, t0 + 5, 30);
+    elpis_infra_timeout(c, &b, ELPIS_T_HTTPS, t0 + 12, 30);
+    elpis_infra_get(c, &b, &inf);
+    CHECK(elpis_infra_held(&inf, ELPIS_T_HTTPS, t0 + 12) &&
+          !elpis_infra_held(&inf, ELPIS_T_A, t0 + 12) &&
+          !elpis_infra_held(&inf, ELPIS_T_AAAA, t0 + 12),
+          "a server silent only on HTTPS is held only for HTTPS");
+    CHECK(!elpis_infra_probe_due(&inf, ELPIS_T_A, t0 + 60),
+          "and an A query to it is not taken for a probe");
+
+    elpis_cache_free(c);
 }
 
 /* ================================================================== */
@@ -1319,6 +1415,14 @@ static void test_conf(void)
     elpis_strlcpy(line, "edns-buffer-size: 100", sizeof line);
     CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
           c.edns_buffer4 == 512, "a number below 512 is raised to 512");
+
+    CHECK(c.server_hold_s == 30, "servers are held for 30 s by default");
+    elpis_strlcpy(line, "server-hold-down: 0", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.server_hold_s == 0, "server-hold-down: 0 turns holds off");
+    elpis_strlcpy(line, "server-hold-down: 86400", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.server_hold_s == 3600, "server-hold-down is capped at an hour");
 
     CHECK(elpis_edns_for_mtu(1500, AF_INET) == 1400 &&
           elpis_edns_for_mtu(1500, AF_INET6) == 1400,
@@ -2308,6 +2412,7 @@ int main(void)
     test_name();
     test_msg();
     test_cache();
+    test_infra_hold();
     test_hashes();
     test_signatures();
     test_bignum();

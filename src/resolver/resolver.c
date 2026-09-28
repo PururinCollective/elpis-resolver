@@ -592,9 +592,12 @@ static int next_round(elpis_task_t *t)
 }
 
 /*
- * Choose the cheapest untried address in the current delegation.  "Cheapest"
- * is the smoothed RTT plus a timeout penalty, so a server that just failed is
- * skipped without being forgotten.
+ * Choose the cheapest untried address in the current delegation to ask a
+ * question of type `qtype`.  "Cheapest" is the smoothed RTT plus a timeout
+ * penalty, so a server that just failed is skipped without being forgotten.
+ * A server held down for that type is not considered at all.  Returns 1 with
+ * a choice, 0 when every address has been tried, and -1 when what was left
+ * was held.
  *
  * Servers we have never measured get a little random jitter added.  Without
  * it every unmeasured delegation resolves to the same nameserver -- whichever
@@ -603,13 +606,14 @@ static int next_round(elpis_task_t *t)
  * machine instead of spreading.
  */
 #define UNKNOWN_JITTER_MS 64u
-static int choose_server(elpis_task_t *t, elpis_addr_t *out,
+static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
                          elpis_infra_info_t *out_inf)
 {
     elpis_worker_t *w = t->w;
     const elpis_conf_t *c = &w->ctx->conf;
     uint32_t best_cost = 0xFFFFFFFFu;
-    int found = 0;
+    uint32_t now = elpis_cached_now_s();
+    int found = 0, held = 0;
     unsigned i, j;
     elpis_addr_t best;
     elpis_infra_info_t best_inf;
@@ -630,6 +634,10 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out,
             if (already_tried(t, &a))
                 continue;
             elpis_infra_get(w->ctx->infra, &a, &inf);
+            if (elpis_infra_held(&inf, qtype, now)) {
+                held = 1;
+                continue;
+            }
             cost = elpis_infra_cost(&inf);
             if (inf.queries == 0)
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
@@ -647,6 +655,10 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out,
             if (already_tried(t, &a))
                 continue;
             elpis_infra_get(w->ctx->infra, &a, &inf);
+            if (elpis_infra_held(&inf, qtype, now)) {
+                held = 1;
+                continue;
+            }
             cost = elpis_infra_cost(&inf);
             if (inf.queries == 0)
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
@@ -659,10 +671,12 @@ static int choose_server(elpis_task_t *t, elpis_addr_t *out,
     }
 
     if (!found)
-        return 0;
+        return held ? -1 : 0;
     /*
      * Everything left is banned (lame or repeatedly timed out).  Try it
-     * anyway rather than give up: a ban is a heuristic, not a fact.
+     * anyway rather than give up: a ban is a heuristic, not a fact.  A hold
+     * is not: the server has been silent for a while by then, and asking it
+     * again is what the hold is there to stop.
      */
     *out = best;
     *out_inf = best_inf;
@@ -769,7 +783,9 @@ static int send_query(elpis_task_t *t, const elpis_addr_t *server,
          */
         elpis_addr_t alt;
         elpis_infra_info_t ainf;
-        if (choose_server(t, &alt, &ainf) && elpis_out_race(t, &alt) == ELPIS_OK)
+        /* t->qtype is what went on the wire: A for a minimisation probe. */
+        if (choose_server(t, t->qtype, &alt, &ainf) > 0 &&
+            elpis_out_race(t, &alt) == ELPIS_OK)
             mark_tried(t, &alt);
     }
     if (known && sinf->srtt >= SWEEP_ABOVE_MS)
@@ -2213,6 +2229,7 @@ void elpis_task_step(elpis_task_t *t)
             elpis_addr_t server;
             elpis_infra_info_t sinf;
             elpis_name_t probe;
+            int minimise = 0, chosen;
 
             if (elpis_cached_now_ms() - t->start_ms > c->query_total_ms) {
                 elpis_task_fail(t, ELPIS_RC_SERVFAIL, ELPIS_EDE_NO_REACHABLE_AUTH);
@@ -2233,7 +2250,23 @@ void elpis_task_step(elpis_task_t *t)
                 synth_nodata(t);
                 continue;
             }
-            if (!choose_server(t, &server, &sinf)) {
+            /*
+             * Decide what question to put on the wire before choosing who to
+             * ask: a server is held down for the type it is asked, and a
+             * minimisation probe goes out as A whatever the client asked.
+             */
+            if (t->qmin_active && t->qmin_labels < t->qname.labels) {
+                unsigned keep = t->qmin_labels + 1u;
+                if (keep < t->qname.labels &&
+                    elpis_name_suffix(&t->qname, keep, &probe) == 0 &&
+                    !qmin_known_inside(t, &probe))
+                    minimise = 1;
+                else
+                    t->qmin_active = 0;
+            }
+            chosen = choose_server(t, minimise ? (uint16_t)ELPIS_T_A : t->qtype,
+                                   &server, &sinf);
+            if (chosen <= 0) {
                 if (choose_nameless(t) != NULL) {
                     t->state = ELPIS_TS_NSADDR;
                     continue;
@@ -2264,40 +2297,40 @@ void elpis_task_step(elpis_task_t *t)
                     t->rounds++;
                     continue;
                 }
+                /*
+                 * The servers left were held down: each has been silent for
+                 * a while, so this is the SERVFAIL the full wait would have
+                 * ended in, sooner and without the queries.
+                 */
+                if (chosen < 0)
+                    elpis_stat_inc(&w->stats.held, 1);
                 elpis_task_fail(t, ELPIS_RC_SERVFAIL, ELPIS_EDE_NO_REACHABLE_AUTH);
                 return;
             }
             mark_tried(t, &server);
 
-            /* Decide what question to actually put on the wire. */
             t->qmin_probe = 0;
-            if (t->qmin_active && t->qmin_labels < t->qname.labels) {
-                unsigned keep = t->qmin_labels + 1u;
-                if (keep < t->qname.labels &&
-                    elpis_name_suffix(&t->qname, keep, &probe) == 0 &&
-                    !qmin_known_inside(t, &probe)) {
-                    elpis_name_t real = t->qname;
-                    uint16_t realtype = t->qtype;
-                    t->qname = probe;
-                    /*
-                     * RFC 9156 allows any type for the probe; A is the least
-                     * likely to upset a non-conforming authority.
-                     */
-                    t->qtype = ELPIS_T_A;
-                    t->qmin_probe = 1;
-                    t->sends++;
-                    if (send_query(t, &server, &sinf) != ELPIS_OK) {
-                        t->qname = real;
-                        t->qtype = realtype;
-                        t->qmin_probe = 0;
-                        continue;
-                    }
+            if (minimise) {
+                elpis_name_t real = t->qname;
+                uint16_t realtype = t->qtype;
+                t->qname = probe;
+                /*
+                 * RFC 9156 allows any type for the probe; A is the least
+                 * likely to upset a non-conforming authority.
+                 */
+                t->qtype = ELPIS_T_A;
+                t->qmin_probe = 1;
+                t->sends++;
+                if (send_query(t, &server, &sinf) != ELPIS_OK) {
                     t->qname = real;
                     t->qtype = realtype;
-                    t->state = ELPIS_TS_WAIT;
-                    return;
+                    t->qmin_probe = 0;
+                    continue;
                 }
-                t->qmin_active = 0;
+                t->qname = real;
+                t->qtype = realtype;
+                t->state = ELPIS_TS_WAIT;
+                return;
             }
 
             t->sends++;

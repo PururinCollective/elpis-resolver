@@ -130,6 +130,9 @@ typedef struct {
     uint32_t     query_timeout_ms;
     uint32_t     query_total_ms;
     unsigned     max_retries;
+    /* How long a server that stopped answering is left alone; 0 = never.
+     * See ELPIS_HOLD_AFTER in infra.h. */
+    uint32_t     server_hold_s;
     /*
      * Resolutions one worker may have in flight.  0 in the file means auto,
      * resolved at startup from the memory detected -- see main.c -- so by

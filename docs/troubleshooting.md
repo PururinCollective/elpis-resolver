@@ -53,6 +53,33 @@ millions of RX packets against a few hundred TX on that interface is the
 signature. Use `outgoing-interface:` to pin the source address Elpis sends
 from when the kernel's own choice is wrong.
 
+## A zone whose servers never answer
+
+Some authorities drop every query from some networks. `spectrum.com` is
+delegated to `ns1`–`ns4.charter.com`. In September 2026 those servers answered
+no DNS query from our Malaysian test network, though they still answered
+ping, and public resolvers in the same region failed on them too. Every new
+name under it used to cost sixteen
+queries and the whole `query-total-timeout` before its SERVFAIL, and a
+steady stream of such names was a third of all upstream traffic.
+
+A server that has been silent for 10 seconds and three queries, while other
+servers kept answering, is now held for `server-hold-down` seconds (30 by
+default). A zone whose servers are all held is answered SERVFAIL, extended
+error 22 (No Reachable Authority), at once. When the hold runs out, one query
+goes through to see whether the server is back. The status page counts these
+answers as **servers held**, and so does `held=` in the SIGUSR1 statistics.
+
+Holds are per question type, so a server that drops only HTTPS is still asked
+for A. Silence while nothing else answers does not count, so an outage on this
+host's own link holds nobody. An outage further along the path can, and a zone
+behind it may then fail for up to `server-hold-down` seconds after the path
+is back. `server-hold-down: 0` turns holds off.
+
+A hold makes a failure cheaper, but the answer is still SERVFAIL. When the
+zone is also served somewhere that does answer, as `spectrum.com` is by
+Akamai, a `stub-zone:` pointing at those servers gets real answers.
+
 ## Something else on port 53
 
 Before opening any socket, Elpis asks the kernel who is already listening on
