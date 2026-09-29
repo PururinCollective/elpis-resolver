@@ -2373,6 +2373,102 @@ static void test_keytrap(void)
 }
 
 /* ================================================================== */
+/*
+ * The reason a bogus verdict is logged with.  A resolver in production logged
+ * bursts of "bogus answer for x (alg ECDSAP256SHA256)" with nothing to say
+ * which RRset had failed or why, so each signature is now described: the tag
+ * it names, and whether that key is missing, may not sign, is out of date, or
+ * simply failed the arithmetic.
+ */
+static void why_sig(elpis_rrset_buf_t *set, const elpis_name_t *signer,
+                    uint16_t tag, int64_t incep, int64_t expire, uint8_t fill)
+{
+    uint8_t rd[18 + ELPIS_MAX_NAME + 64];
+    size_t o = 0;
+
+    elpis_put16(rd + o, set->type); o += 2;
+    rd[o++] = ELPIS_ALG_ED25519;
+    rd[o++] = (uint8_t)set->name.labels;
+    elpis_put32(rd + o, 3600); o += 4;
+    elpis_put32(rd + o, (uint32_t)expire); o += 4;
+    elpis_put32(rd + o, (uint32_t)incep); o += 4;
+    elpis_put16(rd + o, tag); o += 2;
+    memcpy(rd + o, signer->d, signer->len); o += signer->len;
+    memset(rd + o, fill, 64); o += 64;
+    elpis_rrset_buf_add_sig(set, rd, (uint16_t)o);
+}
+
+static void test_rrset_why(void)
+{
+    static elpis_rrset_buf_t keys, set;
+    elpis_conf_t c;
+    elpis_name_t zone, other;
+    uint8_t key[36], revoked[36], a[4] = { 192, 0, 2, 1 };
+    char why[640], want[64];
+    uint16_t tag, rtag;
+    int64_t now = elpis_wall_s();
+
+    section("why a signature failed");
+    elpis_conf_defaults(&c);
+    elpis_name_from_text(&zone, "why.test.");
+    elpis_name_from_text(&other, "elsewhere.test.");
+
+    keytrap_key(key, 0);
+    tag = elpis_dnskey_tag(key, sizeof key);
+    keytrap_key(revoked, 1);
+    elpis_put16(revoked, 0x0101u | ELPIS_DNSKEY_REVOKE);
+    rtag = elpis_dnskey_tag(revoked, sizeof revoked);
+    elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&keys, key, sizeof key);
+    elpis_rrset_buf_add(&keys, revoked, sizeof revoked);
+
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&set, a, sizeof a);
+    elpis_rrset_why(&c, &set, &keys, now, why, sizeof why);
+    CHECK(strstr(why, "why.test. A, 1 record, no signature") != NULL,
+          "an unsigned set says so (%s)", why);
+
+    why_sig(&set, &zone, tag, now - 3600, now + 3600, 0x41);
+    why_sig(&set, &zone, (uint16_t)(tag + 1u), now - 3600, now + 3600, 0x42);
+    why_sig(&set, &zone, tag, now - 7200, now - 3600, 0x43);
+    why_sig(&set, &zone, tag, now + 3600, now + 7200, 0x44);
+    elpis_rrset_why(&c, &set, &keys, now, why, sizeof why);
+
+    snprintf(want, sizeof want, "RRSIG %u/ED25519 by why.test.: failed the "
+             "signature check", tag);
+    CHECK(strstr(why, want) != NULL, "a bad signature by a good key (%s)", why);
+    snprintf(want, sizeof want, "RRSIG %u/ED25519 by why.test.: no key with "
+             "that tag", (unsigned)(uint16_t)(tag + 1u));
+    CHECK(strstr(why, want) != NULL, "a tag the key set lacks (%s)", why);
+    CHECK(strstr(why, ": expired 3600 s ago") != NULL,
+          "an expired signature, and by how much (%s)", why);
+    CHECK(strstr(why, ": not valid for another 3600 s") != NULL,
+          "a signature not yet valid (%s)", why);
+    snprintf(want, sizeof want, "; keys why.test.: %u %u", tag, rtag);
+    CHECK(strstr(why, want) != NULL, "and the tags the key set holds (%s)",
+          why);
+
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&set, a, sizeof a);
+    why_sig(&set, &zone, rtag, now - 3600, now + 3600, 0x45);
+    why_sig(&set, &other, tag, now - 3600, now + 3600, 0x46);
+    elpis_rrset_why(&c, &set, &keys, now, why, sizeof why);
+    CHECK(strstr(why, "the key is revoked") != NULL,
+          "a revoked key may not sign (%s)", why);
+    CHECK(strstr(why, "by elsewhere.test.: not the key set's zone") != NULL,
+          "a signer that is not the keys' zone (%s)", why);
+
+    (void)elpis_dnssec_take_verifies();
+    elpis_rrset_why(&c, &set, &keys, now, why, sizeof why);
+    CHECK(elpis_dnssec_take_verifies() == 0,
+          "describing costs no signature check");
+
+    elpis_rrset_why(&c, &set, &keys, now, why, 24);
+    CHECK(strlen(why) == 23, "a short buffer is filled and terminated (%zu)",
+          strlen(why));
+}
+
+/* ================================================================== */
 static void test_quirks(void)
 {
     elpis_conf_t c;
@@ -2879,6 +2975,7 @@ int main(void)
     test_signatures();
     test_bignum();
     test_keytrap();
+    test_rrset_why();
     test_dnssec();
     test_dns64();
     test_conflict();

@@ -82,6 +82,37 @@ A hold makes a failure cheaper, but the answer is still SERVFAIL. When the
 zone is also served somewhere that does answer, as `spectrum.com` is by
 Akamai, a `stub-zone:` pointing at those servers gets real answers.
 
+## A name answered SERVFAIL as bogus
+
+When an answer fails DNSSEC validation, the client gets SERVFAIL and the log
+gets one line saying which RRset failed and why:
+
+```
+dnssec: bogus answer for imap-mail.outlook.com. A: atm.outlook.mira.tm.svc.cloud.microsoft. A,
+8 records; RRSIG 24236/ECDSAP256SHA256 by cloud.microsoft.: failed the signature check;
+keys cloud.microsoft.: 61899 28146 24236; 5 of 64 signature checks spent (EDE 6 DNSSEC Bogus); replying SERVFAIL
+```
+
+The question comes first. Then the RRset that failed, which for a CNAME chain
+may be a different name. Then each signature over that RRset and what stopped
+it, the key tags the signer's DNSKEY set holds, and the extended error the
+client was sent:
+
+| The line says | What it means |
+|---|---|
+| `no key with that tag` | The zone signed with a key its DNSKEY set does not hold. Usually a key rollover done too quickly, or a DNSKEY set that is out of date. |
+| `expired N s ago`, `not valid for another N s` | The signature's dates. If every zone shows this, check this host's clock. |
+| `failed the signature check` | The key is there and the dates are fine, but the signature does not match the data. The data was changed on the way, or the answer mixes records from two different replies. |
+| `N of 64 signature checks spent` at 64 | The answer used up the signature checks one answer may take (the KeyTrap limit, CVE-2023-50387) before it was proven. |
+| `has no signature, and no unsigned delegation was proven` | A record with no signature, in a zone that is signed as far as the chain of trust can tell. |
+| `NSEC/NSEC3 records, which do not prove` | A "no such name" or "no such data" whose proof does not cover the question. |
+| `DS says ... digest does not match` | The parent's DS and the child's DNSKEY disagree: the zone's own mistake, usually after a key change at the registrar. |
+
+To see whether the fault is in the zone or here, ask a validating public
+resolver the same question. If 1.1.1.1 answers it with AD set, the zone is
+fine, and the line above is the thing to report.
+`dig +cd +dnssec name @127.0.0.1` shows the records Elpis received, unchecked.
+
 ## Something else on port 53
 
 Before opening any socket, Elpis asks the kernel who is already listening on
