@@ -10,7 +10,19 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.2.0 — 2026-09-30
+
+EDNS Client Subnet, so a content network answers for where the client is
+rather than where Elpis is. Servers that stop answering are held down instead
+of being asked again for every new name. `make` now carries new shipped
+defaults into an existing config. The `bogus answer` warning now says which
+RRset failed and why. Chasing false bogus verdicts on a resolver in production
+also turned up a forged "no such data" that was believed after it had been
+refused once, and a CNAME target that went into the answer twice. Both are
+fixed.
+
+No config that worked stops working. `ecs:` is off by default.
+`server-hold-down: 30` is on, and `0` turns it off.
 
 ### Security
 
