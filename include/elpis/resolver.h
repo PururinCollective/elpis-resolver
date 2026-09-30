@@ -258,6 +258,13 @@ struct elpis_task {
 
     /* ---- DNSSEC working state ---- */
     void           *val;
+    /*
+     * What decided a bogus or unverifiable verdict, in one line for the
+     * warning task_finish() logs: which RRset, signed by whom, and what was
+     * wrong with it.  Allocated only when a verdict fails; the first reason
+     * found is the one kept.  Freed with the task.
+     */
+    char           *val_why;
 
     uint64_t        start_ms;
     elpis_timer_t   deadline;

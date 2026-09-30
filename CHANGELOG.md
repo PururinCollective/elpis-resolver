@@ -12,6 +12,18 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ## Unreleased
 
+### Security
+
+**A forged "no such data" is refused every time, not only the first time.**
+A denial from a signed zone is cached under the question before it is checked.
+When the check failed, the cleanup took out the SOA and NSEC records by their
+own names, but not that entry. So the client got SERVFAIL once, and as soon as
+the failure cache let the question through again, five seconds the first time,
+the denial was served from the cache: NOERROR, with no proof and no AD. It is
+now taken out with the rest. A `badsig` name from dnscheck.tools, asked for a
+type it does not have, showed it; so did `bkc.hasil.gov.my AAAA` on a resolver
+where the check had failed for another reason.
+
 ### Added
 
 **EDNS Client Subnet (`ecs: yes`, RFC 7871).** Off by default. A content
@@ -73,7 +85,38 @@ for, a countdown to its next try, and the client and name whose query set the
 hold off. Set `0` to turn holds off. See
 [a zone whose servers never answer](docs/troubleshooting.md#a-zone-whose-servers-never-answer).
 
+### Fixed
+
+**A CNAME's target is no longer answered twice.** When a server answered a
+CNAME and its target's records in the same reply, both were kept. The lookup
+that follows the CNAME then found the target in the cache and added it again.
+`home-office365-com.b-0004.b-msedge.net` came back with its A record twice. The
+same record twice is only untidy. Two different copies of one RRset are worse:
+an answer that rotates, a reply tailored to one subnet (and so never cached
+over the older copy), or another worker caching a different reply in between.
+The validator reads all of it as one RRset that neither signature covers, and
+answers SERVFAIL. The copy from the wire is kept, with its own signatures.
+
 ### Changed
+
+**The `bogus answer` warning says which RRset failed and why.** It used to
+name the question and the algorithm of the first signature anywhere in the
+answer. For a CNAME chain that was rarely the link at fault, and it never said
+what was wrong. It now names the RRset and, for each signature, the key tag,
+algorithm and signer, and what stopped it: no key with that tag, a revoked or
+non-zone key, a date outside the validity window (and by how much), or a failed
+check. It also lists the tags the key set holds, how much of the per-answer
+signature budget was spent, and the extended DNS error:
+
+```
+dnssec: bogus answer for x-expiredsig.test.dnscheck.tools. A: x-expiredsig.test.dnscheck.tools. A,
+1 record; RRSIG 10210/ECDSAP256SHA256 by test.dnscheck.tools.: expired 86400 s ago;
+keys test.dnscheck.tools.: 10210; 0 of 64 signature checks spent (EDE 7 Signature Expired); replying SERVFAIL
+```
+
+An unsigned RRset in a signed zone, a denial that proves nothing, a DS or
+DNSKEY that fails higher up the chain, and a lookup the validator gave up on
+are each named the same way.
 
 **`contrib/elpis-update.sh` leaves `OPT` to `local.mk` unless `MARCH` is
 given.** It always passed its own `OPT`, which would override the file. Without

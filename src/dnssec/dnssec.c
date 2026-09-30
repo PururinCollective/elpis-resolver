@@ -18,6 +18,9 @@
 #include "elpis/log.h"
 #include "elpis/util.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+
 /* ================================================================== */
 /* Algorithm policy                                                    */
 /* ================================================================== */
@@ -557,6 +560,141 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
     if (ede && *ede < 0)
         *ede = saw_sig ? ELPIS_EDE_DNSSEC_BOGUS : ELPIS_EDE_RRSIGS_MISSING;
     return ELPIS_EBOGUS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Saying why                                                          */
+/* ------------------------------------------------------------------ */
+
+static void why_add(char *out, size_t cap, size_t *len, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (*len + 1 >= cap)
+        return;
+    va_start(ap, fmt);
+    n = vsnprintf(out + *len, cap - *len, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    *len += ((size_t)n < cap - *len) ? (size_t)n : cap - *len - 1u;
+}
+
+/* "keys example.: 61899 28146 24236", at most eight tags. */
+static void why_key_tags(const elpis_rrset_buf_t *keys, char *out, size_t cap,
+                         size_t *len)
+{
+    char nb[ELPIS_MAX_NAME * 4];
+    unsigned i;
+
+    if (keys == NULL || keys->count == 0) {
+        why_add(out, cap, len, "; no keys");
+        return;
+    }
+    why_add(out, cap, len, "; keys %s:",
+            elpis_name_str(&keys->name, nb, sizeof nb));
+    for (i = 0; i < keys->count && i < 8u; i++)
+        why_add(out, cap, len, " %u",
+                elpis_dnskey_tag(keys->data + keys->off[i], keys->len[i]));
+    if (keys->count > 8u)
+        why_add(out, cap, len, " and %u more", keys->count - 8u);
+}
+
+/*
+ * The questions elpis_rrsig_verify() asks before any arithmetic, asked again
+ * to say which one stopped each signature.  What passes all of them failed
+ * the arithmetic itself -- or never got to it because the validation had
+ * spent its signature budget, which the caller reports separately.
+ */
+size_t elpis_rrset_why(const elpis_conf_t *conf,
+                       const elpis_rrset_buf_t *set,
+                       const elpis_rrset_buf_t *keys,
+                       int64_t now, char *out, size_t cap)
+{
+    char nb[ELPIS_MAX_NAME * 4];
+    size_t len = 0;
+    unsigned i, shown = 0;
+
+    if (cap == 0)
+        return 0;
+    out[0] = '\0';
+    why_add(out, cap, &len, "%s %s, %u record%s",
+            elpis_name_str(&set->name, nb, sizeof nb),
+            elpis_type_name(set->type), set->count,
+            set->count == 1 ? "" : "s");
+    if (set->sigcount == 0) {
+        why_add(out, cap, &len, ", no signature");
+        why_key_tags(keys, out, cap, &len);
+        return len;
+    }
+
+    for (i = 0; i < set->sigcount && shown < 4u; i++) {
+        const uint8_t *sig = set->data + set->off[set->count + i];
+        uint16_t siglen = set->len[set->count + i];
+        const uint8_t *key = NULL;
+        elpis_name_t signer;
+        size_t used;
+        uint16_t tag, flags = 0;
+        uint8_t alg;
+        int32_t d_exp, d_inc, skew = (int32_t)conf->sig_skew;
+        unsigned j;
+
+        if (siglen < 19)
+            continue;
+        shown++;
+        alg = sig[2];
+        tag = elpis_get16(sig + 16);
+        why_add(out, cap, &len, "; RRSIG %u/%s", tag, elpis_alg_name(alg));
+        if (elpis_name_parse_nocomp(&signer, sig + 18, siglen - 18u,
+                                    &used) != ELPIS_OK) {
+            why_add(out, cap, &len, ": unreadable signer name");
+            continue;
+        }
+        elpis_name_lower(&signer);
+        why_add(out, cap, &len, " by %s: ",
+                elpis_name_str(&signer, nb, sizeof nb));
+
+        for (j = 0; keys != NULL && j < keys->count; j++) {
+            const uint8_t *k = keys->data + keys->off[j];
+            if (keys->len[j] >= 5 && k[3] == alg &&
+                elpis_dnskey_tag(k, keys->len[j]) == tag) {
+                key = k;
+                flags = elpis_get16(k);
+                break;
+            }
+        }
+        d_exp = (int32_t)(elpis_get32(sig + 8) - (uint32_t)now);
+        d_inc = (int32_t)((uint32_t)now - elpis_get32(sig + 12));
+
+        if (keys != NULL && !elpis_name_eq(&signer, &keys->name))
+            why_add(out, cap, &len, "not the key set's zone");
+        else if (key == NULL)
+            why_add(out, cap, &len, "no key with that tag");
+        else if (!(flags & ELPIS_DNSKEY_ZONE))
+            why_add(out, cap, &len, "the key is not a zone key");
+        else if (flags & ELPIS_DNSKEY_REVOKE)
+            why_add(out, cap, &len, "the key is revoked");
+        else if (key[2] != 3)
+            why_add(out, cap, &len, "the key's protocol is %u, not 3", key[2]);
+        else if (!elpis_alg_supported(conf, alg))
+            why_add(out, cap, &len, "algorithm not supported here");
+        else if (d_exp + skew < 0)
+            why_add(out, cap, &len, "expired %ld s ago", -(long)d_exp);
+        else if (d_inc + skew < 0)
+            why_add(out, cap, &len, "not valid for another %ld s",
+                    -(long)d_inc);
+        else if (sig[3] > set->name.labels)
+            why_add(out, cap, &len, "label count %u is more than the "
+                    "owner's %u", sig[3], set->name.labels);
+        else
+            why_add(out, cap, &len, "failed the signature check");
+    }
+    if (set->sigcount > shown && shown == 4u)
+        why_add(out, cap, &len, "; and %u more signatures",
+                set->sigcount - shown);
+    why_key_tags(keys, out, cap, &len);
+    return len;
 }
 
 /*
@@ -1206,6 +1344,99 @@ static void val_done(elpis_task_t *t, elpis_sec_t sec, int ede)
     elpis_val_free(t);
 }
 
+/*
+ * Say why, for the warning task_finish() logs.  It used to read "bogus answer
+ * for outlook.office365.com. A (alg ECDSAP256SHA256)" and nothing more: not
+ * which RRset of the chain failed, not what was wrong with it, and the
+ * algorithm was only that of the first signature anywhere in the answer.
+ * A resolver in production logged bursts of those for Microsoft names whose
+ * signatures, fetched again, all verified -- and the log gave nothing to tell
+ * why.
+ *
+ * Only the first reason is kept, since it is the one that settled the
+ * verdict, and the buffer is allocated only when a verdict fails.
+ */
+#define VAL_WHY_MAX 640u
+
+static char *why_buf(elpis_task_t *t)
+{
+    if (t->val_why != NULL)
+        return NULL;                    /* the first reason stands */
+    t->val_why = (char *)elpis_malloc(VAL_WHY_MAX);
+    if (t->val_why != NULL)
+        t->val_why[0] = '\0';
+    return t->val_why;
+}
+
+static void note_why(elpis_task_t *t, const char *fmt, ...)
+{
+    char *b = why_buf(t);
+    va_list ap;
+
+    if (b == NULL)
+        return;
+    va_start(ap, fmt);
+    vsnprintf(b, VAL_WHY_MAX, fmt, ap);
+    va_end(ap);
+}
+
+/* An RRset no signature of which checked out against `keys`. */
+static void note_why_set(elpis_task_t *t, const val_t *v, const char *lead,
+                         const elpis_rrset_buf_t *set,
+                         const elpis_rrset_buf_t *keys, int64_t now)
+{
+    char *b = why_buf(t);
+    size_t len;
+
+    if (b == NULL)
+        return;
+    len = (size_t)snprintf(b, VAL_WHY_MAX, "%s", lead);
+    if (len >= VAL_WHY_MAX)
+        return;
+    len += elpis_rrset_why(&t->w->ctx->conf, set, keys, now, b + len,
+                           VAL_WHY_MAX - len);
+    if (len + 1u < VAL_WHY_MAX)
+        snprintf(b + len, VAL_WHY_MAX - len, "; %u of %u signature checks "
+                 "spent", v->verifies, VAL_MAX_VERIFIES);
+}
+
+/* A DNSKEY set that none of its DS records vouches for. */
+static void note_why_dnskey(elpis_task_t *t, const val_t *v,
+                            const elpis_rrset_buf_t *keys,
+                            const elpis_rrset_buf_t *ds, int64_t now)
+{
+    char lead[160];
+    size_t len = 0;
+    unsigned i, j;
+
+    if (t->val_why != NULL)
+        return;
+    why_add(lead, sizeof lead, &len, "DS says");
+    for (i = 0; i < ds->count && i < 4u; i++) {
+        const uint8_t *d = ds->data + ds->off[i];
+        const char *what = "no key with that tag";
+        if (ds->len[i] < 5)
+            continue;
+        if (!elpis_digest_supported(d[3]))
+            what = "digest type not supported";
+        else
+            for (j = 0; j < keys->count; j++) {
+                const uint8_t *k = keys->data + keys->off[j];
+                if (keys->len[j] < 5 ||
+                    elpis_dnskey_tag(k, keys->len[j]) != elpis_get16(d))
+                    continue;
+                what = elpis_ds_matches(&keys->name, k, keys->len[j], d,
+                                        ds->len[i]) == 1
+                     ? "matches" : "digest does not match";
+                break;
+            }
+        why_add(lead, sizeof lead, &len, "%s %u/%s/%u %s", i ? ";" : "",
+                elpis_get16(d), elpis_alg_name(d[2]), d[3], what);
+    }
+    why_add(lead, sizeof lead, &len, " -- ");
+    note_why_set(t, v, lead, keys, keys, now);
+}
+
 /* ------------------------------------------------------------------ */
 /* RRset grouping                                                      */
 /* ------------------------------------------------------------------ */
@@ -1743,9 +1974,15 @@ static void classify_unsigned_for_current(elpis_task_t *t, val_t *v, int reached
          * without signatures, which is the attack this exists to catch.
          */
         if (!v->cut[v->si] && w->ctx->conf.harden_dnssec_stripped) {
+            char nb[ELPIS_MAX_NAME * 4], cb[ELPIS_MAX_NAME * 4];
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
                 t->ede = ELPIS_EDE_RRSIGS_MISSING;
+            note_why(t, "%s %s has no signature, and no unsigned delegation "
+                     "was proven between %s and it",
+                     elpis_name_str(&zone, nb, sizeof nb),
+                     elpis_type_name(t->ans.rr[i].type),
+                     elpis_name_str(&v->cur, cb, sizeof cb));
             continue;                   /* never cache a forged verdict */
         }
 
@@ -1800,6 +2037,7 @@ static void verify_for_current(elpis_task_t *t, val_t *v)
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
                 t->ede = (ede >= 0) ? ede : ELPIS_EDE_DNSSEC_BOGUS;
+            note_why_set(t, v, "", set, &v->keys, now);
         }
     }
 }
@@ -1898,6 +2136,9 @@ static void tally(elpis_task_t *t, val_t *v)
      * denial RFC 4035 section 5 exists to catch.
      */
     if (nsecure == 0 && ninsecure == 0 && v->keyed) {
+        char nb[ELPIS_MAX_NAME * 4];
+        note_why(t, "an empty answer, not even an SOA, from signed zone %s",
+                 elpis_name_str(&v->signers[0], nb, sizeof nb));
         val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_NSEC_MISSING);
         return;
     }
@@ -1907,9 +2148,24 @@ static void tally(elpis_task_t *t, val_t *v)
     }
 
     switch (check_denial(t, v->nsigners ? &v->signers[0] : &t->qname)) {
-    case 0:
+    case 0: {
+        char nb[ELPIS_MAX_NAME * 4];
+        unsigned nproof = 0;
+        for (i = 0; i < t->ans.n; i++)
+            if (t->ans.rr[i].section == (uint8_t)ELPIS_SEC_AUTHORITY &&
+                (t->ans.rr[i].type == ELPIS_T_NSEC ||
+                 t->ans.rr[i].type == ELPIS_T_NSEC3))
+                nproof++;
+        note_why(t, "%u NSEC/NSEC3 record%s, which do not prove that %s %s %s",
+                 nproof, nproof == 1 ? "" : "s",
+                 elpis_name_str(&t->qname, nb, sizeof nb),
+                 t->rcode == ELPIS_RC_NXDOMAIN ? "(any type)"
+                                               : elpis_type_name(t->qtype),
+                 t->rcode == ELPIS_RC_NXDOMAIN ? "does not exist"
+                                               : "has no such data");
         val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_NSEC_MISSING);
         return;
+    }
     case ELPIS_NSEC3_OPTOUT_PROOF:
         val_done(t, ELPIS_SEC_INSECURE, -1);    /* RFC 5155 section 9.2 */
         return;
@@ -1960,6 +2216,9 @@ static void val_step(elpis_task_t *t)
                       v->pending.len
                           ? elpis_name_str(&v->pending, pb, sizeof pb)
                           : "nothing");
+        note_why(t, "gave up after %u lookups, last wanted %s %s", v->steps,
+                 elpis_type_name(v->pending_type),
+                 v->pending.len ? pb : "nothing");
         t->val_unavailable = 1;
         val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
         return;
@@ -2016,6 +2275,9 @@ static void val_step(elpis_task_t *t)
                  * client still gets SERVFAIL, but calling it bogus would be a
                  * lie in the logs and in the statistics.
                  */
+                char nb[ELPIS_MAX_NAME * 4];
+                note_why(t, "no DNSKEY for trust anchor %s",
+                         elpis_name_str(&v->cur, nb, sizeof nb));
                 t->val_unavailable = 1;
                 val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
                 return;
@@ -2044,6 +2306,7 @@ static void val_step(elpis_task_t *t)
                 continue;
             }
             if (rc != ELPIS_OK) {
+                note_why_set(t, v, "trust anchor: ", &v->keys, &v->keys, now);
                 val_done(t, ELPIS_SEC_BOGUS, ede);
                 return;
             }
@@ -2097,6 +2360,9 @@ static void val_step(elpis_task_t *t)
             }
             if (scratch->count == 0 &&
                 !(scratch->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA))) {
+                char nb[ELPIS_MAX_NAME * 4];
+                note_why(t, "no answer for %s DS",
+                         elpis_name_str(&next, nb, sizeof nb));
                 t->val_unavailable = 1;
                 val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_NOT_READY);
                 return;
@@ -2187,6 +2453,7 @@ static void val_step(elpis_task_t *t)
             if (scratch->sec != (uint8_t)ELPIS_SEC_SECURE) {
                 if (elpis_rrset_validate(c, scratch, &v->keys, now, NULL,
                                          &ede) != ELPIS_OK) {
+                    note_why_set(t, v, "", scratch, &v->keys, now);
                     val_done(t, ELPIS_SEC_BOGUS, ede);
                     return;
                 }
@@ -2204,6 +2471,9 @@ static void val_step(elpis_task_t *t)
                 if (scratch->count == 0) {
                     /* DS says this zone is signed but its DNSKEY is
                      * unreachable: unverifiable, not forged. */
+                    char nb[ELPIS_MAX_NAME * 4];
+                    note_why(t, "no answer for %s DNSKEY, which its DS says "
+                             "is signed", elpis_name_str(&next, nb, sizeof nb));
                     t->val_unavailable = 1;
                     val_done(t, ELPIS_SEC_INDETERMINATE, ELPIS_EDE_DNSKEY_MISSING);
                     return;
@@ -2224,6 +2494,7 @@ static void val_step(elpis_task_t *t)
                     continue;
                 }
                 if (rc != ELPIS_OK) {
+                    note_why_dnskey(t, v, scratch, &ds_hold, now);
                     val_done(t, ELPIS_SEC_BOGUS, ede);
                     return;
                 }
@@ -2278,6 +2549,7 @@ static void val_step(elpis_task_t *t)
         }
     }
 
+    note_why(t, "the validator did not settle in %u steps", guard);
     val_done(t, ELPIS_SEC_BOGUS, ELPIS_EDE_OTHER);
 }
 

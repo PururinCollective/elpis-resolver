@@ -91,6 +91,20 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
                              const elpis_rrset_buf_t *keys,
                              int64_t now, int *ede);
 
+/*
+ * Why no signature over `set` checks out against `keys`, as one line of text
+ * for a log: the RRset, then for each signature its key tag, algorithm,
+ * signer and what stopped it -- no key with that tag, a key that may not
+ * sign, a date outside its validity window, or a signature that failed the
+ * check -- and last the tags the key set does hold.  It only looks: no
+ * signature is verified, so it costs nothing against the KeyTrap budget.
+ * Returns the length written, always NUL-terminated when cap > 0.
+ */
+size_t elpis_rrset_why(const elpis_conf_t *conf,
+                       const elpis_rrset_buf_t *set,
+                       const elpis_rrset_buf_t *keys,
+                       int64_t now, char *out, size_t cap);
+
 /* ---- denial of existence ------------------------------------------ */
 /*
  * The proof records, already decompressed.  Passing a flat array keeps the

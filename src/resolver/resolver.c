@@ -200,6 +200,7 @@ void elpis_task_free(elpis_task_t *t)
     elpis_timer_del(t->w->loop, &t->deadline);
     elpis_timer_del(t->w->loop, &t->kick);
     elpis_val_free(t);
+    elpis_free(t->val_why);
     elpis_rrlist_free(&t->ans);
     if (t->live_prev != NULL) t->live_prev->live_next = t->live_next;
     else                      t->w->tasks = t->live_next;
@@ -277,11 +278,43 @@ void elpis_task_fail(elpis_task_t *t, unsigned rcode, int ede)
 /* Cache consultation                                                  */
 /* ================================================================== */
 
+/* Does the answer already hold records of this owner and type? */
+static int ans_has_rrset(const elpis_task_t *t, elpis_section_t sec,
+                         const elpis_name_t *owner, uint16_t type)
+{
+    unsigned i;
+    for (i = 0; i < t->ans.n; i++) {
+        const elpis_trr_t *rr = &t->ans.rr[i];
+        if (rr->type != type || rr->section != (uint8_t)sec ||
+            rr->namelen != owner->len)
+            continue;
+        if (elpis_eq_ci(elpis_trr_name(&t->ans, i), owner->d, owner->len))
+            return 1;
+    }
+    return 0;
+}
+
 /* Copy a cached RRset into the answer accumulator. */
 static int add_rrset(elpis_task_t *t, elpis_section_t sec,
                      const elpis_rrset_buf_t *b)
 {
     unsigned i;
+
+    /*
+     * Not over a copy the answer already has.  A CNAME off the wire keeps
+     * whatever records for its target came in the same reply, and the restart
+     * that follows the CNAME then found the same RRset in this cache and
+     * added it again.  The same data twice is only a duplicate in the reply
+     * -- b-0004.b-msedge.net A came back twice.  Different
+     * data is worse: an RRset that rotates, a reply tailored to one subnet and
+     * so never cached over the older copy, or another worker caching a
+     * different reply in between.  The validator gathers every record of an
+     * owner and type into one RRset, and a union of two replies is covered by
+     * neither one's signature: bogus.  The wire copy stays; it came with its
+     * own signatures and its own subnet.
+     */
+    if (ans_has_rrset(t, sec, &b->name, b->type))
+        return ELPIS_OK;
     for (i = 0; i < b->count; i++) {
         /*
          * With the zone that served it, as the cache recorded it.  Replayed
@@ -2451,6 +2484,24 @@ void elpis_task_step(elpis_task_t *t)
 /* Completion                                                          */
 /* ================================================================== */
 
+/* RFC 8914's names for the extended errors, for the log. */
+static const char *ede_name(int ede)
+{
+    static const char *const k[] = {
+        "Other", "Unsupported DNSKEY Algorithm", "Unsupported DS Digest Type",
+        "Stale Answer", "Forged Answer", "DNSSEC Indeterminate",
+        "DNSSEC Bogus", "Signature Expired", "Signature Not Yet Valid",
+        "DNSKEY Missing", "RRSIGs Missing", "No Zone Key Bit Set",
+        "NSEC Missing", "Cached Error", "Not Ready", "Blocked", "Censored",
+        "Filtered", "Prohibited", "Stale NXDomain Answer",
+        "Not Authoritative", "Not Supported", "No Reachable Authority",
+        "Network Error", "Invalid Data"
+    };
+    if (ede < 0 || (unsigned)ede >= ELPIS_ARRAY_LEN(k))
+        return "?";
+    return k[ede];
+}
+
 /*
  * RFC 4035 section 3.2.1: RRSIG, NSEC and NSEC3 records go to a client that
  * set DO, or to one that asked for that type by name, and to nobody else.
@@ -2530,22 +2581,21 @@ static void task_finish(elpis_task_t *t)
         !t->client_cd) {
         char nb[ELPIS_MAX_NAME * 4];
         int forged = (t->sec == ELPIS_SEC_BOGUS);
-        uint8_t alg = 0;
-        unsigned k;
+        int ede = t->ede >= 0 ? t->ede : ELPIS_EDE_DNSSEC_BOGUS;
 
-        /* Naming the algorithm turns "bogus" into something actionable. */
-        for (k = 0; k < t->ans.n; k++)
-            if (t->ans.rr[k].type == ELPIS_T_RRSIG && t->ans.rr[k].rdlen > 2) {
-                alg = elpis_trr_rd(&t->ans, k)[2];
-                break;
-            }
+        /*
+         * Say which RRset failed and why (see note_why() in dnssec.c).  This
+         * used to name only the algorithm of the first signature anywhere in
+         * the answer, which for a CNAME chain was seldom the link at fault.
+         */
         elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX - 1, __FILE__, __LINE__,
-                      "dnssec: %s for %s %s (alg %s); replying SERVFAIL",
+                      "dnssec: %s for %s %s: %s (EDE %d %s); replying SERVFAIL",
                       forged ? "bogus answer"
                              : "could not fetch validation material",
                       elpis_name_str(&t->orig_qname, nb, sizeof nb),
                       elpis_type_name(t->orig_qtype),
-                      alg ? elpis_alg_name(alg) : "none");
+                      t->val_why != NULL ? t->val_why : "no reason recorded",
+                      ede, ede_name(ede));
         /*
          * Take the answer back out of the cache before dropping it.
          *
@@ -2575,6 +2625,21 @@ static void task_finish(elpis_task_t *t)
                                  t->ans.rr[k2].klass);
                 elpis_rcache_del(w->ctx->rcache, &owner, ELPIS_T_RRSIG,
                                  t->ans.rr[k2].klass);
+                /*
+                 * A denial's SOA: take out the marker cache_negative() filed
+                 * under the question as well.  The records above go by their
+                 * own names -- the zone's SOA, the NSEC's owner -- and never
+                 * included that one, so a forged "no such data" was refused
+                 * once, then served from the marker as NOERROR, without its
+                 * proof and without AD, as soon as the failure cache let the
+                 * question through again.  Five seconds, the first time.
+                 */
+                if (t->ans.rr[k2].type == ELPIS_T_SOA &&
+                    t->ans.rr[k2].section == (uint8_t)ELPIS_SEC_AUTHORITY)
+                    elpis_rcache_del(w->ctx->rcache, &t->qname,
+                                     t->rcode == ELPIS_RC_NXDOMAIN
+                                         ? (uint16_t)ELPIS_T_NXNAME : t->qtype,
+                                     t->qclass);
             }
         }
         elpis_rrlist_clear(&t->ans);
