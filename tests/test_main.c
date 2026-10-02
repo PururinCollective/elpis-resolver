@@ -2469,6 +2469,367 @@ static void test_rrset_why(void)
 }
 
 /* ================================================================== */
+/*
+ * Keys and DS records that come with TTL 0.  The RRset cache keeps nothing
+ * with TTL 0, and the validator used to read keys and DS from nowhere else.
+ * So a chain through such a zone ended in SERVFAIL, EDE 9, every time, though
+ * each fetch had worked: mldsa44.dnstest.dev serves its DNSKEY that way.
+ * Here the validator's own lookups are answered with replies off the wire,
+ * through the resolver's real path: a DS and a DNSKEY both at TTL 0, and a
+ * denial of DS at TTL 0.  Each must settle, and none may be left cached.
+ */
+
+/* Sign `set` as an authority would: the RRSIG rdata, then the RRset in
+ * canonical form, under Ed25519.  Every set here holds one record, so there
+ * is no order to sort. */
+static void ttl0_sign(elpis_rrset_buf_t *set, const elpis_name_t *signer,
+                      const uint8_t sk[32], uint16_t tag)
+{
+    static uint8_t msg[2048];
+    uint8_t rd[18 + ELPIS_MAX_NAME + 64];
+    int64_t now = elpis_wall_s();
+    size_t o = 0, m;
+    unsigned i;
+
+    elpis_put16(rd + o, set->type); o += 2;
+    rd[o++] = ELPIS_ALG_ED25519;
+    rd[o++] = (uint8_t)set->name.labels;
+    elpis_put32(rd + o, set->ttl); o += 4;
+    elpis_put32(rd + o, (uint32_t)(now + 86400)); o += 4;
+    elpis_put32(rd + o, (uint32_t)(now - 86400)); o += 4;
+    elpis_put16(rd + o, tag); o += 2;
+    memcpy(rd + o, signer->d, signer->len); o += signer->len;
+
+    memcpy(msg, rd, o);
+    m = o;
+    for (i = 0; i < set->count; i++) {
+        memcpy(msg + m, set->name.d, set->name.len); m += set->name.len;
+        elpis_put16(msg + m, set->type); m += 2;
+        elpis_put16(msg + m, set->klass); m += 2;
+        elpis_put32(msg + m, set->ttl); m += 4;
+        elpis_put16(msg + m, set->len[i]); m += 2;
+        memcpy(msg + m, set->data + set->off[i], set->len[i]);
+        m += set->len[i];
+    }
+    elpis_ed25519_sign(sk, msg, m, rd + o);
+    elpis_rrset_buf_add_sig(set, rd, (uint16_t)(o + 64));
+}
+
+/* A zone's DNSKEY set: one Ed25519 key, signing itself.  Returns its tag. */
+static uint16_t ttl0_keys(elpis_rrset_buf_t *keys, const elpis_name_t *zone,
+                          const uint8_t sk[32], uint32_t ttl)
+{
+    uint8_t rd[4 + 32];
+    uint16_t tag;
+
+    elpis_put16(rd, 257);
+    rd[2] = 3;
+    rd[3] = ELPIS_ALG_ED25519;
+    elpis_ed25519_pubkey(sk, rd + 4);
+    tag = elpis_dnskey_tag(rd, sizeof rd);
+    elpis_rrset_buf_init(keys, zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, ttl);
+    elpis_rrset_buf_add(keys, rd, sizeof rd);
+    ttl0_sign(keys, zone, sk, tag);
+    return tag;
+}
+
+/* The SHA-256 DS rdata for the one key in `keys`. */
+static void ttl0_ds(uint8_t dsr[4 + 32], const elpis_name_t *zone,
+                    const elpis_rrset_buf_t *keys, uint16_t tag)
+{
+    uint8_t buf[ELPIS_MAX_NAME + 64];
+
+    memcpy(buf, zone->d, zone->len);
+    memcpy(buf + zone->len, keys->data + keys->off[0], keys->len[0]);
+    elpis_put16(dsr, tag);
+    dsr[2] = ELPIS_ALG_ED25519;
+    dsr[3] = ELPIS_DS_SHA256;
+    elpis_sha256(buf, zone->len + keys->len[0], dsr + 4);
+}
+
+/* An authoritative reply to (q, qtype): `sets` and their signatures in one
+ * section, every record at its set's TTL. */
+static size_t ttl0_reply(uint8_t *out, const elpis_name_t *q, uint16_t qtype,
+                         elpis_section_t sec,
+                         const elpis_rrset_buf_t *const *sets, unsigned nsets)
+{
+    size_t o = 12;
+    unsigned i, j, n = 0;
+
+    memset(out, 0, 12);
+    elpis_put16(out, 0x5a5a);
+    elpis_put16(out + 2, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_AA));
+    elpis_put16(out + 4, 1);
+    memcpy(out + o, q->d, q->len); o += q->len;
+    elpis_put16(out + o, qtype); o += 2;
+    elpis_put16(out + o, ELPIS_CLASS_IN); o += 2;
+    for (i = 0; i < nsets; i++) {
+        const elpis_rrset_buf_t *s = sets[i];
+        for (j = 0; j < (unsigned)s->count + s->sigcount; j++) {
+            memcpy(out + o, s->name.d, s->name.len); o += s->name.len;
+            elpis_put16(out + o, j < s->count ? s->type
+                                              : (uint16_t)ELPIS_T_RRSIG);
+            o += 2;
+            elpis_put16(out + o, ELPIS_CLASS_IN); o += 2;
+            elpis_put32(out + o, s->ttl); o += 4;
+            elpis_put16(out + o, s->len[j]); o += 2;
+            memcpy(out + o, s->data + s->off[j], s->len[j]);
+            o += s->len[j];
+            n++;
+        }
+    }
+    elpis_put16(out + (sec == ELPIS_SEC_ANSWER ? 6 : 8), (uint16_t)n);
+    return o;
+}
+
+/* Answer the lookup `p` is waiting on, if it is for (name, type). */
+static int ttl0_feed(elpis_task_t *p, const char *name, uint16_t type,
+                     const uint8_t *wire, size_t len)
+{
+    elpis_task_t *c = p != NULL ? p->children : NULL;
+    elpis_name_t n;
+    elpis_outq_t q;
+    elpis_msg_t m;
+    int drop = 0;
+
+    elpis_name_from_text(&n, name);
+    if (c == NULL || c->qtype != type || !elpis_name_eq(&c->qname, &n))
+        return 0;
+    if (elpis_msg_parse(&m, wire, len, ELPIS_PARSE_RESPONSE, &drop) != ELPIS_OK)
+        return 0;
+    memset(&q, 0, sizeof q);
+    elpis_addr_parse(&q.server, "192.0.2.53", 53);
+    elpis_resolver_on_response(c, &q, &m);
+    return 1;
+}
+
+/* -2 for unverifiable, otherwise the verdict. */
+static void ttl0_done(elpis_task_t *t, void *ctx)
+{
+    *(int *)ctx = t->val_unavailable ? -2 : (int)t->sec;
+}
+
+/* Start validating `ans`, served by `zone`, as a resolution with no client
+ * would.  NULL once it has settled; otherwise it is waiting on a lookup. */
+static elpis_task_t *ttl0_validate(elpis_worker_t *w,
+                                   const elpis_rrset_buf_t *ans,
+                                   const elpis_name_t *zone, int *verdict)
+{
+    elpis_task_t *t = elpis_task_new(w);
+    unsigned i;
+
+    *verdict = -1;
+    if (t == NULL)
+        return NULL;
+    t->qname = t->orig_qname = ans->name;
+    t->qtype = t->orig_qtype = ans->type;
+    t->rcode = ELPIS_RC_NOERROR;
+    t->state = ELPIS_TS_VALIDATE;
+    t->done_cb  = ttl0_done;
+    t->done_ctx = verdict;
+    t->ans.zone_labels = ELPIS_ZONE_STAMP(zone);
+    for (i = 0; i < (unsigned)ans->count + ans->sigcount; i++)
+        elpis_rrlist_add(&t->ans, ELPIS_SEC_ANSWER, &ans->name,
+                         i < ans->count ? ans->type : (uint16_t)ELPIS_T_RRSIG,
+                         ELPIS_CLASS_IN, ans->ttl, ans->data + ans->off[i],
+                         ans->len[i]);
+    if (elpis_val_start(t) != 0)
+        return t;
+    t->state = ELPIS_TS_FINISH;
+    elpis_task_step(t);
+    return NULL;
+}
+
+static void test_ttl0_material(void)
+{
+    static elpis_rrset_buf_t top_keys, keys, ds, ans, soa, nsec, got;
+    static uint8_t wire[4096];
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    uint8_t sk_top[32], sk_low[32], dsr[4 + 32], rd[128];
+    const elpis_rrset_buf_t *sets[2];
+    elpis_name_t top, low, www, nods, wwwn, next;
+    elpis_task_t *t1, *t2, *t3;
+    char path[] = "/tmp/elpis-ta-XXXXXX";
+    char hex[65];
+    uint16_t top_tag, low_tag;
+    uint32_t now = elpis_cached_now_s();
+    int v1, v2, v3, fd;
+    unsigned i;
+    uint64_t n;
+    size_t len, o;
+    FILE *fp;
+
+    section("validation material with TTL 0");
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 64;
+    ctx->rcache = elpis_rcache_new(4u << 20, 2);
+    ctx->dcache = elpis_dcache_new(1u << 20, 2);
+    ctx->ta     = elpis_ta_new();
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);      /* never run: lookups get no further
+                                         * than their first timer */
+    w->rrbuf = (elpis_rrset_buf_t *)elpis_malloc(sizeof *w->rrbuf);
+    w->rd1   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd2   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    CHECK(ctx->rcache != NULL && ctx->dcache != NULL && ctx->ta != NULL &&
+          w->loop != NULL && w->rrbuf != NULL && w->rd1 != NULL &&
+          w->rd2 != NULL && w->txbuf != NULL, "caches, loop and buffers");
+    if (ctx->rcache == NULL || ctx->dcache == NULL || ctx->ta == NULL ||
+        w->loop == NULL || w->rrbuf == NULL || w->rd1 == NULL ||
+        w->rd2 == NULL || w->txbuf == NULL)
+        goto out;
+
+    for (i = 0; i < 32; i++) {
+        sk_top[i] = (uint8_t)(0x10 + i);
+        sk_low[i] = (uint8_t)(0x80 + i);
+    }
+    elpis_name_from_text(&top,  "test.");
+    elpis_name_from_text(&low,  "ttl0.test.");
+    elpis_name_from_text(&www,  "www.ttl0.test.");
+    elpis_name_from_text(&nods, "nods.test.");
+    elpis_name_from_text(&wwwn, "www.nods.test.");
+    elpis_name_from_text(&next, "zz.test.");
+
+    /* test. is the trust anchor; its keys are cached the ordinary way. */
+    top_tag = ttl0_keys(&top_keys, &top, sk_top, 3600);
+    ttl0_ds(dsr, &top, &top_keys, top_tag);
+    for (i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", dsr[4 + i]);
+    fd = mkstemp(path);
+    CHECK(fd >= 0, "trust anchor file");
+    if (fd < 0)
+        goto out;
+    fp = fdopen(fd, "w");
+    fprintf(fp, "test. 3600 IN DS %u 15 2 %s\n", top_tag, hex);
+    fclose(fp);
+    CHECK(elpis_ta_load_file(ctx->ta, path) == ELPIS_OK, "the anchor loads");
+    unlink(path);
+    elpis_rcache_put_buf(ctx->rcache, &top_keys, 0, 0);
+
+    /* ttl0.test.: its DS, its DNSKEY and its answer all at TTL 0, as the
+     * ML-DSA-44 test zone publishes them. */
+    low_tag = ttl0_keys(&keys, &low, sk_low, 0);
+    ttl0_ds(dsr, &low, &keys, low_tag);
+    elpis_rrset_buf_init(&ds, &low, ELPIS_T_DS, ELPIS_CLASS_IN, 0);
+    elpis_rrset_buf_add(&ds, dsr, sizeof dsr);
+    ttl0_sign(&ds, &top, sk_top, top_tag);
+    elpis_rrset_buf_init(&ans, &www, ELPIS_T_A, ELPIS_CLASS_IN, 0);
+    rd[0] = 192; rd[1] = 0; rd[2] = 2; rd[3] = 1;
+    elpis_rrset_buf_add(&ans, rd, 4);
+    ttl0_sign(&ans, &low, sk_low, low_tag);
+
+    (void)elpis_dnssec_take_verifies();
+    t1 = ttl0_validate(w, &ans, &low, &v1);
+    t2 = ttl0_validate(w, &ans, &low, &v2);
+    CHECK(t1 != NULL && t2 != NULL, "two validations wait for the DS");
+    CHECK(t1 != NULL && t1->children != NULL && t2 != NULL &&
+          t2->children == NULL, "on one lookup between them");
+
+    sets[0] = &ds;
+    len = ttl0_reply(wire, &low, ELPIS_T_DS, ELPIS_SEC_ANSWER, sets, 1);
+    CHECK(ttl0_feed(t1, "ttl0.test.", ELPIS_T_DS, wire, len),
+          "the DS lookup is answered, TTL 0");
+    CHECK(v1 == -1 && v2 == -1, "and both go on to wait for the DNSKEY");
+
+    sets[0] = &keys;
+    len = ttl0_reply(wire, &low, ELPIS_T_DNSKEY, ELPIS_SEC_ANSWER, sets, 1);
+    CHECK(ttl0_feed(t1, "ttl0.test.", ELPIS_T_DNSKEY, wire, len),
+          "the DNSKEY lookup is answered, TTL 0, with the DS still needed");
+    n = elpis_dnssec_take_verifies();
+    CHECK(v1 == (int)ELPIS_SEC_SECURE && v2 == (int)ELPIS_SEC_SECURE,
+          "both validations are secure, not EDE 9 (%d, %d)", v1, v2);
+    /* The anchor's keys, the DS and the DNSKEY once between them, and each
+     * answer once: a held set keeps its verdict like a cached one. */
+    CHECK(n == 5, "every signature checked once (%llu)",
+          (unsigned long long)n);
+
+    CHECK(elpis_rcache_get(ctx->rcache, &low, ELPIS_T_DS, ELPIS_CLASS_IN,
+                           now, 86400, &got) == ELPIS_ENOTFOUND &&
+          elpis_rcache_get(ctx->rcache, &low, ELPIS_T_DNSKEY, ELPIS_CLASS_IN,
+                           now, 86400, &got) == ELPIS_ENOTFOUND,
+          "neither TTL-0 set is in the cache, stale or otherwise");
+    t3 = ttl0_validate(w, &ans, &low, &v3);
+    CHECK(t3 != NULL && t3->children != NULL &&
+          t3->children->qtype == ELPIS_T_DS,
+          "and the next validation fetches them again");
+    elpis_task_free(t3);
+
+    /*
+     * nods.test. is an unsigned delegation, and test. says so in a denial of
+     * its DS at TTL 0.  The validator reads that only as the cache's denial
+     * marker, which was never built at TTL 0.
+     */
+    elpis_rrset_buf_init(&soa, &top, ELPIS_T_SOA, ELPIS_CLASS_IN, 0);
+    {
+        static const uint8_t mname[] = { 2,'n','s',4,'t','e','s','t',0 };
+        static const uint8_t rname[] = { 5,'a','d','m','i','n',4,'t','e','s','t',0 };
+        o = 0;
+        memcpy(rd + o, mname, sizeof mname); o += sizeof mname;
+        memcpy(rd + o, rname, sizeof rname); o += sizeof rname;
+        elpis_put32(rd + o, 1); o += 4;
+        elpis_put32(rd + o, 3600); o += 4;
+        elpis_put32(rd + o, 600); o += 4;
+        elpis_put32(rd + o, 1209600); o += 4;
+        elpis_put32(rd + o, 0); o += 4;
+        elpis_rrset_buf_add(&soa, rd, (uint16_t)o);
+    }
+    elpis_rrset_buf_init(&nsec, &nods, ELPIS_T_NSEC, ELPIS_CLASS_IN, 0);
+    o = 0;
+    memcpy(rd + o, next.d, next.len); o += next.len;
+    rd[o++] = 0;                        /* window 0: NS, RRSIG, NSEC */
+    rd[o++] = 6;
+    memset(rd + o, 0, 6);
+    rd[o] = 0x20;
+    rd[o + 5] = 0x03;
+    o += 6;
+    elpis_rrset_buf_add(&nsec, rd, (uint16_t)o);
+    ttl0_sign(&nsec, &top, sk_top, top_tag);
+    elpis_rrset_buf_init(&ans, &wwwn, ELPIS_T_A, ELPIS_CLASS_IN, 0);
+    rd[0] = 192; rd[1] = 0; rd[2] = 2; rd[3] = 2;
+    elpis_rrset_buf_add(&ans, rd, 4);
+
+    t1 = ttl0_validate(w, &ans, &nods, &v1);
+    CHECK(t1 != NULL && t1->children != NULL &&
+          t1->children->qtype == ELPIS_T_DS,
+          "an unsigned answer waits on the DS of its zone");
+    sets[0] = &soa;
+    sets[1] = &nsec;
+    len = ttl0_reply(wire, &nods, ELPIS_T_DS, ELPIS_SEC_AUTHORITY, sets, 2);
+    CHECK(ttl0_feed(t1, "nods.test.", ELPIS_T_DS, wire, len),
+          "which is denied, TTL 0");
+    CHECK(v1 == (int)ELPIS_SEC_INSECURE,
+          "the denial proves it unsigned, not unverifiable (%d)", v1);
+    CHECK(elpis_rcache_get(ctx->rcache, &nods, ELPIS_T_DS, ELPIS_CLASS_IN,
+                           now, 86400, &got) == ELPIS_ENOTFOUND,
+          "and the denial is not cached either");
+
+out:
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);     /* the lookups left waiting */
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->rrbuf);
+        elpis_free(w->rd1);
+        elpis_free(w->rd2);
+        elpis_free(w->txbuf);
+    }
+    if (ctx != NULL) {
+        elpis_cache_free(ctx->rcache);
+        elpis_cache_free(ctx->dcache);
+        elpis_ta_free(ctx->ta);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 static void test_quirks(void)
 {
     elpis_conf_t c;
@@ -2976,6 +3337,7 @@ int main(void)
     test_bignum();
     test_keytrap();
     test_rrset_why();
+    test_ttl0_material();
     test_dnssec();
     test_dns64();
     test_conflict();

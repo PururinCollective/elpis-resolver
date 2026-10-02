@@ -259,6 +259,14 @@ struct elpis_task {
     /* ---- DNSSEC working state ---- */
     void           *val;
     /*
+     * The answer to this lookup, when the validator asked for it
+     * (hold_uncached) and it came with TTL 0, so no cache would keep it.
+     * val_child_done() in dnssec.c takes it for the validations that were
+     * waiting; anything it does not take is freed with the task.
+     */
+    unsigned        hold_uncached : 1;
+    elpis_rrset_buf_t *held;
+    /*
      * What decided a bogus or unverifiable verdict, in one line for the
      * warning task_finish() logs: which RRset, signed by whom, and what was
      * wrong with it.  Allocated only when a verdict fails; the first reason

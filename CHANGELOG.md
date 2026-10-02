@@ -10,6 +10,22 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**A zone whose DNSKEY or DS has TTL 0 validates.** The RRset cache keeps
+nothing with TTL 0, and the validator read keys and DS only from that cache.
+So the keys were fetched, dropped, looked for, fetched again, and the answer
+went out SERVFAIL with EDE 9 (DNSKEY Missing). Cloudflare's ML-DSA-44 test
+zone, `mldsa44.dnstest.dev`, serves its DNSKEY that way. A lookup the
+validator starts now holds back its TTL-0 answer, and only the validations
+waiting on that lookup get it, until each has its verdict. It still goes into
+no cache, so no client is answered from it and serve-stale never sees it.
+`valid.mldsa44.dnstest.dev` now has AD, and `invalid` and `expired` fail with
+EDE 6 and EDE 7, the same as on 1.1.1.1. A denial of DS with TTL 0 is held
+the same way.
+
 ## 2.2.0 — 2026-09-30
 
 EDNS Client Subnet, so a content network answers for where the client is
