@@ -73,6 +73,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->harden_dnssec_stripped = 1;
     c->harden_below_nxdomain  = 1;
     c->harden_referral_path   = 0;
+    c->harden_pq_downgrade    = 1;
     c->root_key_sentinel      = 1;
     c->alg_mldsa44 = ELPIS_ALG_MLDSA44_DEFAULT;
     c->alg_mldsa65 = ELPIS_ALG_MLDSA65_DEFAULT;
@@ -380,6 +381,7 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("harden-dnssec-stripped")) return want_bool(&p, key, val, &c->harden_dnssec_stripped);
     if (KEY("harden-below-nxdomain"))  return want_bool(&p, key, val, &c->harden_below_nxdomain);
     if (KEY("harden-referral-path"))   return want_bool(&p, key, val, &c->harden_referral_path);
+    if (KEY("harden-pq-downgrade"))    return want_bool(&p, key, val, &c->harden_pq_downgrade);
     if (KEY("root-key-sentinel"))      return want_bool(&p, key, val, &c->root_key_sentinel);
     if (KEY("trust-anchor-file")) {
         elpis_strlcpy(c->trust_anchor_file, val, sizeof c->trust_anchor_file);

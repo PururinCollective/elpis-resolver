@@ -14,6 +14,18 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**Post-quantum downgrade protection (`harden-pq-downgrade: yes`).** A zone
+signed with both a classical algorithm and ML-DSA was only as strong as the
+classical one, because any one valid path was enough (RFC 6840). Whoever can
+forge P-256 could sign its DNSKEY set or an answer and be believed.
+`downgrade.mldsa44.dnstest.dev`, its ML-DSA path broken and its P-256 path
+good, came back with AD. Now, when a zone's DS names a post-quantum algorithm
+Elpis implements, a post-quantum key must authenticate the DNSKEY set, and
+only post-quantum keys sign for the zone after that. That zone is SERVFAIL
+with EDE 6, as on 1.1.1.1, and the log names the policy as the reason. Zones
+already sign every RRset with each of their algorithms, so a correctly signed
+one is not affected. `no` goes back to any valid path.
+
 **RFC 8509 root key sentinels (`root-key-sentinel: yes`).** A name whose first
 label is `root-key-sentinel-is-ta-NNNNN` or `-not-ta-NNNNN` is answered by
 whether the root key with that tag is trusted here: the signed answer, or

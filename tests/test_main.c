@@ -2479,15 +2479,14 @@ static void test_rrset_why(void)
  * denial of DS at TTL 0.  Each must settle, and none may be left cached.
  */
 
-/* Sign `set` as an authority would: the RRSIG rdata, then the RRset in
- * canonical form, under Ed25519.  Every set here holds one record, so there
- * is no order to sort. */
-static void ttl0_sign(elpis_rrset_buf_t *set, const elpis_name_t *signer,
-                      const uint8_t sk[32], uint16_t tag)
+/* Sign `set` as an authority would, valid a day either side of `now`: the
+ * RRSIG rdata, then the RRset in canonical form, under Ed25519.  The records
+ * must have been added in canonical order; most sets here hold one. */
+static void ttl0_sign_at(elpis_rrset_buf_t *set, const elpis_name_t *signer,
+                         const uint8_t sk[32], uint16_t tag, int64_t now)
 {
-    static uint8_t msg[2048];
+    static uint8_t msg[4096];
     uint8_t rd[18 + ELPIS_MAX_NAME + 64];
-    int64_t now = elpis_wall_s();
     size_t o = 0, m;
     unsigned i;
 
@@ -2513,6 +2512,12 @@ static void ttl0_sign(elpis_rrset_buf_t *set, const elpis_name_t *signer,
     }
     elpis_ed25519_sign(sk, msg, m, rd + o);
     elpis_rrset_buf_add_sig(set, rd, (uint16_t)(o + 64));
+}
+
+static void ttl0_sign(elpis_rrset_buf_t *set, const elpis_name_t *signer,
+                      const uint8_t sk[32], uint16_t tag)
+{
+    ttl0_sign_at(set, signer, sk, tag, elpis_wall_s());
 }
 
 /* A zone's DNSKEY set: one Ed25519 key, signing itself.  Returns its tag. */
@@ -2987,6 +2992,125 @@ out:
     elpis_cache_free(mc);
     elpis_free(ctx);
     elpis_free(w);
+}
+
+/* ================================================================== */
+/*
+ * harden-pq-downgrade.  A zone signed with both a classical algorithm and
+ * ML-DSA-44 is, under RFC 6840's any-valid-path rule, only as strong as the
+ * classical one: downgrade.mldsa44.dnstest.dev, its ML-DSA path broken and its
+ * P-256 path good, came back with AD.  Here the draft's own ML-DSA-44 key and
+ * MX signature (valid in 2015, hence the fixed `now`) stand beside an Ed25519
+ * key, and the DS decides whether the classical path may count.
+ */
+static void test_pq_downgrade(void)
+{
+    static elpis_rrset_buf_t keys, signers, ds_both, ds_classic, mx;
+    static uint8_t pqkey[4 + ELPIS_MLDSA44_PK_BYTES];
+    static uint8_t pqsig[18 + ELPIS_MAX_NAME + ELPIS_MLDSA44_SIG_BYTES];
+    const int64_t now = 1439000000;     /* inside the draft signature's window */
+    uint8_t sk[32], edkey[4 + 32], dsr[4 + 32], mxrd[2 + ELPIS_MAX_NAME];
+    elpis_name_t owner, exch;
+    elpis_conf_t c;
+    uint16_t edtag;
+    size_t pqlen, siglen, mxlen, n;
+    unsigned i;
+    int ede = -1;
+
+    section("post-quantum downgrade");
+    elpis_conf_defaults(&c);
+    elpis_name_from_text(&owner, "example.com.");
+    elpis_name_from_text(&exch, "mail.example.com.");
+
+    elpis_put16(pqkey, 257);
+    pqkey[2] = 3;
+    pqkey[3] = c.alg_mldsa44;
+    pqlen = 4 + unhex(TV_MLDSA44_DNSSEC_KEY, pqkey + 4, sizeof pqkey - 4);
+    for (i = 0; i < 32; i++)
+        sk[i] = (uint8_t)(0x40 + i);
+    elpis_put16(edkey, 257);
+    edkey[2] = 3;
+    edkey[3] = ELPIS_ALG_ED25519;
+    elpis_ed25519_pubkey(sk, edkey + 4);
+    edtag = elpis_dnskey_tag(edkey, sizeof edkey);
+
+    /* Both keys, the set signed by Ed25519 alone.  Canonical order: the
+     * Ed25519 key's algorithm octet, 15, sorts before 18. */
+    elpis_rrset_buf_init(&keys, &owner, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&keys, edkey, sizeof edkey);
+    elpis_rrset_buf_add(&keys, pqkey, (uint16_t)pqlen);
+    ttl0_sign_at(&keys, &owner, sk, edtag, now);
+
+    elpis_rrset_buf_init(&ds_classic, &owner, ELPIS_T_DS, ELPIS_CLASS_IN, 3600);
+    ttl0_ds(dsr, &owner, &keys, edtag);
+    elpis_rrset_buf_add(&ds_classic, dsr, sizeof dsr);
+    elpis_rrset_buf_init(&ds_both, &owner, ELPIS_T_DS, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&ds_both, dsr, sizeof dsr);
+    elpis_put16(dsr, TV_MLDSA44_DNSSEC_TAG);
+    dsr[2] = c.alg_mldsa44;
+    dsr[3] = ELPIS_DS_SHA256;
+    unhex(TV_MLDSA44_DNSSEC_DS_SHA256, dsr + 4, 32);
+    elpis_rrset_buf_add(&ds_both, dsr, sizeof dsr);
+
+    CHECK(elpis_dnskey_validate_ds(&c, &keys, &ds_classic, now, &ede) ==
+          ELPIS_OK, "a DS naming only Ed25519 is satisfied by Ed25519");
+    ede = -1;
+    CHECK(elpis_dnskey_validate_ds(&c, &keys, &ds_both, now, &ede) ==
+          ELPIS_EBOGUS, "a DS naming ML-DSA-44 too is not (the downgrade)");
+    c.harden_pq_downgrade = 0;
+    CHECK(elpis_dnskey_validate_ds(&c, &keys, &ds_both, now, &ede) == ELPIS_OK,
+          "unless harden-pq-downgrade is off: any valid path (RFC 6840)");
+    c.harden_pq_downgrade = 1;
+
+    /* Once the zone is known post-quantum, its answers must be too. */
+    elpis_rrset_buf_copy(&signers, &keys);
+    CHECK(elpis_dnskey_signers(&c, &signers, &ds_both) == 1 &&
+          signers.count == 1 && signers.data[signers.off[0] + 3] ==
+              c.alg_mldsa44,
+          "only the ML-DSA-44 key may sign for it");
+    CHECK(signers.sigcount == keys.sigcount &&
+          signers.len[signers.count] == keys.len[keys.count],
+          "and the set's own signatures stay with it");
+
+    elpis_put16(mxrd, 10);
+    memcpy(mxrd + 2, exch.d, exch.len);
+    mxlen = 2 + exch.len;
+    elpis_put16(pqsig, ELPIS_T_MX);
+    pqsig[2] = c.alg_mldsa44;
+    pqsig[3] = 2;
+    elpis_put32(pqsig + 4, 3600);
+    elpis_put32(pqsig + 8, 1440021600);
+    elpis_put32(pqsig + 12, 1438207200);
+    elpis_put16(pqsig + 16, TV_MLDSA44_DNSSEC_TAG);
+    memcpy(pqsig + 18, owner.d, owner.len);
+    n = 18 + owner.len;
+    siglen = n + unhex(TV_MLDSA44_DNSSEC_SIG, pqsig + n, sizeof pqsig - n);
+
+    /* A good Ed25519 signature and a broken ML-DSA one. */
+    elpis_rrset_buf_init(&mx, &owner, ELPIS_T_MX, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&mx, mxrd, (uint16_t)mxlen);
+    ttl0_sign_at(&mx, &owner, sk, edtag, now);
+    pqsig[n + 100] ^= 1;
+    elpis_rrset_buf_add_sig(&mx, pqsig, (uint16_t)siglen);
+    pqsig[n + 100] ^= 1;
+    CHECK(elpis_rrset_validate(&c, &mx, &keys, now, NULL, &ede) == ELPIS_OK,
+          "by any valid path it would be believed");
+    CHECK(elpis_rrset_validate(&c, &mx, &signers, now, NULL, &ede) != ELPIS_OK,
+          "but not on its Ed25519 signature once only ML-DSA-44 signs");
+
+    elpis_rrset_buf_init(&mx, &owner, ELPIS_T_MX, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&mx, mxrd, (uint16_t)mxlen);
+    ttl0_sign_at(&mx, &owner, sk, edtag, now);
+    elpis_rrset_buf_add_sig(&mx, pqsig, (uint16_t)siglen);
+    CHECK(elpis_rrset_validate(&c, &mx, &signers, now, NULL, &ede) == ELPIS_OK,
+          "while a valid ML-DSA-44 signature is");
+
+    elpis_rrset_buf_copy(&signers, &keys);
+    CHECK(elpis_dnskey_signers(&c, &signers, &ds_classic) == 0 &&
+          signers.count == 2, "a classical DS leaves every key signing");
+    c.harden_pq_downgrade = 0;
+    CHECK(elpis_dnskey_signers(&c, &signers, &ds_both) == 0 &&
+          signers.count == 2, "and so does the policy turned off");
 }
 
 /* ================================================================== */
@@ -3682,6 +3806,7 @@ int main(void)
     test_rrset_why();
     test_ttl0_material();
     test_reply_fit();
+    test_pq_downgrade();
     test_root_sentinel();
     test_dnssec();
     test_dns64();

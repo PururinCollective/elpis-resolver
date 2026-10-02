@@ -20,6 +20,33 @@ the resolver records which zone produced each record as it accepts it, so the
 question is answered from fact rather than inferred from whatever else happens
 to share the message.
 
+## Post-quantum downgrade
+
+A zone can be signed with two algorithms at once, say ECDSA P-256 and
+ML-DSA-44, while it moves from one to the other. RFC 6840 has a validator
+accept any one valid path, and that makes the zone exactly as strong as the
+weaker one: whoever can forge P-256, which a quantum computer would, signs the
+DNSKEY set or an answer with it and is believed. So when a zone's DS names a
+post-quantum algorithm Elpis implements, only that path counts. A
+post-quantum key must authenticate the DNSKEY set, and from then on only the
+post-quantum keys sign for the zone. 1.1.1.1 applies the same rule. A zone
+already has to sign every RRset with each algorithm in its DNSKEY set
+(RFC 4035 section 2.2), so a correctly signed one is not affected.
+`harden-pq-downgrade: no` goes back to any valid path.
+
+`downgrade.mldsa44.dnstest.dev`, its ML-DSA path broken and its P-256 path
+intact, is SERVFAIL with `DNSSEC Bogus`, and the log says why:
+
+```
+dnssec: bogus answer for downgrade.mldsa44.dnstest.dev. A: DS says
+29402/ECDSAP256SHA256/2 matches; 47303/ALG18/2 matches -- the DS of
+downgrade.mldsa44.dnstest.dev. names a post-quantum algorithm, so only
+post-quantum signatures count (harden-pq-downgrade) --
+downgrade.mldsa44.dnstest.dev. DNSKEY, 2 records; RRSIG 47303/ALG18 by
+downgrade.mldsa44.dnstest.dev.: failed the signature check; ... (EDE 6 DNSSEC
+Bogus); replying SERVFAIL
+```
+
 ## Root key sentinels
 
 RFC 8509 lets anyone ask a validating resolver whether it trusts a given root
