@@ -2990,6 +2990,189 @@ out:
 }
 
 /* ================================================================== */
+/*
+ * RFC 8509 root key sentinels: how anyone outside can tell which root keys a
+ * resolver trusts, and so whether it will survive the KSK-2024 rollover on
+ * 2026-10-11.  Without them dnstest.dev's check could not tell, though both
+ * root keys are compiled in.
+ */
+static void ttl0_done_rcode(elpis_task_t *t, void *ctx)
+{
+    int *r = (int *)ctx;
+    r[0] = (int)t->rcode;
+    r[1] = (int)t->sec;
+    r[2] = (int)t->ans.n;
+}
+
+static void test_root_sentinel(void)
+{
+    static const struct { const char *name; int want; } cases[] = {
+        { "root-key-sentinel-is-ta-20326.example.",  1 },
+        { "root-key-sentinel-is-ta-38696.example.",  1 },
+        { "root-key-sentinel-not-ta-20326.example.", -1 },
+        { "root-key-sentinel-not-ta-38696.example.", -1 },
+        { "root-key-sentinel-is-ta-12345.example.",  -1 },
+        { "root-key-sentinel-not-ta-12345.example.", 1 },
+        { "Root-Key-Sentinel-IS-TA-38696.example.",  1 },
+        { "root-key-sentinel-is-ta-99999.example.",  -1 },
+        /* Not sentinels: five digits exactly, and the leftmost label only. */
+        { "root-key-sentinel-is-ta-2032.example.",   0 },
+        { "root-key-sentinel-is-ta-203260.example.", 0 },
+        { "root-key-sentinel-is-ta-2032x.example.",  0 },
+        { "root-key-sentinel-is-ta.example.",        0 },
+        { "x.root-key-sentinel-not-ta-20326.example.", 0 },
+        { "www.example.", 0 },
+    };
+    static elpis_rrset_buf_t keys, ans;
+    elpis_ta_store_t *ta = elpis_ta_new(), *none = elpis_ta_new();
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    char path[] = "/tmp/elpis-ta-XXXXXX";
+    char hex[65];
+    uint8_t sk[32], dsr[4 + 32], rd[4] = { 192, 0, 2, 7 };
+    elpis_name_t n, top;
+    uint16_t tag;
+    unsigned i, ok = 0;
+    int r[3], fd;
+    FILE *fp;
+
+    section("root key sentinels (RFC 8509)");
+    CHECK(ta != NULL && none != NULL && ctx != NULL && w != NULL, "set up");
+    if (ta == NULL || none == NULL || ctx == NULL || w == NULL)
+        goto out;
+    elpis_ta_add_builtin(ta);
+    for (i = 0; i < ELPIS_ARRAY_LEN(cases); i++) {
+        int got;
+        elpis_name_from_text(&n, cases[i].name);
+        got = elpis_root_sentinel(ta, &n);
+        if (got == cases[i].want)
+            ok++;
+        else
+            printf("  %s: %d, want %d\n", cases[i].name, got, cases[i].want);
+    }
+    CHECK(ok == ELPIS_ARRAY_LEN(cases),
+          "both root keys trusted, others not, and only exact labels (%u of %u)",
+          ok, (unsigned)ELPIS_ARRAY_LEN(cases));
+    elpis_name_from_text(&n, "root-key-sentinel-is-ta-38696.example.");
+    CHECK(elpis_root_sentinel(none, &n) == -1,
+          "with no root anchor at all, is-ta fails");
+    elpis_name_from_text(&n, "root-key-sentinel-not-ta-38696.example.");
+    CHECK(elpis_root_sentinel(none, &n) == 1, "and not-ta passes");
+
+    /*
+     * Through the validator: a signed answer under test., an anchor of its
+     * own, with the root's built-in anchors beside it for the sentinel.
+     */
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 16;
+    ctx->rcache = elpis_rcache_new(4u << 20, 2);
+    ctx->dcache = elpis_dcache_new(1u << 20, 2);
+    ctx->ta     = elpis_ta_new();
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);
+    w->rrbuf = (elpis_rrset_buf_t *)elpis_malloc(sizeof *w->rrbuf);
+    w->rd1   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd2   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    if (ctx->rcache == NULL || ctx->dcache == NULL || ctx->ta == NULL ||
+        w->loop == NULL || w->rrbuf == NULL || w->rd1 == NULL ||
+        w->rd2 == NULL)
+        goto out;
+    elpis_ta_add_builtin(ctx->ta);
+    for (i = 0; i < 32; i++)
+        sk[i] = (uint8_t)(0x20 + i);
+    elpis_name_from_text(&top, "test.");
+    tag = ttl0_keys(&keys, &top, sk, 3600);
+    ttl0_ds(dsr, &top, &keys, tag);
+    for (i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", dsr[4 + i]);
+    fd = mkstemp(path);
+    if (fd < 0)
+        goto out;
+    fp = fdopen(fd, "w");
+    fprintf(fp, "test. 3600 IN DS %u 15 2 %s\n", tag, hex);
+    fclose(fp);
+    elpis_ta_load_file(ctx->ta, path);
+    unlink(path);
+    elpis_rcache_put_buf(ctx->rcache, &keys, 0, 0);
+
+    for (i = 0; i < 5; i++) {
+        static const char *const qn[] = {
+            "root-key-sentinel-not-ta-20326.test.",
+            "root-key-sentinel-is-ta-38696.test.",
+            "root-key-sentinel-is-ta-12345.test.",
+            "root-key-sentinel-not-ta-20326.test.",
+            "root-key-sentinel-not-ta-20326.test.",
+        };
+        static const char *const what[] = {
+            "not-ta-20326 for a trusted key is an empty SERVFAIL, no AD",
+            "is-ta-38696 is the signed answer: KSK-2024 is trusted",
+            "is-ta for a key not trusted is SERVFAIL",
+            "with CD set the answer goes out untouched",
+            "and a TXT question is no sentinel",
+        };
+        elpis_task_t *t = elpis_task_new(w);
+        unsigned j;
+
+        if (t == NULL)
+            break;
+        elpis_name_from_text(&n, qn[i]);
+        elpis_rrset_buf_init(&ans, &n, i == 4 ? ELPIS_T_TXT : ELPIS_T_A,
+                             ELPIS_CLASS_IN, 300);
+        elpis_rrset_buf_add(&ans, rd, sizeof rd);
+        ttl0_sign(&ans, &top, sk, tag);
+        t->qname = t->orig_qname = n;
+        t->qtype = t->orig_qtype = ans.type;
+        t->rcode = ELPIS_RC_NOERROR;
+        t->state = ELPIS_TS_VALIDATE;
+        t->client_cd = i == 3;
+        t->done_cb  = ttl0_done_rcode;
+        t->done_ctx = r;
+        t->ans.zone_labels = ELPIS_ZONE_STAMP(&top);
+        for (j = 0; j < (unsigned)ans.count + ans.sigcount; j++)
+            elpis_rrlist_add(&t->ans, ELPIS_SEC_ANSWER, &n,
+                             j < ans.count ? ans.type : (uint16_t)ELPIS_T_RRSIG,
+                             ELPIS_CLASS_IN, 300, ans.data + ans.off[j],
+                             ans.len[j]);
+        r[0] = r[1] = r[2] = -1;
+        if (elpis_val_start(t) != 0) {
+            CHECK(0, "%s: the validator should need nothing fetched", qn[i]);
+            elpis_task_free(t);
+            continue;
+        }
+        t->state = ELPIS_TS_FINISH;
+        elpis_task_step(t);
+        if (i == 0 || i == 2)
+            CHECK(r[0] == ELPIS_RC_SERVFAIL && r[2] == 0 &&
+                  r[1] != (int)ELPIS_SEC_SECURE, "%s (rcode %d, %d records)",
+                  what[i], r[0], r[2]);
+        else
+            CHECK(r[0] == ELPIS_RC_NOERROR && r[2] == 2 &&
+                  (i == 3 || r[1] == (int)ELPIS_SEC_SECURE),
+                  "%s (rcode %d, sec %d)", what[i], r[0], r[1]);
+    }
+
+out:
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->rrbuf);
+        elpis_free(w->rd1);
+        elpis_free(w->rd2);
+    }
+    if (ctx != NULL) {
+        elpis_cache_free(ctx->rcache);
+        elpis_cache_free(ctx->dcache);
+        elpis_ta_free(ctx->ta);
+    }
+    elpis_ta_free(ta);
+    elpis_ta_free(none);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 static void test_quirks(void)
 {
     elpis_conf_t c;
@@ -3499,6 +3682,7 @@ int main(void)
     test_rrset_why();
     test_ttl0_material();
     test_reply_fit();
+    test_root_sentinel();
     test_dnssec();
     test_dns64();
     test_conflict();

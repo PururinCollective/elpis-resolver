@@ -20,6 +20,19 @@ the resolver records which zone produced each record as it accepts it, so the
 question is answered from fact rather than inferred from whatever else happens
 to share the message.
 
+## Root key sentinels
+
+RFC 8509 lets anyone ask a validating resolver whether it trusts a given root
+key, by looking up a name whose first label is `root-key-sentinel-is-ta-NNNNN`
+or `root-key-sentinel-not-ta-NNNNN` (a key tag, five digits). For a signed A
+or AAAA answer, with CD clear, `is-ta` comes back as usual if the key is a
+root trust anchor here and SERVFAIL if not, and `not-ta` the other way round.
+Both root keys are compiled in, KSK-2017 (20326) and KSK-2024 (38696), so
+`not-ta-20326` and `not-ta-38696` are SERVFAIL and `is-ta-38696` resolves.
+That is how dnstest.dev's rollover check sees that Elpis trusts KSK-2024,
+which signs the root from 11 October 2026. `root-key-sentinel: no` turns it
+off.
+
 ## Query authentication
 
 DNS cookies (RFC 7873/9018) in both directions:
@@ -35,8 +48,8 @@ answer. Responses are also matched on transaction ID, source port, the exact
 Core: 1034, 1035, 2181, 2308, 3596, 3597, 4343, 5452, 6891, 7766, 9619
 Security: 4033–4035, 4470, 5155, 6605, 6840, 7873, 8080, 8624, 8914, 9018,
 9276, 9715
-Behaviour: 6052, 6147, 6303, 6672, 6761, 6762, 7686, 8020, 8482, 8767, 9156,
-9210, 9471, 9520
+Behaviour: 6052, 6147, 6303, 6672, 6761, 6762, 7686, 8020, 8482, 8509, 8767,
+9156, 9210, 9471, 9520
 
 ML-DSA verification follows FIPS 204, and the DNSSEC side follows
 `draft-westerbaan-dnssec-mldsa`, which gives ML-DSA-44 algorithm number 18 —

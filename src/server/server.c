@@ -562,6 +562,9 @@ static void fail_note(const elpis_task_t *t)
     uint32_t seq = __atomic_load_n(&f->seq, __ATOMIC_RELAXED);
     uint32_t hold;
 
+    /* Not a failure: the sentinel's answer, every time it is asked. */
+    if (t->sentinel_fail)
+        return;
     /* An answer only matters to a slot holding this question. */
     if (t->rcode != ELPIS_RC_SERVFAIL &&
         __atomic_load_n(&f->key, __ATOMIC_RELAXED) != k)

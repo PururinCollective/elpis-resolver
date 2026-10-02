@@ -10,6 +10,19 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**RFC 8509 root key sentinels (`root-key-sentinel: yes`).** A name whose first
+label is `root-key-sentinel-is-ta-NNNNN` or `-not-ta-NNNNN` is answered by
+whether the root key with that tag is trusted here: the signed answer, or
+SERVFAIL. Both root keys are compiled in, so KSK-2024 (38696) is reported as
+trusted ahead of the rollover on 11 October 2026. Before this, every sentinel
+name resolved, and dnstest.dev's rollover check could only say
+"inconclusive". A sentinel SERVFAIL is not held in the failure cache, so it
+does not come back as a cached error.
+
 ## 2.2.1 — 2026-10-02
 
 Two DNSSEC fixes found on Cloudflare's ML-DSA-44 test zone. A zone that

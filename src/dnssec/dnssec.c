@@ -17,6 +17,7 @@
 #include "elpis/rdata.h"
 #include "elpis/log.h"
 #include "elpis/util.h"
+#include "elpis/simd.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -828,6 +829,58 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
     if (ede && *ede < 0)
         *ede = ELPIS_EDE_DNSKEY_MISSING;
     return ELPIS_EBOGUS;
+}
+
+/*
+ * RFC 8509 root key sentinels.  root-key-sentinel-is-ta-NNNNN asks "do you
+ * trust the root key with tag NNNNN?", and not-ta- asks the opposite; the
+ * answer is the signed reply or SERVFAIL.  This is how anyone outside can
+ * see which root keys a resolver trusts, and so whether it will survive a
+ * key rollover -- KSK-2024 (38696) signs the root from 2026-10-11.  Without
+ * it, every sentinel name resolved, and a check such as dnstest.dev's could
+ * not tell that Elpis trusts KSK-2024 (both root keys are compiled in).
+ *
+ * Only the name is judged here: the label must be the whole leftmost label,
+ * the tag exactly five decimal digits, as section 2.1 insists.  The other
+ * preconditions -- a Secure answer, CD clear, A or AAAA -- are the caller's.
+ */
+int elpis_root_sentinel(const elpis_ta_store_t *ta, const elpis_name_t *qname)
+{
+    static const uint8_t is_ta[]  = "root-key-sentinel-is-ta-";
+    static const uint8_t not_ta[] = "root-key-sentinel-not-ta-";
+    const elpis_ta_t *tas[16];
+    const uint8_t *lab;
+    unsigned len, plen, i, n, tag = 0;
+    int is, trusted = 0;
+
+    if (qname->len < 1 || qname->d[0] == 0)
+        return 0;
+    len = qname->d[0];
+    lab = qname->d + 1;
+    if (len == sizeof is_ta - 1u + 5u &&
+        elpis_eq_ci(lab, is_ta, sizeof is_ta - 1u)) {
+        is = 1;
+        plen = sizeof is_ta - 1u;
+    } else if (len == sizeof not_ta - 1u + 5u &&
+               elpis_eq_ci(lab, not_ta, sizeof not_ta - 1u)) {
+        is = 0;
+        plen = sizeof not_ta - 1u;
+    } else {
+        return 0;
+    }
+    for (i = plen; i < len; i++) {
+        if (lab[i] < '0' || lab[i] > '9')
+            return 0;
+        tag = tag * 10u + (unsigned)(lab[i] - '0');
+    }
+
+    /* Revoked keys never become anchors (trustanchor.c), so every anchor
+     * held for the root is an active one in the RFC's sense. */
+    n = elpis_ta_for(ta, &elpis_name_root, tas, (unsigned)ELPIS_ARRAY_LEN(tas));
+    for (i = 0; i < n; i++)
+        if (tas[i]->keytag == tag)
+            trusted = 1;
+    return (is == trusted) ? 1 : -1;
 }
 
 /* ================================================================== */

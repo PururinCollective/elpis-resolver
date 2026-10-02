@@ -15,6 +15,7 @@
  * bailiwick of the zone that supplied it.
  */
 #include "elpis/resolver.h"
+#include "elpis/dnssec.h"
 #include "elpis/rdata.h"
 #include "elpis/deleg.h"
 #include "elpis/infra.h"
@@ -2687,6 +2688,25 @@ static void task_finish(elpis_task_t *t)
         t->rcode = ELPIS_RC_SERVFAIL;
         if (t->ede < 0)
             t->ede = ELPIS_EDE_DNSSEC_BOGUS;
+    }
+
+    /*
+     * RFC 8509: a root key sentinel name is answered as it is, or with an
+     * empty SERVFAIL, depending on whether the key tag in its first label is
+     * a root anchor here (elpis_root_sentinel()).  Only for an answer proven
+     * secure to a client that did not set CD, and only for A and AAAA.
+     * Decided before the message cache, so a SERVFAIL never has the answer
+     * it replaced filed under its name, and with no AD on it: what it says is
+     * no longer what was validated.
+     */
+    if (w->ctx->conf.root_key_sentinel && w->ctx->conf.dnssec &&
+        t->sec == ELPIS_SEC_SECURE && !t->client_cd &&
+        (t->orig_qtype == ELPIS_T_A || t->orig_qtype == ELPIS_T_AAAA) &&
+        elpis_root_sentinel(w->ctx->ta, &t->orig_qname) < 0) {
+        elpis_rrlist_clear(&t->ans);
+        t->rcode = ELPIS_RC_SERVFAIL;
+        t->sec = ELPIS_SEC_INDETERMINATE;
+        t->sentinel_fail = 1;
     }
 
     /*
