@@ -372,6 +372,9 @@ void elpis_server_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
 void elpis_server_fini(elpis_worker_t *w);
 void elpis_server_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
 void elpis_task_respond(elpis_task_t *t);
+/* The reply elpis_task_respond() sends, built into w->txbuf but not sent: its
+ * length, or 0 when it could not be built. */
+size_t elpis_task_build_reply(elpis_task_t *t);
 
 /* ---- resolution (resolver.c) ---- */
 elpis_task_t *elpis_task_new(elpis_worker_t *w);

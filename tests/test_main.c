@@ -2830,6 +2830,166 @@ out:
 }
 
 /* ================================================================== */
+/*
+ * A denial whose proof does not fit the client's UDP size.  To a client that
+ * set DO the authority section is the proof, so the reply is truncated -- TC,
+ * nothing in it -- rather than sent with AD and no proof.  The message cache
+ * already did this; a reply built fresh dropped the proof and said nothing,
+ * so nosuchname.mldsa44.dnstest.dev, never cached at TTL 0, always lost it.
+ * Here the two paths are held to the same answer.
+ */
+static void test_reply_fit(void)
+{
+    static uint8_t full[ELPIS_MAX_MSG];
+    /* Wire names; the literal's own terminator is the root label. */
+    static const uint8_t qn[] = "\6nosuch\3big\4test";
+    static const uint8_t zone[] = "\3big\4test";
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_cache_t *mc = elpis_mcache_new(4u << 20, 2);
+    elpis_task_t *t = NULL;
+    elpis_name_t owner, q;
+    elpis_mkey_t k;
+    elpis_mserve_t info;
+    elpis_msg_t m;
+    int drop = 0;
+    uint8_t rd[700], out[1500];
+    uint32_t toff[1] = { 0 }, tval[1] = { 0 };
+    size_t len, fulllen, outlen = 0, qend = 12 + sizeof qn + 4;
+    unsigned i, sigsize;
+
+    section("a proof that does not fit");
+    CHECK(ctx != NULL && w != NULL && mc != NULL, "set up");
+    if (ctx == NULL || w == NULL || mc == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 8;
+    w->ctx   = ctx;
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->ctab  = (elpis_cslot_t *)elpis_calloc(ELPIS_BLD_CTAB, sizeof(elpis_cslot_t));
+    if (w->txbuf == NULL || w->ctab == NULL)
+        goto out;
+
+    elpis_name_from_text(&q, "nosuch.big.test.");
+    elpis_name_from_text(&owner, "big.test.");
+    for (sigsize = 16; sigsize <= 600; sigsize += 584) {
+        if (t != NULL)
+            elpis_task_free(t);
+        t = elpis_task_new(w);
+        if (t == NULL)
+            goto out;
+        memcpy(t->client_qname, qn, sizeof qn);
+        t->client_qnamelen = (uint8_t)sizeof qn;
+        t->client_id = 0x1234;
+        t->orig_qname = q;
+        t->orig_qtype = ELPIS_T_A;
+        t->rcode = ELPIS_RC_NXDOMAIN;
+        t->sec = ELPIS_SEC_SECURE;
+        t->client_edns = 1;
+        t->client_bufsize = 1232;
+        t->client_do = 1;
+
+        /* An SOA, an NSEC and a signature over each.  Only the size of the
+         * signatures matters here: 2 x 16 bytes fit, 2 x 600 do not. */
+        memset(rd, 0, sizeof rd);
+        memcpy(rd, zone, sizeof zone);
+        memcpy(rd + sizeof zone, zone, sizeof zone);
+        elpis_rrlist_add(&t->ans, ELPIS_SEC_AUTHORITY, &owner, ELPIS_T_SOA,
+                         ELPIS_CLASS_IN, 0, rd, (uint16_t)(2 * sizeof zone + 20));
+        rd[sizeof zone] = 0;            /* NSEC bitmap: window 0, 1 octet */
+        rd[sizeof zone + 1] = 1;
+        rd[sizeof zone + 2] = 0x40;     /* A */
+        elpis_rrlist_add(&t->ans, ELPIS_SEC_AUTHORITY, &owner, ELPIS_T_NSEC,
+                         ELPIS_CLASS_IN, 0, rd, (uint16_t)(sizeof zone + 3));
+        for (i = 0; i < 2; i++) {
+            memset(rd, 0, sizeof rd);
+            elpis_put16(rd, i == 0 ? ELPIS_T_SOA : ELPIS_T_NSEC);
+            rd[2] = ELPIS_ALG_ED25519;
+            memcpy(rd + 18, zone, sizeof zone);
+            elpis_rrlist_add(&t->ans, ELPIS_SEC_AUTHORITY, &owner, ELPIS_T_RRSIG,
+                             ELPIS_CLASS_IN, 0, rd, (uint16_t)(18 + sizeof zone + sigsize));
+        }
+
+        len = elpis_task_build_reply(t);
+        if (sigsize == 16) {
+            CHECK(len > 0 && !(elpis_get16(w->txbuf + 2) & ELPIS_FLAG_TC) &&
+                  elpis_get16(w->txbuf + 8) == 4,
+                  "a proof that fits goes out whole (%zu bytes)", len);
+        }
+    }
+    if (t == NULL)
+        goto out;
+
+    CHECK(len > 0 && len <= 1232, "over UDP the reply fits (%zu bytes)", len);
+    CHECK((elpis_get16(w->txbuf + 2) & ELPIS_FLAG_TC) != 0,
+          "and is truncated, to a client that set DO");
+    CHECK(elpis_get16(w->txbuf + 6) == 0 && elpis_get16(w->txbuf + 8) == 0,
+          "with nothing in it, not AD and no proof");
+    CHECK((elpis_get16(w->txbuf + 2) & ELPIS_RCODE_MASK) == ELPIS_RC_NXDOMAIN &&
+          elpis_get16(w->txbuf + 10) == 1, "still NXDOMAIN, with its OPT");
+    CHECK(elpis_msg_parse(&m, w->txbuf, len, ELPIS_PARSE_RESPONSE, &drop) ==
+              ELPIS_OK && m.qtype == ELPIS_T_A && m.have_opt && m.do_bit,
+          "and a well-formed reply to the question asked");
+
+    t->from_tcp = 1;
+    len = elpis_task_build_reply(t);
+    CHECK(!(elpis_get16(w->txbuf + 2) & ELPIS_FLAG_TC) &&
+          elpis_get16(w->txbuf + 8) == 4 &&
+          elpis_msg_parse(&m, w->txbuf, len, ELPIS_PARSE_RESPONSE, &drop) ==
+              ELPIS_OK,
+          "over TCP the whole proof goes (%zu bytes)", len);
+
+    /* The same reply, whole and without OPT, as the message cache keeps it. */
+    t->client_edns = 0;
+    fulllen = elpis_task_build_reply(t);
+    memcpy(full, w->txbuf, fulllen);
+    memset(&k, 0, sizeof k);
+    k.qname = qn; k.qnamelen = sizeof qn; k.qtype = ELPIS_T_A;
+    k.qclass = ELPIS_CLASS_IN;
+    k.kflags = ELPIS_MK_DO;
+    elpis_mkey_hash(&k);
+    CHECK(elpis_mcache_store(mc, &k, full, fulllen, qend, toff, tval, 0,
+                             qend, fulllen, ELPIS_RC_NXDOMAIN, ELPIS_FLAG_AD,
+                             ELPIS_SEC_SECURE, 300, 0, 0, 0) == ELPIS_OK,
+          "the reply is cached");
+    CHECK(elpis_mcache_serve(mc, &k, 0x1234, qn, ELPIS_FLAG_QR, 1232 - 48, 0,
+                             30, 0, out, sizeof out, &outlen, &info) == ELPIS_OK &&
+          info.truncated && (elpis_get16(out + 2) & ELPIS_FLAG_TC) &&
+          elpis_get16(out + 8) == 0,
+          "and from the cache it is truncated the same way");
+
+    /* Without DO there is no proof to lose: the SOA alone would do, and the
+     * section is dropped as before, on both paths. */
+    t->client_do = 0;
+    t->client_edns = 1;
+    t->from_tcp = 0;
+    len = elpis_task_build_reply(t);
+    CHECK(!(elpis_get16(w->txbuf + 2) & ELPIS_FLAG_TC) &&
+          elpis_get16(w->txbuf + 8) == 0,
+          "a client without DO gets it without the section, untruncated");
+    k.kflags = 0;
+    elpis_mkey_hash(&k);
+    elpis_mcache_store(mc, &k, full, fulllen, qend, toff, tval, 0, qend,
+                       fulllen, ELPIS_RC_NXDOMAIN, ELPIS_FLAG_AD,
+                       ELPIS_SEC_SECURE, 300, 0, 0, 0);
+    CHECK(elpis_mcache_serve(mc, &k, 0x1234, qn, ELPIS_FLAG_QR, 1232 - 48, 0,
+                             30, 0, out, sizeof out, &outlen, &info) == ELPIS_OK &&
+          !info.truncated && info.dropped_ns,
+          "as the cache does");
+
+out:
+    if (t != NULL)
+        elpis_task_free(t);
+    if (w != NULL) {
+        elpis_free(w->txbuf);
+        elpis_free(w->ctab);
+    }
+    elpis_cache_free(mc);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 static void test_quirks(void)
 {
     elpis_conf_t c;
@@ -3338,6 +3498,7 @@ int main(void)
     test_keytrap();
     test_rrset_why();
     test_ttl0_material();
+    test_reply_fit();
     test_dnssec();
     test_dns64();
     test_conflict();

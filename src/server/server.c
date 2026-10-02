@@ -219,29 +219,16 @@ static int send_udp(elpis_worker_t *w, int fd, const uint8_t *buf, size_t len,
 
 static int tcp_queue(elpis_tcpconn_t *c, const uint8_t *buf, size_t len);
 
-/* Build the reply for a completed task and hand it to the transport. */
-void elpis_task_respond(elpis_task_t *t)
+size_t elpis_task_build_reply(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
-    uint64_t now_ms;
     elpis_bld_t b;
     elpis_edns_t e;
     uint16_t flags;
     size_t budget = client_budget(t);
     unsigned i;
-    elpis_bld_mark_t mark;
+    elpis_bld_mark_t mark, body;
     int truncated = 0;
-
-    if (!t->has_client)
-        return;
-    fail_note(t);
-
-    now_ms = elpis_cached_now_ms();
-    elpis_tm_observe(&w->tm,
-                     (now_ms > t->start_ms ? now_ms - t->start_ms : 0u) * 1000u,
-                     !t->from_cache);
-    elpis_tm_answer(&w->tm, &t->orig_qname, &t->client, t->rcode,
-                    t->sec == ELPIS_SEC_BOGUS);
 
     flags = (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RA);
     if (t->client_rd)
@@ -254,10 +241,11 @@ void elpis_task_respond(elpis_task_t *t)
 
     elpis_bld_init(&b, w->txbuf, ELPIS_MAX_MSG, w->ctab, 1);
     if (elpis_bld_header(&b, t->client_id, flags) != ELPIS_OK)
-        return;
+        return 0;
     if (elpis_bld_question_raw(&b, t->client_qname, t->client_qnamelen,
                                t->orig_qtype, t->qclass) != ELPIS_OK)
-        return;
+        return 0;
+    elpis_bld_mark(&b, &body);
 
     fill_edns(t, &e, t->rcode);
     /* Reserve room for the OPT record we will append last -- if there is to
@@ -292,11 +280,23 @@ void elpis_task_respond(elpis_task_t *t)
                 b.len > budget) {
                 /*
                  * A section that does not fit is dropped whole.  For the
-                 * answer section that means truncation; for the others the
-                 * reply is still correct, just less helpful.
+                 * answer section that means truncation.
+                 *
+                 * So it does for the authority section, to a client that set
+                 * DO.  The proof is there: a denial's SOA and NSEC or NSEC3
+                 * records, with their signatures.  It used to be dropped as
+                 * for any other client, and nosuchname.mldsa44.dnstest.dev
+                 * went out NXDOMAIN with AD and nothing to show for it: six
+                 * records with ML-DSA-44 signatures, 7.7 KB.  From the
+                 * message cache the same reply was truncated, as
+                 * elpis_mcache_serve() already did.  So only a reply built
+                 * here lost its proof, and a TTL-0 one, never cached, always
+                 * did.  RFC 4035 section 3.1.1: no room for the signatures
+                 * means TC.
                  */
                 elpis_bld_rollback(&b, &mark);
-                if (sec == ELPIS_SEC_ANSWER)
+                if (sec == ELPIS_SEC_ANSWER ||
+                    (sec == ELPIS_SEC_AUTHORITY && t->client_do))
                     truncated = 1;
                 break;
             }
@@ -304,8 +304,10 @@ void elpis_task_respond(elpis_task_t *t)
         }
     }
 
+    /* Empty, as the message cache sends it: the client asks again over TCP,
+     * and a part of the answer is no use to it meanwhile. */
     if (truncated && !t->from_tcp) {
-        elpis_bld_rollback(&b, &mark);
+        elpis_bld_rollback(&b, &body);
         elpis_put16(w->txbuf + 2, (uint16_t)(flags | ELPIS_FLAG_TC));
         elpis_stat_inc(&w->stats.truncated, 1);
     }
@@ -323,9 +325,35 @@ void elpis_task_respond(elpis_task_t *t)
     elpis_bld_finish(&b);
     if (truncated && !t->from_tcp)
         elpis_put16(w->txbuf + 2, (uint16_t)(flags | ELPIS_FLAG_TC));
+    return b.len;
+}
+
+/* Build the reply for a completed task and hand it to the transport. */
+void elpis_task_respond(elpis_task_t *t)
+{
+    elpis_worker_t *w = t->w;
+    uint64_t now_ms;
+    uint16_t flags;
+    size_t len;
+
+    if (!t->has_client)
+        return;
+    fail_note(t);
+
+    now_ms = elpis_cached_now_ms();
+    elpis_tm_observe(&w->tm,
+                     (now_ms > t->start_ms ? now_ms - t->start_ms : 0u) * 1000u,
+                     !t->from_cache);
+    elpis_tm_answer(&w->tm, &t->orig_qname, &t->client, t->rcode,
+                    t->sec == ELPIS_SEC_BOGUS);
+
+    len = elpis_task_build_reply(t);
+    if (len == 0)
+        return;
+    flags = elpis_get16(w->txbuf + 2);
 
     if (t->from_tcp && t->conn != NULL) {
-        tcp_queue(t->conn, w->txbuf, b.len);
+        tcp_queue(t->conn, w->txbuf, len);
         tcp_resolved(t->conn);
     } else {
         /*
@@ -347,7 +375,7 @@ void elpis_task_respond(elpis_task_t *t)
             send_udp(w, t->listen_fd, tc, tl, &t->client, &t->local);
             elpis_stat_inc(&w->stats.truncated, 1);
         } else {
-            send_udp(w, t->listen_fd, w->txbuf, b.len, &t->client, &t->local);
+            send_udp(w, t->listen_fd, w->txbuf, len, &t->client, &t->local);
         }
     }
 
@@ -365,7 +393,7 @@ void elpis_task_respond(elpis_task_t *t)
                    elpis_name_str(&t->orig_qname, nb, sizeof nb),
                    elpis_type_name(t->orig_qtype),
                    elpis_rcode_name(t->rcode),
-                   elpis_sec_name(t->sec), b.len);
+                   elpis_sec_name(t->sec), len);
     }
 }
 

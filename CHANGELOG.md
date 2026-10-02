@@ -26,6 +26,17 @@ no cache, so no client is answered from it and serve-stale never sees it.
 EDE 6 and EDE 7, the same as on 1.1.1.1. A denial of DS with TTL 0 is held
 the same way.
 
+**A proof too big for UDP is truncated, not dropped.** To a client that sets
+DO, the authority section of a "no such name" or "no such data" reply is the
+proof: the SOA, the NSEC or NSEC3 records and their signatures. When it did not
+fit the client's UDP size, a freshly resolved reply went out without it, with
+AD set and no TC, so the client had nothing to check and no reason to ask
+again over TCP. `nosuchname.mldsa44.dnstest.dev`, whose proof is 7.7 KB of
+ML-DSA-44 signatures, came back that way every time. The same reply from the
+message cache was already truncated. Now both are: TC and nothing else, and
+the client gets the whole proof over TCP. A client without DO gets the reply
+without that section, as before.
+
 ## 2.2.0 — 2026-09-30
 
 EDNS Client Subnet, so a content network answers for where the client is
