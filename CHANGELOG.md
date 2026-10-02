@@ -10,6 +10,40 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 2.3.0 — 2026-10-03
+
+Two DNSSEC features, both checked by dnstest.dev. Post-quantum downgrade
+protection: when a zone's DS names ML-DSA, a valid P-256 path no longer
+stands in for a broken ML-DSA one. And RFC 8509 root key sentinels, so the
+rollover to KSK-2024 on 11 October can be checked from outside: Elpis trusts
+it, and now says so.
+
+No config that worked stops working. `harden-pq-downgrade` and
+`root-key-sentinel` are both on by default.
+
+### Added
+
+**Post-quantum downgrade protection (`harden-pq-downgrade: yes`).** A zone
+signed with both a classical algorithm and ML-DSA was only as strong as the
+classical one, because any one valid path was enough (RFC 6840). Whoever can
+forge P-256 could sign its DNSKEY set or an answer and be believed.
+`downgrade.mldsa44.dnstest.dev`, its ML-DSA path broken and its P-256 path
+good, came back with AD. Now, when a zone's DS names a post-quantum algorithm
+Elpis implements, a post-quantum key must authenticate the DNSKEY set, and
+only post-quantum keys sign for the zone after that. That zone is SERVFAIL
+with EDE 6, as on 1.1.1.1, and the log names the policy as the reason. Zones
+already sign every RRset with each of their algorithms, so a correctly signed
+one is not affected. `no` goes back to any valid path.
+
+**RFC 8509 root key sentinels (`root-key-sentinel: yes`).** A name whose first
+label is `root-key-sentinel-is-ta-NNNNN` or `-not-ta-NNNNN` is answered by
+whether the root key with that tag is trusted here: the signed answer, or
+SERVFAIL. Both root keys are compiled in, so KSK-2024 (38696) is reported as
+trusted ahead of the rollover on 11 October 2026. Before this, every sentinel
+name resolved, and dnstest.dev's rollover check could only say
+"inconclusive". A sentinel SERVFAIL is not held in the failure cache, so it
+does not come back as a cached error.
+
 ## 2.2.1 — 2026-10-02
 
 Two DNSSEC fixes found on Cloudflare's ML-DSA-44 test zone. A zone that

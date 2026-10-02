@@ -108,6 +108,8 @@ typedef struct {
     uint8_t      harden_dnssec_stripped;
     uint8_t      harden_below_nxdomain;
     uint8_t      harden_referral_path;
+    uint8_t      harden_pq_downgrade;  /* a post-quantum DS wants that path */
+    uint8_t      root_key_sentinel;    /* RFC 8509 sentinel labels         */
     char         trust_anchor_file[512];
     uint8_t      alg_mldsa44, alg_mldsa65, alg_mldsa87;
     uint32_t     sig_skew;                 /* tolerated clock skew, secs */

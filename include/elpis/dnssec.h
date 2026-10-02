@@ -92,6 +92,22 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
                              int64_t now, int *ede);
 
 /*
+ * The keys of a DNSKEY set, already authenticated against `ds`, that may sign
+ * for the zone.  With harden-pq-downgrade on and a post-quantum algorithm in
+ * the DS, only the post-quantum keys: the set is trimmed in place and 1 is
+ * returned.  Otherwise 0, and the set is left as it is.
+ */
+int elpis_dnskey_signers(const elpis_conf_t *conf, elpis_rrset_buf_t *keys,
+                         const elpis_rrset_buf_t *ds);
+
+/*
+ * RFC 8509: what a root key sentinel name asks of the root anchors in
+ * `ta`.  0 when the leftmost label of `qname` is no sentinel, 1 when the
+ * answer goes out as it is, -1 when it must be SERVFAIL with nothing in it.
+ */
+int elpis_root_sentinel(const elpis_ta_store_t *ta, const elpis_name_t *qname);
+
+/*
  * Why no signature over `set` checks out against `keys`, as one line of text
  * for a log: the RRset, then for each signature its key tag, algorithm,
  * signer and what stopped it -- no key with that tag, a key that may not

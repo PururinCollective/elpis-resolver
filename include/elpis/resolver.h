@@ -245,6 +245,9 @@ struct elpis_task {
      * SERVFAIL, but only one of them is an attack.
      */
     unsigned        val_unavailable : 1;
+    /* An RFC 8509 sentinel answered SERVFAIL on purpose: no failure at all,
+     * so the failure cache in server.c leaves it alone. */
+    unsigned        sentinel_fail : 1;
     /*
      * A server of the current delegation answered with a reply that can only
      * mean "nothing of that type here" from a load balancer that will not say

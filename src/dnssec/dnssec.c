@@ -17,6 +17,7 @@
 #include "elpis/rdata.h"
 #include "elpis/log.h"
 #include "elpis/util.h"
+#include "elpis/simd.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -70,6 +71,90 @@ int elpis_digest_supported(uint8_t digest_type)
     return digest_type == ELPIS_DS_SHA256 ||
            digest_type == ELPIS_DS_SHA384 ||
            digest_type == ELPIS_DS_SHA1;
+}
+
+/* One of the ML-DSA numbers.  0 is never one: it is no algorithm at all. */
+static int alg_is_pq(const elpis_conf_t *c, uint8_t alg)
+{
+    return alg != 0 && (alg == c->alg_mldsa44 || alg == c->alg_mldsa65 ||
+                        alg == c->alg_mldsa87);
+}
+
+/*
+ * harden-pq-downgrade: the DS set names a post-quantum algorithm this
+ * resolver implements, so only that path may authenticate the zone.
+ *
+ * RFC 6840 section 5.11 has a validator accept any one valid path, and with
+ * two algorithms on offer that means the weaker one decides.  A zone signed
+ * with both P-256 and ML-DSA-44 is then exactly as strong as P-256: whoever
+ * can forge P-256 signs a DNSKEY set or an answer with it and is believed,
+ * the ML-DSA signatures never looked at.  downgrade.mldsa44.dnstest.dev is
+ * that case, its ML-DSA path broken and its P-256 path valid, and it came
+ * back with AD.  The same policy as 1.1.1.1: a DS that names a post-quantum
+ * algorithm means a post-quantum key must authenticate the DNSKEY set, and
+ * then only post-quantum keys sign for the zone (elpis_dnskey_signers()).  A
+ * zone already has to sign every RRset with each algorithm in its DNSKEY set
+ * (RFC 4035 section 2.2), so a correctly signed one loses nothing.
+ */
+static int ds_wants_pq(const elpis_conf_t *c, const elpis_rrset_buf_t *ds)
+{
+    unsigned i;
+
+    if (!c->harden_pq_downgrade ||
+        (ds->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)))
+        return 0;
+    for (i = 0; i < ds->count; i++) {
+        const uint8_t *d = ds->data + ds->off[i];
+        if (ds->len[i] >= 5 && alg_is_pq(c, d[2]) &&
+            elpis_digest_supported(d[3]))
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * The keys of a DNSKEY set, authenticated against `ds`, that may sign for the
+ * zone.  When ds_wants_pq(), only the post-quantum ones, so that no RRset of
+ * the zone is believed on a classical signature alone; the set is trimmed in
+ * place and 1 returned.  Otherwise all of them, untouched, and 0.
+ */
+int elpis_dnskey_signers(const elpis_conf_t *c, elpis_rrset_buf_t *keys,
+                         const elpis_rrset_buf_t *ds)
+{
+    unsigned i, n = 0, total = (unsigned)keys->count + keys->sigcount;
+
+    if (!ds_wants_pq(c, ds))
+        return 0;
+    for (i = 0; i < keys->count; i++) {
+        if (keys->len[i] < 4 ||
+            !alg_is_pq(c, keys->data[keys->off[i] + 3]))
+            continue;
+        keys->off[n] = keys->off[i];
+        keys->len[n] = keys->len[i];
+        n++;
+    }
+    /* The signatures follow the keys in the index; close the gap. */
+    for (i = keys->count; i < total; i++) {
+        keys->off[n + i - keys->count] = keys->off[i];
+        keys->len[n + i - keys->count] = keys->len[i];
+    }
+    keys->count = (uint8_t)n;
+    return 1;
+}
+
+/* The same for a set's signatures: only the post-quantum ones stay. */
+static void sigs_pq_only(const elpis_conf_t *c, elpis_rrset_buf_t *set)
+{
+    unsigned i, n = set->count, total = (unsigned)set->count + set->sigcount;
+
+    for (i = set->count; i < total; i++) {
+        if (set->len[i] < 3 || !alg_is_pq(c, set->data[set->off[i] + 2]))
+            continue;
+        set->off[n] = set->off[i];
+        set->len[n] = set->len[i];
+        n++;
+    }
+    set->sigcount = (uint8_t)(n - set->count);
 }
 
 static int ds_hash_alg(uint8_t digest_type)
@@ -734,12 +819,15 @@ int elpis_dnskey_validate_ds(const elpis_conf_t *conf,
 {
     unsigned i, j, tried = 0;
     int any_supported = 0;
+    int pq = ds_wants_pq(conf, ds);
 
     /*
      * At least one DS must match a DNSKEY, and that DNSKEY must then verify
      * the whole DNSKEY RRset's own signature.  Checking the DS alone is not
      * enough: it only authenticates one key, not the set.  Matched keys are
-     * tried VAL_DS_TRIES at most, for the reason at VAL_SIG_TRIES.
+     * tried VAL_DS_TRIES at most, for the reason at VAL_SIG_TRIES.  When the
+     * DS names a post-quantum algorithm, only those DS count: see
+     * ds_wants_pq().
      */
     for (i = 0; i < ds->count && tried < VAL_DS_TRIES; i++) {
         const uint8_t *dsr = ds->data + ds->off[i];
@@ -750,6 +838,8 @@ int elpis_dnskey_validate_ds(const elpis_conf_t *conf,
         if (!elpis_digest_supported(dsr[3]))
             continue;
         if (!elpis_alg_supported(conf, dsr[2]))
+            continue;
+        if (pq && !alg_is_pq(conf, dsr[2]))
             continue;
         any_supported = 1;
 
@@ -828,6 +918,58 @@ int elpis_dnskey_validate_ta(const elpis_conf_t *conf,
     if (ede && *ede < 0)
         *ede = ELPIS_EDE_DNSKEY_MISSING;
     return ELPIS_EBOGUS;
+}
+
+/*
+ * RFC 8509 root key sentinels.  root-key-sentinel-is-ta-NNNNN asks "do you
+ * trust the root key with tag NNNNN?", and not-ta- asks the opposite; the
+ * answer is the signed reply or SERVFAIL.  This is how anyone outside can
+ * see which root keys a resolver trusts, and so whether it will survive a
+ * key rollover -- KSK-2024 (38696) signs the root from 2026-10-11.  Without
+ * it, every sentinel name resolved, and a check such as dnstest.dev's could
+ * not tell that Elpis trusts KSK-2024 (both root keys are compiled in).
+ *
+ * Only the name is judged here: the label must be the whole leftmost label,
+ * the tag exactly five decimal digits, as section 2.1 insists.  The other
+ * preconditions -- a Secure answer, CD clear, A or AAAA -- are the caller's.
+ */
+int elpis_root_sentinel(const elpis_ta_store_t *ta, const elpis_name_t *qname)
+{
+    static const uint8_t is_ta[]  = "root-key-sentinel-is-ta-";
+    static const uint8_t not_ta[] = "root-key-sentinel-not-ta-";
+    const elpis_ta_t *tas[16];
+    const uint8_t *lab;
+    unsigned len, plen, i, n, tag = 0;
+    int is, trusted = 0;
+
+    if (qname->len < 1 || qname->d[0] == 0)
+        return 0;
+    len = qname->d[0];
+    lab = qname->d + 1;
+    if (len == sizeof is_ta - 1u + 5u &&
+        elpis_eq_ci(lab, is_ta, sizeof is_ta - 1u)) {
+        is = 1;
+        plen = sizeof is_ta - 1u;
+    } else if (len == sizeof not_ta - 1u + 5u &&
+               elpis_eq_ci(lab, not_ta, sizeof not_ta - 1u)) {
+        is = 0;
+        plen = sizeof not_ta - 1u;
+    } else {
+        return 0;
+    }
+    for (i = plen; i < len; i++) {
+        if (lab[i] < '0' || lab[i] > '9')
+            return 0;
+        tag = tag * 10u + (unsigned)(lab[i] - '0');
+    }
+
+    /* Revoked keys never become anchors (trustanchor.c), so every anchor
+     * held for the root is an active one in the RFC's sense. */
+    n = elpis_ta_for(ta, &elpis_name_root, tas, (unsigned)ELPIS_ARRAY_LEN(tas));
+    for (i = 0; i < n; i++)
+        if (tas[i]->keytag == tag)
+            trusted = 1;
+    return (is == trusted) ? 1 : -1;
 }
 
 /* ================================================================== */
@@ -947,6 +1089,9 @@ typedef struct {
     /* Validation material that came with TTL 0; see val_kept_t. */
     val_kept_t       *kept[VAL_KEPT];
     unsigned          nkept;
+    /* `keys` holds only the post-quantum keys of its zone, by
+     * elpis_dnskey_signers(). */
+    unsigned          pq_only : 1;
 
     uint8_t           status[VAL_MAX_SETS];   /* per leading record index */
     /*
@@ -1535,11 +1680,42 @@ static void note_why_set(elpis_task_t *t, const val_t *v, const char *lead,
 }
 
 /* A DNSKEY set that none of its DS records vouches for. */
+/*
+ * A set refused under harden-pq-downgrade.  Described as usual, every
+ * signature on it would be listed as failing -- a P-256 signature that
+ * verifies included, set aside by the policy and never checked -- or, once
+ * the keys are trimmed to the post-quantum ones, as made by a key the zone
+ * does not have.  So only the post-quantum signatures are described, and the
+ * reason the others did not count goes first.
+ */
+static void note_why_pq(elpis_task_t *t, const val_t *v, const char *lead,
+                        const elpis_rrset_buf_t *set,
+                        const elpis_rrset_buf_t *keys, int64_t now)
+{
+    char l2[288], zb[ELPIS_MAX_NAME * 4];
+    elpis_rrset_buf_t *pq;
+
+    if (t->val_why != NULL)
+        return;
+    snprintf(l2, sizeof l2, "%sthe DS of %s names a post-quantum algorithm, so "
+             "only post-quantum signatures count (harden-pq-downgrade) -- ",
+             lead, elpis_name_str(&keys->name, zb, sizeof zb));
+    pq = (elpis_rrset_buf_t *)elpis_malloc(sizeof *pq);
+    if (pq == NULL) {
+        note_why_set(t, v, l2, set, keys, now);
+        return;
+    }
+    elpis_rrset_buf_copy(pq, set);
+    sigs_pq_only(&t->w->ctx->conf, pq);
+    note_why_set(t, v, l2, pq, keys, now);
+    elpis_free(pq);
+}
+
 static void note_why_dnskey(elpis_task_t *t, const val_t *v,
                             const elpis_rrset_buf_t *keys,
                             const elpis_rrset_buf_t *ds, int64_t now)
 {
-    char lead[160];
+    char lead[224];
     size_t len = 0;
     unsigned i, j;
 
@@ -1566,6 +1742,11 @@ static void note_why_dnskey(elpis_task_t *t, const val_t *v,
             }
         why_add(lead, sizeof lead, &len, "%s %u/%s/%u %s", i ? ";" : "",
                 elpis_get16(d), elpis_alg_name(d[2]), d[3], what);
+    }
+    if (ds_wants_pq(&t->w->ctx->conf, ds)) {
+        why_add(lead, sizeof lead, &len, " -- ");
+        note_why_pq(t, v, lead, keys, keys, now);
+        return;
     }
     why_add(lead, sizeof lead, &len, " -- ");
     note_why_set(t, v, lead, keys, keys, now);
@@ -2195,7 +2376,10 @@ static void verify_for_current(elpis_task_t *t, val_t *v)
             v->status[i] = SS_BOGUS;
             if (t->ede < 0)
                 t->ede = (ede >= 0) ? ede : ELPIS_EDE_DNSSEC_BOGUS;
-            note_why_set(t, v, "", set, &v->keys, now);
+            if (v->pq_only)
+                note_why_pq(t, v, "", set, &v->keys, now);
+            else
+                note_why_set(t, v, "", set, &v->keys, now);
         }
     }
 }
@@ -2426,6 +2610,7 @@ static void val_step(elpis_task_t *t)
             int rc;
             if (!val_need(t, &v->cur, ELPIS_T_DNSKEY, &v->keys))
                 return;
+            v->pq_only = 0;
             if (v->keys.count == 0 || !elpis_name_eq(&v->keys.name, &v->cur)) {
                 /*
                  * We could not fetch the trust anchor's DNSKEY set.  That is a
@@ -2610,7 +2795,10 @@ static void val_step(elpis_task_t *t)
             if (scratch->sec != (uint8_t)ELPIS_SEC_SECURE) {
                 if (elpis_rrset_validate(c, scratch, &v->keys, now, NULL,
                                          &ede) != ELPIS_OK) {
-                    note_why_set(t, v, "", scratch, &v->keys, now);
+                    if (v->pq_only)
+                        note_why_pq(t, v, "", scratch, &v->keys, now);
+                    else
+                        note_why_set(t, v, "", scratch, &v->keys, now);
                     val_done(t, ELPIS_SEC_BOGUS, ede);
                     return;
                 }
@@ -2655,6 +2843,8 @@ static void val_step(elpis_task_t *t)
                     return;
                 }
                 elpis_rrset_buf_copy(&v->keys, scratch);
+                v->pq_only = elpis_dnskey_signers(c, &v->keys, &ds_hold)
+                                 ? 1u : 0u;
             }
             v->cur  = next;
             v->walk = next;
