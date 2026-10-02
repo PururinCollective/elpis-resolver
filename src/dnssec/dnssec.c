@@ -890,6 +890,21 @@ typedef struct {
 #define SS_INSECURE 2
 #define SS_BOGUS    3
 
+/*
+ * A DNSKEY, DS or denial that came with TTL 0, which the cache will not
+ * keep, shared by the validations that waited on the lookup that fetched it.
+ * Each holds a reference until its verdict is in.  See cache_rrset() in
+ * resolver.c and val_child_done().
+ */
+typedef struct {
+    unsigned           refs;
+    elpis_rrset_buf_t *set;
+} val_kept_t;
+
+/* TTL-0 sets one validation can hold: a DS and a DNSKEY per zone, as
+ * VAL_FAILED counts them. */
+#define VAL_KEPT 8
+
 typedef struct {
     int               stage;
     elpis_name_t      signers[VAL_MAX_SIGNERS];
@@ -929,6 +944,9 @@ typedef struct {
      * until the whole query timed out twenty seconds later.
      */
     val_fail_t        failed[VAL_FAILED];
+    /* Validation material that came with TTL 0; see val_kept_t. */
+    val_kept_t       *kept[VAL_KEPT];
+    unsigned          nkept;
 
     uint8_t           status[VAL_MAX_SETS];   /* per leading record index */
     /*
@@ -966,10 +984,24 @@ static val_t *val_alloc(void)
     return (val_t *)elpis_calloc(1, sizeof(val_t));
 }
 
+static void kept_drop(val_kept_t *k)
+{
+    if (k == NULL || --k->refs != 0)
+        return;
+    elpis_free(k->set);
+    elpis_free(k);
+}
+
 static void val_release(val_t *v)
 {
+    unsigned i;
+
     if (v == NULL)
         return;
+    /* The verdict is in, so the transaction a TTL-0 set was for is over. */
+    for (i = 0; i < v->nkept; i++)
+        kept_drop(v->kept[i]);
+    v->nkept = 0;
     if (g_val_pooled >= VAL_POOL_MAX) {
         elpis_free(v);
         return;
@@ -1051,13 +1083,30 @@ static val_fail_t *fail_slot(val_t *v, const elpis_name_t *n, uint16_t type)
  * signed zone failed with "no DS for x after 2 attempts" -- a quarter of an
  * hour after start, which is simply how long a DS TTL lasts.  The one moment
  * the resolver is meant to keep working is the one where this made it stop.
+ *
+ * Then what this validation was handed because the cache would not keep it:
+ * a set that came with TTL 0 (val_kept_t).  This used to be the cache alone,
+ * so the walk could never see such a set, however often it was fetched.
  */
 static int val_cached(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
                       elpis_rrset_buf_t *out)
 {
-    return elpis_rcache_get(t->w->ctx->rcache, n, type, ELPIS_CLASS_IN,
-                            elpis_cached_now_s(),
-                            t->w->ctx->conf.serve_stale, out) == ELPIS_OK;
+    const val_t *v = (const val_t *)t->val;
+    unsigned i;
+
+    if (elpis_rcache_get(t->w->ctx->rcache, n, type, ELPIS_CLASS_IN,
+                         elpis_cached_now_s(),
+                         t->w->ctx->conf.serve_stale, out) == ELPIS_OK)
+        return 1;
+    for (i = 0; v != NULL && i < v->nkept; i++) {
+        const elpis_rrset_buf_t *s = v->kept[i]->set;
+        if (s->type != type || !elpis_name_eq(&s->name, n))
+            continue;
+        elpis_rrset_buf_copy(out, s);
+        out->name = *n;                 /* folded, as the cache returns it */
+        return 1;
+    }
+    return 0;
 }
 
 /*
@@ -1204,13 +1253,76 @@ static void val_resume(elpis_task_t *p)
     }
 }
 
+/*
+ * What a finished lookup held back because it came with TTL 0 (cache_rrset()
+ * in resolver.c), taken off the child before the child is freed.  The
+ * reference it starts with is val_child_done()'s own.
+ */
+static val_kept_t *kept_take(elpis_task_t *child)
+{
+    val_kept_t *k;
+
+    if (child->held == NULL)
+        return NULL;
+    k = (val_kept_t *)elpis_malloc(sizeof *k);
+    if (k == NULL)
+        return NULL;                    /* freed with the child */
+    k->refs = 1;
+    k->set  = child->held;
+    child->held = NULL;
+    return k;
+}
+
+/* One reference to `k` for a validation that waited on the lookup. */
+static void kept_give(elpis_task_t *p, val_kept_t *k)
+{
+    val_t *v;
+    unsigned i;
+
+    if (p == NULL || k == NULL || (v = (val_t *)p->val) == NULL)
+        return;                         /* no validation left to give it to */
+    for (i = 0; i < v->nkept; i++) {
+        val_kept_t *old = v->kept[i];
+        if (old == k)
+            return;
+        if (old->set->type == k->set->type &&
+            elpis_name_eq(&old->set->name, &k->set->name)) {
+            v->kept[i] = k;             /* a newer copy of the same lookup */
+            k->refs++;
+            kept_drop(old);
+            return;
+        }
+    }
+    if (v->nkept >= VAL_KEPT)
+        return;
+    v->kept[v->nkept++] = k;
+    k->refs++;
+}
+
 static void val_child_done(elpis_task_t *child, void *ctxp)
 {
     val_inflight_t *f = (val_inflight_t *)ctxp;
     elpis_task_t *w[VAL_WAITERS];
+    val_kept_t *k;
     unsigned n, i;
 
+    /*
+     * A set that came with TTL 0 is in no cache, so it goes straight to the
+     * validations waiting on this lookup.  That is what TTL 0 allows: use for
+     * the transaction in progress, here the validation that asked.  Each one
+     * lets go of it when its verdict is in (val_release()), so no later
+     * question is answered from it.
+     *
+     * Caching TTL-0 sets for one second instead also made the ML-DSA-44
+     * test zone validate.  But they were then cache entries like any other,
+     * and the next query for the name was answered from them stale (EDE 3),
+     * which TTL 0 rules out.
+     */
+    k = kept_take(child);
+
     if (f == NULL) {                    /* no slot: the old one-to-one path */
+        kept_give(child->parent, k);
+        kept_drop(k);
         val_resume(child->parent);
         return;
     }
@@ -1223,6 +1335,8 @@ static void val_child_done(elpis_task_t *child, void *ctxp)
      * still owes its own parent a resume.
      */
     if (f->owner != child->parent || f->hash == 0) {
+        kept_give(child->parent, k);
+        kept_drop(k);
         val_resume(child->parent);
         return;
     }
@@ -1237,6 +1351,12 @@ static void val_child_done(elpis_task_t *child, void *ctxp)
     f->nwait = 0;
     f->hash  = 0;
     f->owner = NULL;
+
+    /* Every waiter has its reference before any of them runs: one that
+     * settles inside val_resume() lets go of its own there and then. */
+    for (i = 0; i < n; i++)
+        kept_give(w[i], k);
+    kept_drop(k);
 
     for (i = 0; i < n; i++)
         val_resume(w[i]);
@@ -1302,9 +1422,18 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
     v->waiting = 1;
     v->steps++;
 
-    /* Someone is already fetching exactly this; wait for them instead. */
+    /*
+     * Someone is already fetching exactly this; wait for them instead.
+     *
+     * A child of ours holds its answer back if it comes with TTL 0, which
+     * the cache would drop (val_child_done()).  It starts on the next turn
+     * of the loop, never inside elpis_task_child(), so it is marked before
+     * it has seen any reply.
+     */
     {
         val_inflight_t *f = inflight_find(n, type);
+        elpis_task_t *c;
+
         if (f != NULL && inflight_join(f, t)) {
             t->nchild++;                /* released again by val_resume() */
             return 0;
@@ -1313,19 +1442,24 @@ static int val_need(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
         f = inflight_new(n, type);
         if (f != NULL && inflight_join(f, t)) {
             f->owner = t;               /* whose child this slot waits on */
-            if (elpis_task_child(t, n, type, val_child_done, f) != NULL)
+            c = elpis_task_child(t, n, type, val_child_done, f);
+            if (c != NULL) {
+                c->hold_uncached = 1;
                 return 0;
+            }
             f->hash  = 0;
             f->nwait = 0;
             f->owner = NULL;
         }
-    }
 
-    /* Table full, or the child could not be started: do it the plain way. */
-    if (elpis_task_child(t, n, type, val_child_done, NULL) == NULL) {
-        v->waiting = 0;
-        elpis_rrset_buf_init(out, n, type, ELPIS_CLASS_IN, 0);
-        return 1;
+        /* Table full, or the child could not be started: the plain way. */
+        c = elpis_task_child(t, n, type, val_child_done, NULL);
+        if (c == NULL) {
+            v->waiting = 0;
+            elpis_rrset_buf_init(out, n, type, ELPIS_CLASS_IN, 0);
+            return 1;
+        }
+        c->hold_uncached = 1;
     }
     return 0;
 }
@@ -1541,6 +1675,31 @@ static void put_verdict(elpis_task_t *t, unsigned i, elpis_rrset_buf_t *set)
     elpis_rcache_put_buf(t->w->ctx->rcache, set, t->w->ctx->conf.serve_stale, 0);
 }
 
+/*
+ * The same for a DS, DNSKEY or denial the chain walk judged.  The cache drops
+ * one that came with TTL 0, so the copy this validation holds (val_kept_t)
+ * takes the verdict too; otherwise each walk back down from the anchor checked
+ * its signatures again.  Only a copy of the very records judged: by now the
+ * cache could have another.
+ */
+static void put_material(elpis_task_t *t, const elpis_rrset_buf_t *set)
+{
+    val_t *v = (val_t *)t->val;
+    unsigned i, n = (unsigned)set->count + set->sigcount;
+
+    elpis_rcache_put_buf(t->w->ctx->rcache, set, t->w->ctx->conf.serve_stale, 0);
+    for (i = 0; v != NULL && i < v->nkept; i++) {
+        elpis_rrset_buf_t *s = v->kept[i]->set;
+        if (s->type != set->type || s->count != set->count ||
+            s->sigcount != set->sigcount || s->used != set->used ||
+            !elpis_name_eq(&s->name, &set->name) ||
+            memcmp(s->len, set->len, n * sizeof set->len[0]) != 0 ||
+            memcmp(s->data, set->data, set->used) != 0)
+            continue;
+        s->sec = set->sec;
+    }
+}
+
 /* The signer of the RRset led by index `i`, if it has one. */
 static int set_signer(elpis_task_t *t, unsigned i, elpis_name_t *out)
 {
@@ -1740,8 +1899,7 @@ static void note_unsigned_zone(elpis_task_t *t, const elpis_name_t *zone,
 
     if (proof->sec != (uint8_t)ELPIS_SEC_INSECURE) {
         proof->sec = (uint8_t)ELPIS_SEC_INSECURE;
-        elpis_rcache_put_buf(t->w->ctx->rcache, proof,
-                             t->w->ctx->conf.serve_stale, 0);
+        put_material(t, proof);
     }
 
     if (elpis_dcache_get(t->w->ctx->dcache, zone, elpis_cached_now_s(),
@@ -2296,8 +2454,7 @@ static void val_step(elpis_task_t *t)
                                               &ede);
                 if (rc == ELPIS_OK) {
                     v->keys.sec = (uint8_t)ELPIS_SEC_SECURE;
-                    elpis_rcache_put_buf(w->ctx->rcache, &v->keys,
-                                         c->serve_stale, 0);
+                    put_material(t, &v->keys);
                 }
             }
             if (rc == ELPIS_ENOTFOUND) {
@@ -2458,7 +2615,7 @@ static void val_step(elpis_task_t *t)
                     return;
                 }
                 scratch->sec = (uint8_t)ELPIS_SEC_SECURE;
-                elpis_rcache_put_buf(w->ctx->rcache, scratch, c->serve_stale, 0);
+                put_material(t, scratch);
             }
 
             {
@@ -2484,8 +2641,7 @@ static void val_step(elpis_task_t *t)
                     rc = elpis_dnskey_validate_ds(c, scratch, &ds_hold, now, &ede);
                     if (rc == ELPIS_OK) {
                         scratch->sec = (uint8_t)ELPIS_SEC_SECURE;
-                        elpis_rcache_put_buf(w->ctx->rcache, scratch,
-                                             c->serve_stale, 0);
+                        put_material(t, scratch);
                     }
                 }
                 if (rc == ELPIS_ENOTFOUND) {

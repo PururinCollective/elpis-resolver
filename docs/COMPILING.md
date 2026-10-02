@@ -43,7 +43,7 @@ Two tools are optional:
   used, and the build says so.
 
 Linux builds with gcc and clang are tested for each release: gcc 13.3 and
-clang 18.1 for 2.2.0. The BSDs (kqueue) and macOS (kqueue) are supported by
+clang 18.1 for 2.2.1. The BSDs (kqueue) and macOS (kqueue) are supported by
 the code, but no build on them was tested for this release.
 
 ## Building

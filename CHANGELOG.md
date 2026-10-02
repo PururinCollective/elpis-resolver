@@ -10,6 +10,41 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 2.2.1 — 2026-10-02
+
+Two DNSSEC fixes found on Cloudflare's ML-DSA-44 test zone. A zone that
+publishes its DNSKEY or DS with TTL 0 validates; every name under
+`mldsa44.dnstest.dev` was SERVFAIL with EDE 9 before. And a denial whose proof
+does not fit the client's UDP size is truncated, so the client asks again
+over TCP, instead of going out with AD and no proof.
+
+No config changes.
+
+### Fixed
+
+**A zone whose DNSKEY or DS has TTL 0 validates.** The RRset cache keeps
+nothing with TTL 0, and the validator read keys and DS only from that cache.
+So the keys were fetched, dropped, looked for, fetched again, and the answer
+went out SERVFAIL with EDE 9 (DNSKEY Missing). Cloudflare's ML-DSA-44 test
+zone, `mldsa44.dnstest.dev`, serves its DNSKEY that way. A lookup the
+validator starts now holds back its TTL-0 answer, and only the validations
+waiting on that lookup get it, until each has its verdict. It still goes into
+no cache, so no client is answered from it and serve-stale never sees it.
+`valid.mldsa44.dnstest.dev` now has AD, and `invalid` and `expired` fail with
+EDE 6 and EDE 7, the same as on 1.1.1.1. A denial of DS with TTL 0 is held
+the same way.
+
+**A proof too big for UDP is truncated, not dropped.** To a client that sets
+DO, the authority section of a "no such name" or "no such data" reply is the
+proof: the SOA, the NSEC or NSEC3 records and their signatures. When it did not
+fit the client's UDP size, a freshly resolved reply went out without it, with
+AD set and no TC, so the client had nothing to check and no reason to ask
+again over TCP. `nosuchname.mldsa44.dnstest.dev`, whose proof is 7.7 KB of
+ML-DSA-44 signatures, came back that way every time. The same reply from the
+message cache was already truncated. Now both are: TC and nothing else, and
+the client gets the whole proof over TCP. A client without DO gets the reply
+without that section, as before.
+
 ## 2.2.0 — 2026-09-30
 
 EDNS Client Subnet, so a content network answers for where the client is

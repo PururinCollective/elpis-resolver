@@ -201,6 +201,7 @@ void elpis_task_free(elpis_task_t *t)
     elpis_timer_del(t->w->loop, &t->kick);
     elpis_val_free(t);
     elpis_free(t->val_why);
+    elpis_free(t->held);
     elpis_rrlist_free(&t->ans);
     if (t->live_prev != NULL) t->live_prev->live_next = t->live_next;
     else                      t->w->tasks = t->live_next;
@@ -1416,6 +1417,42 @@ static int accept_rr(elpis_task_t *t, elpis_section_t sec,
                             rd, (uint16_t)rdlen);
 }
 
+/*
+ * Into the RRset cache, and, when the validator asked for this lookup and the
+ * set answers its question with TTL 0, onto the task as well.
+ *
+ * TTL 0 means use it for the transaction in progress and do not cache it
+ * (RFC 1035 section 3.2.1), and elpis_rcache_put_buf() drops it.  But the
+ * validator read DNSKEY and DS only out of that cache.  So a key set
+ * published with TTL 0 was fetched, dropped, looked for, fetched again and
+ * given up on.  mldsa44.dnstest.dev serves its DNSKEY that way, and every
+ * name under it was SERVFAIL with EDE 9 (DNSKEY Missing), though the fetch
+ * itself had worked.  The transaction in progress is the validation that
+ * waits on this lookup, so the set is held for that and nothing else:
+ * val_child_done() hands it over.  No client is answered from it, and
+ * serve-stale never sees it.
+ *
+ * Held as the cache would have stored it, the same layout and flags, so a
+ * denial marker or a CNAME reads back exactly as one from the cache would.
+ */
+static void cache_rrset(elpis_task_t *t, const elpis_rrset_buf_t *b)
+{
+    elpis_worker_t *w = t->w;
+
+    elpis_rcache_put_buf(w->ctx->rcache, b, w->ctx->conf.serve_stale, 0);
+
+    if (b->ttl != 0 || !t->hold_uncached ||
+        !elpis_name_eq(&b->name, &t->orig_qname))
+        return;
+    if (b->type != t->orig_qtype && b->type != ELPIS_T_CNAME &&
+        b->type != ELPIS_T_NXNAME)
+        return;
+    if (t->held == NULL)
+        t->held = (elpis_rrset_buf_t *)elpis_malloc(sizeof *t->held);
+    if (t->held != NULL)
+        elpis_rrset_buf_copy(t->held, b);
+}
+
 /* Cache each RRset we just learned, grouped by (owner, type). */
 static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
                                  const elpis_name_t *zone, elpis_section_t sec)
@@ -1521,7 +1558,7 @@ static void cache_message_rrsets(elpis_task_t *t, const elpis_msg_t *m,
         }
 
         if (b->count > 0)
-            elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
+            cache_rrset(t, b);
     }
 }
 
@@ -1616,9 +1653,13 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
          * stripped: unsigned at best, and refused once an empty answer from a
          * signed zone was.  The proof goes into the answer either way; only
          * the cache entry is skipped.
+         *
+         * Unless the validator is waiting on this lookup.  It reads a denial
+         * of DS only as this marker, so the marker is built anyway and held
+         * for it (see cache_rrset()).  The cache still does not keep it.
          */
-        if (ttl == 0 || 1u + rr.name.len + rdlen > sizeof blob ||
-            t->resp_tailored)
+        if ((ttl == 0 && !t->hold_uncached) ||
+            1u + rr.name.len + rdlen > sizeof blob || t->resp_tailored)
             goto answer;
         blob[0] = rr.name.len;
         memcpy(blob + 1, rr.name.d, rr.name.len);
@@ -1672,7 +1713,7 @@ static void cache_negative(elpis_task_t *t, const elpis_msg_t *m, int nxdomain)
                 elpis_rrset_buf_add(b, item, (uint16_t)need);
             }
         }
-        elpis_rcache_put_buf(w->ctx->rcache, b, c->serve_stale, 0);
+        cache_rrset(t, b);
 
 answer:
         /* Carry the SOA into the reply so the client sees the proof, and the
