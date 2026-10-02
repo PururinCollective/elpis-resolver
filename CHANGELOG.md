@@ -10,7 +10,15 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.2.1 — 2026-10-02
+
+Two DNSSEC fixes found on Cloudflare's ML-DSA-44 test zone. A zone that
+publishes its DNSKEY or DS with TTL 0 validates; every name under
+`mldsa44.dnstest.dev` was SERVFAIL with EDE 9 before. And a denial whose proof
+does not fit the client's UDP size is truncated, so the client asks again
+over TCP, instead of going out with AD and no proof.
+
+No config changes.
 
 ### Fixed
 
