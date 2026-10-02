@@ -27,7 +27,7 @@ BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
 BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
-VERSION   := 2.2.1
+VERSION   := 2.3.0
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.

@@ -10,7 +10,16 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.3.0 — 2026-10-03
+
+Two DNSSEC features, both checked by dnstest.dev. Post-quantum downgrade
+protection: when a zone's DS names ML-DSA, a valid P-256 path no longer
+stands in for a broken ML-DSA one. And RFC 8509 root key sentinels, so the
+rollover to KSK-2024 on 11 October can be checked from outside: Elpis trusts
+it, and now says so.
+
+No config that worked stops working. `harden-pq-downgrade` and
+`root-key-sentinel` are both on by default.
 
 ### Added
 
