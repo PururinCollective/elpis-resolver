@@ -28,6 +28,8 @@
 #include "elpis/quirks.h"
 #include "simd/simd_internal.h"
 #include "crypto/bn.h"
+#include "crypto/aes.h"
+#include "elpis/tlscrypto.h"
 
 #include "vectors.h"
 
@@ -3915,6 +3917,450 @@ out:
 }
 
 /* ================================================================== */
+/* ================================================================== */
+/*
+ * The TLS 1.3 primitives (tlscrypto.h).  The RFC vectors are the RFCs' own;
+ * the length tables were made with Python's `cryptography` (OpenSSL 3.0)
+ * over every length that crosses a block edge, and frozen.
+ */
+static int bytes_are(const uint8_t *b, size_t n, const char *hex)
+{
+    static uint8_t want[1024];
+    size_t wn = unhex(hex, want, sizeof want);
+    return wn == n && memcmp(b, want, n) == 0;
+}
+
+static const char sunscreen[] =
+    "Ladies and Gentlemen of the class of '99: If I could offer you only one "
+    "tip for the future, sunscreen would be it.";
+
+static void test_hkdf(void)
+{
+    uint8_t ikm[22], salt[13], info[10], prk[32], okm[42], out[32];
+    uint8_t empty_hash[32], zeros[32];
+    size_t i;
+
+    section("hkdf");
+
+    memset(ikm, 0x0b, sizeof ikm);
+    for (i = 0; i < sizeof salt; i++) salt[i] = (uint8_t)i;
+    for (i = 0; i < sizeof info; i++) info[i] = (uint8_t)(0xf0 + i);
+
+    /* RFC 5869 A.1 */
+    elpis_hkdf_extract(salt, sizeof salt, ikm, sizeof ikm, prk);
+    CHECK(bytes_are(prk, 32, "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5"),
+          "RFC 5869 A.1 PRK");
+    CHECK(elpis_hkdf_expand(prk, info, sizeof info, okm, sizeof okm) == 0 &&
+          bytes_are(okm, 42, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db0"
+                             "2d56ecc4c5bf34007208d5b887185865"), "RFC 5869 A.1 OKM");
+
+    /* RFC 5869 A.3: no salt, no info */
+    elpis_hkdf_extract(NULL, 0, ikm, sizeof ikm, prk);
+    CHECK(bytes_are(prk, 32, "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04"),
+          "RFC 5869 A.3 PRK");
+    CHECK(elpis_hkdf_expand(prk, NULL, 0, okm, sizeof okm) == 0 &&
+          bytes_are(okm, 42, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec345"
+                             "4e5f3c738d2d9d201395faa4b61a96c8"), "RFC 5869 A.3 OKM");
+
+    /* RFC 8448 section 3: the early secret with no PSK, and "derived". */
+    memset(zeros, 0, sizeof zeros);
+    elpis_hkdf_extract(zeros, 32, zeros, 32, prk);
+    CHECK(bytes_are(prk, 32, "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a"),
+          "RFC 8448 early secret");
+    elpis_sha256("", 0, empty_hash);
+    CHECK(elpis_hkdf_expand_label(prk, "derived", empty_hash, 32, out, 32) == 0 &&
+          bytes_are(out, 32, "6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba"),
+          "RFC 8448 derived secret");
+
+    /* The record key and IV shapes: 16 and 12 bytes, empty context. */
+    for (i = 0; i < 32; i++) zeros[i] = (uint8_t)i;
+    CHECK(elpis_hkdf_expand_label(zeros, "key", NULL, 0, out, 16) == 0 &&
+          bytes_are(out, 16, "9c9783cf77ea32d44f369da41f19f3cc"), "Expand-Label key");
+    CHECK(elpis_hkdf_expand_label(zeros, "iv", NULL, 0, out, 12) == 0 &&
+          bytes_are(out, 12, "2f41c846a431a163814bcd71"), "Expand-Label iv");
+
+    CHECK(elpis_hkdf_expand(prk, NULL, 0, out, 255u * 32u + 1u) == -1,
+          "HKDF refuses more than 255 blocks");
+    {
+        char longlabel[260];
+        memset(longlabel, 'a', 250);
+        longlabel[250] = '\0';
+        CHECK(elpis_hkdf_expand_label(prk, longlabel, NULL, 0, out, 16) == -1,
+              "Expand-Label refuses a label over 255 with its prefix");
+    }
+}
+
+static void test_chacha_poly(void)
+{
+    uint8_t key[32], nonce[12], buf[128], tag[16], tag2[16], ct[128];
+    uint8_t aad[12];
+    elpis_aead_t a;
+    elpis_poly1305_t p;
+    size_t i, n = sizeof sunscreen - 1;
+
+    section("chacha20-poly1305");
+
+    for (i = 0; i < 32; i++) key[i] = (uint8_t)i;
+
+    /* RFC 8439 2.3.2: one block at counter 1. */
+    unhex("000000090000004a00000000", nonce, sizeof nonce);
+    memset(buf, 0, 64);
+    elpis_chacha20_xor(key, 1, nonce, buf, buf, 64);
+    CHECK(bytes_are(buf, 64, "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e"
+                             "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"),
+          "RFC 8439 2.3.2 block");
+
+    /* RFC 8439 2.4.2 */
+    unhex("000000000000004a00000000", nonce, sizeof nonce);
+    elpis_chacha20_xor(key, 1, nonce, (const uint8_t *)sunscreen, buf, n);
+    CHECK(bytes_are(buf, n, "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b"
+                            "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8"
+                            "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
+                            "5af90bbf74a35be6b40b8eedf2785e42874d"), "RFC 8439 2.4.2 encrypt");
+
+    /* RFC 8439 2.5.2, whole and fed in every split. */
+    unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b",
+          key, sizeof key);
+    elpis_poly1305_init(&p, key);
+    elpis_poly1305_update(&p, (const uint8_t *)"Cryptographic Forum Research Group", 34);
+    elpis_poly1305_final(&p, tag);
+    CHECK(bytes_are(tag, 16, "a8061dc1305136c6c22b8baf0c0127a9"), "RFC 8439 2.5.2 Poly1305");
+    {
+        int same = 1;
+        size_t cut;
+        for (cut = 0; cut <= 34; cut++) {
+            const uint8_t *m = (const uint8_t *)"Cryptographic Forum Research Group";
+            elpis_poly1305_init(&p, key);
+            elpis_poly1305_update(&p, m, cut);
+            elpis_poly1305_update(&p, m + cut, 34 - cut);
+            elpis_poly1305_final(&p, tag2);
+            same &= memcmp(tag, tag2, 16) == 0;
+        }
+        CHECK(same, "Poly1305 gives the same tag however the message is split");
+    }
+
+    /* RFC 8439 2.8.2: the AEAD. */
+    for (i = 0; i < 32; i++) key[i] = (uint8_t)(0x80 + i);
+    unhex("070000004041424344454647", nonce, sizeof nonce);
+    unhex("50515253c0c1c2c3c4c5c6c7", aad, sizeof aad);
+    CHECK(elpis_aead_init(&a, ELPIS_AEAD_CHACHA20_POLY1305, key, 32) == 0,
+          "ChaCha20-Poly1305 init");
+    elpis_aead_seal(&a, nonce, aad, sizeof aad, (const uint8_t *)sunscreen, n, ct, tag);
+    CHECK(bytes_are(ct, n, "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+                           "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+                           "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+                           "3ff4def08e4b7a9de576d26586cec64b6116"), "RFC 8439 2.8.2 ciphertext");
+    CHECK(bytes_are(tag, 16, "1ae10b594f09e26a7e902ecbd0600691"), "RFC 8439 2.8.2 tag");
+
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, n, tag, buf) == 0 &&
+          memcmp(buf, sunscreen, n) == 0, "RFC 8439 2.8.2 opens");
+
+    memset(buf, 0xee, sizeof buf);
+    ct[7] ^= 1;
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, n, tag, buf) == -1 &&
+          buf[0] == 0xee, "a flipped ciphertext bit is refused, nothing written");
+    ct[7] ^= 1;
+    aad[0] ^= 0x80;
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, n, tag, buf) == -1,
+          "a changed aad is refused");
+    aad[0] ^= 0x80;
+    tag[15] ^= 1;
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, n, tag, buf) == -1,
+          "a changed tag is refused");
+    tag[15] ^= 1;
+
+    /* In place, both ways. */
+    memcpy(buf, sunscreen, n);
+    elpis_aead_seal(&a, nonce, aad, sizeof aad, buf, n, buf, tag2);
+    CHECK(memcmp(buf, ct, n) == 0 && memcmp(tag, tag2, 16) == 0, "seals in place");
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, buf, n, tag2, buf) == 0 &&
+          memcmp(buf, sunscreen, n) == 0, "opens in place");
+
+    CHECK(elpis_aead_init(&a, ELPIS_AEAD_CHACHA20_POLY1305, key, 16) == -1,
+          "a 16-byte ChaCha20 key is refused");
+    CHECK(elpis_aead_init(&a, 99, key, 32) == -1, "an unknown suite is refused");
+    elpis_aead_wipe(&a);
+}
+
+/* The GCM test cases from McGrew and Viega's GCM spec, 1 to 4. */
+static void gcm_cases(const char *backend)
+{
+    static const char tc3_pt[] =
+        "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+        "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255";
+    static const char tc3_ct[] =
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+        "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985";
+    uint8_t key[16], nonce[12], pt[64], ct[64], back[64], tag[16], aad[20];
+    elpis_aead_t a;
+
+    memset(key, 0, sizeof key);
+    memset(nonce, 0, sizeof nonce);
+    elpis_aead_init(&a, ELPIS_AEAD_AES128_GCM, key, 16);
+    elpis_aead_seal(&a, nonce, NULL, 0, NULL, 0, NULL, tag);
+    CHECK(bytes_are(tag, 16, "58e2fccefa7e3061367f1d57a4e7455a"), "GCM case 1 (%s)", backend);
+
+    memset(pt, 0, 16);
+    elpis_aead_seal(&a, nonce, NULL, 0, pt, 16, ct, tag);
+    CHECK(bytes_are(ct, 16, "0388dace60b6a392f328c2b971b2fe78") &&
+          bytes_are(tag, 16, "ab6e47d42cec13bdf53a67b21257bddf"), "GCM case 2 (%s)", backend);
+
+    unhex("feffe9928665731c6d6a8f9467308308", key, sizeof key);
+    unhex("cafebabefacedbaddecaf888", nonce, sizeof nonce);
+    unhex(tc3_pt, pt, sizeof pt);
+    elpis_aead_init(&a, ELPIS_AEAD_AES128_GCM, key, 16);
+    elpis_aead_seal(&a, nonce, NULL, 0, pt, 64, ct, tag);
+    CHECK(bytes_are(ct, 64, tc3_ct) &&
+          bytes_are(tag, 16, "4d5c2af327cd64a62cf35abd2ba6fab4"), "GCM case 3 (%s)", backend);
+
+    unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2", aad, sizeof aad);
+    elpis_aead_seal(&a, nonce, aad, sizeof aad, pt, 60, ct, tag);
+    CHECK(bytes_are(tag, 16, "5bc94fbc3221a5db94fae95ae7121a47"), "GCM case 4 (%s)", backend);
+    {
+        uint8_t want[64];
+        unhex(tc3_ct, want, sizeof want);
+        CHECK(memcmp(ct, want, 60) == 0, "GCM case 4 ciphertext (%s)", backend);
+    }
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, 60, tag, back) == 0 &&
+          memcmp(back, pt, 60) == 0, "GCM case 4 opens (%s)", backend);
+    memset(back, 0xee, sizeof back);
+    ct[59] ^= 0x10;
+    CHECK(elpis_aead_open(&a, nonce, aad, sizeof aad, ct, 60, tag, back) == -1 &&
+          back[0] == 0xee, "GCM refuses a changed ciphertext (%s)", backend);
+    elpis_aead_wipe(&a);
+}
+
+/* sha256(ciphertext || tag) per length; see gcm/chacha tables below. */
+typedef struct { unsigned len; const char *sha; } lenvec_t;
+
+static const lenvec_t chacha_lens[] = {
+    {     0, "03048ae472baa4cfcfde527a8f22e81786c7cf51ac66d9221a699c0d89c4cb0f" },
+    {     1, "d24fc4721ea087c9ca67dc9c4c03386dbd8a47a4df5abab676c775eb95649656" },
+    {    15, "b36e478192c45b95207c85d3a157b707018d9aa467fce071f1789e84f732fe43" },
+    {    16, "e2347832bd2d81947aa23ec6cb21842631ab4b5f1f896f1dd6794359e6babc77" },
+    {    17, "da2ffaf2a811e6d72840f7a11024c98e986cdba87eb9cc5cb4cbdfa0bdf702df" },
+    {    31, "a972c8fc80215b8177efa1262f4b9dfbfdf4a328c682d5398a70e83703af8b71" },
+    {    32, "bc7d276f929469e406e22d4e720b9c5e5aacfde5c424ca4d0e32c32d9eea3749" },
+    {    33, "73a4fa958a905550585a60a0bae9bc1e15580d780bcc11f3da893cdd0c113797" },
+    {    63, "2cfeb003b39f2902b894546316c57ed760165a0356dcde65493328cd8c601481" },
+    {    64, "a0a15e3c61702a76c21bdcb4093c588dc5081de9e9278428253dfea426edf6b4" },
+    {    65, "d0d0b626de172417372287549ea101f0edbdc74c2e4ff375e373815e867af182" },
+    {   127, "a768dbd31c458e4d496e5d97365607eee5110542838835a733cdd10629bd1b76" },
+    {   128, "80779b185a0ea580abd8fb01822e9dca75a708aad92a553ebb38d50a263ad6e6" },
+    {   129, "cdac64ddc3f3e3c906c7c84776a09fe3173c53d20ee734e676e9e131e130f82e" },
+    {   255, "41ca9e26df90d44f570d928b2a18bc719fe5dcf67b46c463b8547b28a223b504" },
+    {   256, "11ca3e00d427a86a2c2e61da25143963353e451d2e59e4d00db70e2179da0eca" },
+    {  1000, "31b7d0bdbe9d8825edde724b8b4b12f8dd43197eae9d85db2e6b2ebde1eaaa73" },
+    {  1500, "961ad00609f71553039d183d2208f5750a2cdfb0d6241f7e8337d5c0dec112ba" },
+    { 16384, "a6cbfbe1d91ce1d055c2e34a879e62519d6a4c4a29d55a489ef56bc3b7532ff9" },
+};
+
+static const lenvec_t gcm_lens[] = {
+    {     0, "759d4015b36e18342e3f9a9f620ce88c8d410191d755fbf93fa00d328f0b94b0" },
+    {     1, "063f6d2c23c970822f9d9017f79bef4e349e15caf9b49a1ac327c10e7fcb1da6" },
+    {    15, "0098d324f4f984167e85b2e2dffd53a6e05626e2240e1ce5b85d749e6609ff97" },
+    {    16, "f55553e8b2dbd27eeaa573575792afe4774e80e786142484031209c134033257" },
+    {    17, "a1fcd6d82bdb8cf6af16d87fcbc2efa04893e601e3abf898f2c7763343891edc" },
+    {    31, "a787098370b4be1144904993a6dfd45b0e44d07688a8142a7390be703fbff496" },
+    {    32, "31cbab7c3196e16288e8b73c42c80a06aaf218f5c458ea0448e24f02ae07ae37" },
+    {    33, "17c48d00b6a2bf68ee82ad1675683382695deb019d758fa62f920dbdc8515fe9" },
+    {    63, "a0158f26bb9a582234f8faee1bf65326da19892357a4ac5c28886d86e39313a3" },
+    {    64, "a80fa3a30827b410ca0653f5ae1ae59aee31ea7206ee47857f9d0a4ecbbab6a2" },
+    {    65, "7f87c6d65a64e5a784f6bcc1b349dd3d1fe2da591ab529dad86d0c1487576292" },
+    {   127, "b440e87805b529bf23bda517c26f984c489b4471b9c089a827ae79b74c6bf447" },
+    {   128, "ef63e5d50b6c4e782caecfc56c396f12d72b1af9336d92734950b2189d0f54de" },
+    {   129, "a8ed86768dd94ae88587e43243ffaf671c63c4d613a307cdd3b5fed10a793409" },
+    {   255, "0eea782a78884fb4b14621064e571c02603eb2ead231c219a6edfdfb94cff0e3" },
+    {   256, "0360895aebbfa542fdcdb2c025c6a64e202afee7c8cfbd7d18e62adc18eed3e0" },
+    {  1000, "5ddcb2b60be750bcf37a0a01f20ccc60f9eab8b42cfe3855648aff20531041f2" },
+    {  1500, "825bdb03a9ad117bf8ef7bc8b8ccc59a2eab53f7db0e9dd454cc3cf737bafd0c" },
+    { 16384, "9731373c9a9fc1b319a5da168eb58f4d5bc692cead6ae5374cf1e3b5d1619e08" },
+};
+
+/*
+ * Every length in the table: key, nonce, message and aad (len % 29 bytes)
+ * are fixed patterns, the output is checked by hash, and it must open again.
+ */
+static int aead_lengths(int suite, const lenvec_t *v, size_t nv)
+{
+    static uint8_t pt[16384], ct[16384 + 16], back[16384];
+    uint8_t key[32], nonce[12], aad[29], digest[32];
+    size_t klen = elpis_aead_key_len(suite), i, j;
+    elpis_aead_t a;
+    int ok = 1;
+
+    for (i = 0; i < klen; i++) key[i] = (uint8_t)(i * 7 + 1);
+    for (i = 0; i < 12; i++) nonce[i] = (uint8_t)(i * 13 + 5);
+    for (i = 0; i < sizeof aad; i++) aad[i] = (uint8_t)(i * 3 + 0x40);
+    elpis_aead_init(&a, suite, key, klen);
+
+    for (j = 0; j < nv; j++) {
+        size_t n = v[j].len, alen = n % 29;
+        for (i = 0; i < n; i++) pt[i] = (uint8_t)(i * 31 + n);
+        elpis_aead_seal(&a, nonce, aad, alen, pt, n, ct, ct + n);
+        elpis_sha256(ct, n + 16, digest);
+        if (!bytes_are(digest, 32, v[j].sha)) {
+            printf("    length %zu: wrong output\n", n);
+            ok = 0;
+        }
+        if (elpis_aead_open(&a, nonce, aad, alen, ct, n, ct + n, back) != 0 ||
+            memcmp(back, pt, n) != 0) {
+            printf("    length %zu: does not open\n", n);
+            ok = 0;
+        }
+    }
+    elpis_aead_wipe(&a);
+    return ok;
+}
+
+static void test_aes_gcm(void)
+{
+    uint8_t rk[176], key[16], blk[16];
+    int hw;
+
+    section("aes-128-gcm");
+
+    hw = strcmp(elpis_aes_backend(), "aes-ni") == 0;
+    printf("  AES backend: %s\n", elpis_aes_backend());
+
+    /* FIPS 197 C.1 */
+    unhex("000102030405060708090a0b0c0d0e0f", key, sizeof key);
+    unhex("00112233445566778899aabbccddeeff", blk, sizeof blk);
+    elpis_aes_soft_expand(rk, key);
+    elpis_aes_soft_encrypt(rk, blk, blk);
+    CHECK(bytes_are(blk, 16, "69c4e0d86a7b0430d8cdb78070b4c55a"), "FIPS 197 C.1 (portable)");
+
+    elpis_aes_use_hw(0);
+    gcm_cases("portable");
+    CHECK(aead_lengths(ELPIS_AEAD_AES128_GCM, gcm_lens, ELPIS_ARRAY_LEN(gcm_lens)),
+          "AES-128-GCM over every block edge, as OpenSSL (portable)");
+    elpis_aes_use_hw(1);
+
+    if (hw) {
+#if defined(ELPIS_ARCH_X86)
+        uint8_t rk2[176];
+        unhex("00112233445566778899aabbccddeeff", blk, sizeof blk);
+        elpis_aes_ni_expand(rk2, key);
+        CHECK(memcmp(rk, rk2, 176) == 0, "AES-NI key schedule matches the portable one");
+        elpis_aes_ni_encrypt(rk2, blk, blk);
+        CHECK(bytes_are(blk, 16, "69c4e0d86a7b0430d8cdb78070b4c55a"), "FIPS 197 C.1 (aes-ni)");
+#endif
+        gcm_cases("aes-ni");
+        CHECK(aead_lengths(ELPIS_AEAD_AES128_GCM, gcm_lens, ELPIS_ARRAY_LEN(gcm_lens)),
+              "AES-128-GCM over every block edge, as OpenSSL (aes-ni)");
+
+        /* The two backends against each other on lengths 0..300. */
+        {
+            static uint8_t pt[300], c1[300], c2[300];
+            uint8_t k[16], nonce[12], aad[40], t1[16], t2[16];
+            elpis_aead_t soft, ni;
+            size_t n, i;
+            int same = 1;
+
+            for (i = 0; i < 16; i++) k[i] = (uint8_t)elpis_random_u32();
+            for (i = 0; i < 12; i++) nonce[i] = (uint8_t)elpis_random_u32();
+            for (i = 0; i < sizeof aad; i++) aad[i] = (uint8_t)elpis_random_u32();
+            for (i = 0; i < sizeof pt; i++) pt[i] = (uint8_t)elpis_random_u32();
+            elpis_aes_use_hw(0);
+            elpis_aead_init(&soft, ELPIS_AEAD_AES128_GCM, k, 16);
+            elpis_aes_use_hw(1);
+            elpis_aead_init(&ni, ELPIS_AEAD_AES128_GCM, k, 16);
+            for (n = 0; n <= sizeof pt; n++) {
+                elpis_aead_seal(&soft, nonce, aad, n % 41, pt, n, c1, t1);
+                elpis_aead_seal(&ni, nonce, aad, n % 41, pt, n, c2, t2);
+                same &= memcmp(c1, c2, n) == 0 && memcmp(t1, t2, 16) == 0;
+            }
+            CHECK(same, "portable AES-128-GCM and AES-NI agree on lengths 0..300");
+        }
+    }
+}
+
+static void test_x25519(void)
+{
+    uint8_t k[32], u[32], out[32], a_pub[32], b_pub[32], a_sh[32], b_sh[32];
+    uint8_t alice[32], bob[32], r[32];
+    int i, rc;
+
+    section("x25519");
+
+    /* RFC 7748 5.2 */
+    unhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", k, 32);
+    unhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", u, 32);
+    CHECK(elpis_x25519(out, k, u) == 0 &&
+          bytes_are(out, 32, "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"),
+          "RFC 7748 5.2 vector 1");
+    unhex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", k, 32);
+    unhex("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493", u, 32);
+    CHECK(elpis_x25519(out, k, u) == 0 &&
+          bytes_are(out, 32, "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957"),
+          "RFC 7748 5.2 vector 2");
+
+    /* RFC 7748 5.2, iterated: k = X25519(k, u), u = old k. */
+    memset(k, 0, 32);
+    k[0] = 9;
+    memcpy(u, k, 32);
+    for (i = 1; i <= 1000; i++) {
+        elpis_x25519(r, k, u);
+        memcpy(u, k, 32);
+        memcpy(k, r, 32);
+        if (i == 1)
+            CHECK(bytes_are(k, 32, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"),
+                  "RFC 7748 iterated once");
+    }
+    CHECK(bytes_are(k, 32, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51"),
+          "RFC 7748 iterated 1000 times");
+
+    /* RFC 7748 6.1: Alice and Bob. */
+    unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", alice, 32);
+    unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", bob, 32);
+    elpis_x25519_base(a_pub, alice);
+    elpis_x25519_base(b_pub, bob);
+    CHECK(bytes_are(a_pub, 32, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"),
+          "RFC 7748 6.1 Alice's public key");
+    CHECK(bytes_are(b_pub, 32, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"),
+          "RFC 7748 6.1 Bob's public key");
+    CHECK(elpis_x25519(a_sh, alice, b_pub) == 0 && elpis_x25519(b_sh, bob, a_pub) == 0 &&
+          memcmp(a_sh, b_sh, 32) == 0 &&
+          bytes_are(a_sh, 32, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"),
+          "RFC 7748 6.1 shared secret, both ways");
+
+    /* Small-order points give all zeros, which a handshake must refuse. */
+    memset(u, 0, 32);
+    rc = elpis_x25519(out, alice, u);
+    CHECK(rc == -1 && bytes_are(out, 32, "00000000000000000000000000000000"
+                                         "00000000000000000000000000000000"),
+          "u = 0 gives zeros and -1");
+    u[0] = 1;
+    CHECK(elpis_x25519(out, alice, u) == -1, "u = 1 gives -1");
+
+    /* u is taken mod p and its top bit ignored, as OpenSSL does. */
+    for (i = 0; i < 32; i++) k[i] = (uint8_t)(i * 11 + 3);
+    memset(u, 0, 32);
+    u[0] = 9;
+    elpis_x25519(out, k, u);
+    CHECK(bytes_are(out, 32, "04ba7d1c091c7e5b601df8fb00c83f11f4b56ffefe66c6cd3c914106e55bab6f"),
+          "u = 9 under a fixed scalar");
+    unhex("f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", u, 32);
+    elpis_x25519(r, k, u);                                  /* p + 9 */
+    CHECK(memcmp(r, out, 32) == 0, "u = p + 9 is u = 9");
+    memset(u, 0, 32);
+    u[0] = 9;
+    u[31] = 0x80;
+    elpis_x25519(r, k, u);
+    CHECK(memcmp(r, out, 32) == 0, "the top bit of u is ignored");
+}
+
+static void test_tlscrypto(void)
+{
+    test_hkdf();
+    test_chacha_poly();
+    CHECK(aead_lengths(ELPIS_AEAD_CHACHA20_POLY1305, chacha_lens,
+                       ELPIS_ARRAY_LEN(chacha_lens)),
+          "ChaCha20-Poly1305 over every block edge, as OpenSSL");
+    test_aes_gcm();
+    test_x25519();
+}
+
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -3932,6 +4378,7 @@ int main(void)
     test_infra_hold();
     test_held_rows();
     test_hashes();
+    test_tlscrypto();
     test_signatures();
     test_bignum();
     test_keytrap();

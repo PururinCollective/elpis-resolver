@@ -203,6 +203,8 @@ static void detect_x86(void)
         g_cpu.sse2  = (r[3] >> 26) & 1u;
         g_cpu.ssse3 = (r[2] >> 9)  & 1u;
         g_cpu.sse41 = (r[2] >> 19) & 1u;
+        g_cpu.pclmul = (r[2] >> 1)  & 1u;
+        g_cpu.aes    = (r[2] >> 25) & 1u;
         if (((r[2] >> 27) & 1u) && ((r[2] >> 28) & 1u) && x86_ymm_enabled()) {
             if (x86_cpuid(7, 0, r) == 0) {
                 g_cpu.avx2     = (r[1] >> 5)  & 1u;

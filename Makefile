@@ -113,9 +113,17 @@ CORE_SRC := \
 CRYPTO_SRC := \
   src/crypto/sha1.c src/crypto/sha2.c src/crypto/keccak.c src/crypto/bn.c \
   src/crypto/rsa.c src/crypto/ec.c src/crypto/ecdsa.c src/crypto/ed25519.c \
-  src/crypto/mldsa.c src/crypto/rand.c
+  src/crypto/mldsa.c src/crypto/chacha20.c src/crypto/rand.c
 
-SRC      := $(CORE_SRC) $(CRYPTO_SRC)
+# What a TLS 1.3 client needs on top: HKDF, X25519 and the two record
+# ciphers (include/elpis/tlscrypto.h).  Kept apart from CRYPTO_SRC, which the
+# licence tool compiles as well and has no use for these.  The AES-NI half of
+# AES-128-GCM is in the x86 list below, built with the flags it needs.
+TLSCRYPTO_SRC := \
+  src/crypto/hkdf.c src/crypto/poly1305.c src/crypto/x25519.c \
+  src/crypto/aes.c src/crypto/aead.c
+
+SRC      := $(CORE_SRC) $(CRYPTO_SRC) $(TLSCRYPTO_SRC)
 OBJ      := $(SRC:.c=.o)
 
 # ---- build provenance ------------------------------------------------------
@@ -139,7 +147,7 @@ GITREV   := $(if $(GITBR),$(if $(GITHASH),$(GITBR)@$(GITHASH)),$(GITHASH))
 endif
 
 # SIMD kernels compiled with elevated ISA + selected at runtime via CPUID.
-SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c
+SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c src/crypto/aes_ni.c
 SIMD_ARM_SRC := src/simd/simd_neon.c
 
 # Only when not given, so a cross build can set it in local.mk as well as on
@@ -295,6 +303,9 @@ src/simd/simd_avx2.o: src/simd/simd_avx2.c
 src/simd/simd_sse2.o: src/simd/simd_sse2.c
 	$(CC) $(ALL_CFLAGS) -msse2 -c -o $@ $<
 
+src/crypto/aes_ni.o: src/crypto/aes_ni.c
+	$(CC) $(ALL_CFLAGS) -maes -mpclmul -mssse3 -c -o $@ $<
+
 src/simd/simd_neon.o: src/simd/simd_neon.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
@@ -350,6 +361,7 @@ fuzz: $(FUZZ_BIN)
 
 $(FUZZ_DIR)/src/simd/simd_avx2.o: FUZZ_ISA := -mavx2 -mbmi -mbmi2
 $(FUZZ_DIR)/src/simd/simd_sse2.o: FUZZ_ISA := -msse2
+$(FUZZ_DIR)/src/crypto/aes_ni.o: FUZZ_ISA := -maes -mpclmul -mssse3
 $(FUZZ_DIR)/src/util.o: src/gitrev.h src/buildtarget.h
 $(FUZZ_DIR)/src/webui/webui.o: src/webui/webui_assets.h
 $(FUZZ_DIR)/src/licence.o: src/licence_issuer.stamp
