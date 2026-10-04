@@ -3426,6 +3426,23 @@ static void test_localzone(void)
           "nor is arpa itself");
     CHECK(local_answer(w, ELPIS_IDENTITY_NAME_DEFAULT ".", ELPIS_T_TXT, &rc, &an) == 1 &&
           rc == ELPIS_RC_NOERROR && an == 1, "the identity probe answers");
+    {
+        /* The answer is still in w->txbuf: look for its strings there. */
+        static const char *const want[2] = {
+            "elpis=" ELPIS_VERSION, "codename=" ELPIS_CODENAME
+        };
+        size_t k, i, found = 0;
+        for (k = 0; k < 2; k++) {
+            size_t wl = strlen(want[k]);
+            for (i = 0; i + wl <= 600; i++)
+                if (memcmp(w->txbuf + i, want[k], wl) == 0) {
+                    found++;
+                    break;
+                }
+        }
+        CHECK(found == 2, "it says the version and the release's name (%s, %s)",
+              want[0], want[1]);
+    }
     CHECK(local_answer(w, "ELPIS.Sakurako.OOMURO", ELPIS_T_TXT, &rc, &an) == 1 &&
           an == 1, "in any case");
     CHECK(local_answer(w, "x." ELPIS_IDENTITY_NAME_DEFAULT ".", ELPIS_T_TXT,

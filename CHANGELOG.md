@@ -3,6 +3,10 @@
 Notable changes, newest first. Versions follow [semantic versioning](https://semver.org):
 the major number changes when a config file that worked stops working.
 
+From 2.4.0 on, each release also has a name, shown beside the version by
+`elpis -V`, at startup, in the About window and in the identity probe as
+`codename=`.
+
 Every binary also carries the exact commit it was built from. The About window
 on the status page shows it, and so does the identity probe:
 
@@ -10,7 +14,17 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.0 "Intrinsic Future" — 2026-10-05
+
+DNS over TLS to authoritative servers. With `authoritative-dot:
+opportunistic`, what Elpis asks the root, the TLDs and the authorities goes
+encrypted to every server that takes DoT on port 853, and plain, as before,
+to the rest. Tested live on dnscheck.tools, which shows ADoX. The TLS 1.3
+client for it is written in this tree, so Elpis is still one static binary
+with no dependencies. Also `caps-exempt:`, for servers that answer
+case-randomised names but do not recognise them.
+
+No config that worked stops working. `authoritative-dot` is off by default.
 
 ### Added
 

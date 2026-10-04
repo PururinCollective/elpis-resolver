@@ -17,6 +17,10 @@
 #ifndef ELPIS_VERSION
 #define ELPIS_VERSION "0.0.0"
 #endif
+/* The release's name (Makefile CODENAME), "" for a build without one. */
+#ifndef ELPIS_CODENAME
+#define ELPIS_CODENAME ""
+#endif
 #ifndef ELPIS_SYSCONFDIR
 #define ELPIS_SYSCONFDIR "/etc"
 #endif

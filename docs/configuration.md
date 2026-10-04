@@ -155,12 +155,14 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
 ```
-elpis.sakurako.oomuro   text = "elpis=1.0.0" "edition=community"
-                               "build=c662164779b7" "uptime=3601"
-                               "workers=8" "simd=avx2" "dnssec=validating"
+elpis.sakurako.oomuro   text = "elpis=2.4.0" "codename=Intrinsic Future"
+                               "edition=community" "build=v2.4.0"
+                               "uptime=3601" "workers=8" "simd=avx2"
+                               "dnssec=validating"
 ```
 
 `dig +short TXT elpis.sakurako.oomuro @127.0.0.1` does the same thing.
+`codename=` is the release's name, from 2.4.0 on, beside its version.
 
 Only clients the access-control list already admits get an answer. The default
 name sits in an undelegated TLD on purpose: nothing on the public internet can

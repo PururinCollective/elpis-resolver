@@ -27,7 +27,11 @@ BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
 BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
-VERSION   := 2.3.0
+VERSION   := 2.4.0
+# Each release has a name as well, from 2.4.0 on: shown beside the version by
+# `elpis -V`, at startup, in the status page's About window and in the
+# identity probe (codename=).  Spaces are fine; they are escaped below.
+CODENAME  := Intrinsic Future
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.
@@ -48,7 +52,11 @@ WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-align \
              -Wno-unused-parameter -Wvla
 
 OPT       ?= -O3 -fno-strict-aliasing -fomit-frame-pointer
-DEFS      := -DELPIS_VERSION=\"$(VERSION)\" -DELPIS_SYSCONFDIR=\"$(SYSCONFDIR)\"
+EMPTY     :=
+SPACE     := $(EMPTY) $(EMPTY)
+DEFS      := -DELPIS_VERSION=\"$(VERSION)\" \
+             -DELPIS_CODENAME=\"$(subst $(SPACE),\$(SPACE),$(CODENAME))\" \
+             -DELPIS_SYSCONFDIR=\"$(SYSCONFDIR)\"
 # The Ed25519 public key deployment licences are signed with.  Normally set
 # once in include/elpis/licence.h; this is here so a one-off build can carry a
 # different issuer without editing the tree.

@@ -842,6 +842,8 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 
     bputs(b, "{\"server\":{\"version\":");
     bputq(b, ELPIS_VERSION);
+    bputs(b, ",\"codename\":");
+    bputq(b, ELPIS_CODENAME);
     bputs(b, ",\"uptime\":");
     bputu(b, (elpis_now_ms() - ctx->start_ms) / 1000u);
     bputs(b, ",\"hostup\":");
