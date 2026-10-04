@@ -199,6 +199,26 @@ static int want_size(pctx_t *p, const char *k, const char *v, uint64_t *dst)
     return 0;
 }
 
+/*
+ * One more zone for a repeatable list -- ecs-zone, caps-exempt -- kept in
+ * lower case.  Past `max` the line is skipped with a warning, not refused.
+ */
+static int want_zone(pctx_t *p, const char *k, const char *v,
+                     elpis_name_t *list, unsigned *n, unsigned max)
+{
+    if (*n >= max) {
+        elpis_warn("%s:%u: too many %s entries", p->src, p->lineno, k);
+        return 0;
+    }
+    if (elpis_name_from_text(&list[*n], v) != ELPIS_OK) {
+        perr(p, k, v);
+        return -1;
+    }
+    elpis_name_lower(&list[*n]);
+    (*n)++;
+    return 0;
+}
+
 #define KEY(s) (!elpis_strcasecmp_ascii(key, (s)))
 
 int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
@@ -491,6 +511,9 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("require-cookie")) return want_bool(&p, key, val, &c->require_cookie);
     if (KEY("use-0x20") || KEY("use-caps-for-id"))
         return want_bool(&p, key, val, &c->use_0x20);
+    if (KEY("caps-exempt"))
+        return want_zone(&p, key, val, c->caps_exempt, &c->ncaps_exempt,
+                         ELPIS_ARRAY_LEN(c->caps_exempt));
     if (KEY("do-ipv4"))       return want_bool(&p, key, val, &c->do_ipv4);
     if (KEY("do-ipv6"))       return want_bool(&p, key, val, &c->do_ipv6);
     if (KEY("prefer-ipv6"))   return want_bool(&p, key, val, &c->prefer_ipv6);
@@ -525,19 +548,9 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
             c->ecs_v6_bits = (uint8_t)v;
         return ELPIS_OK;
     }
-    if (KEY("ecs-zone")) {
-        if (c->necs_zone >= ELPIS_ARRAY_LEN(c->ecs_zone)) {
-            elpis_warn("%s:%u: too many ecs-zone entries", src, lineno);
-            return ELPIS_OK;
-        }
-        if (elpis_name_from_text(&c->ecs_zone[c->necs_zone], val) != ELPIS_OK) {
-            perr(&p, key, val);
-            return ELPIS_ERR;
-        }
-        elpis_name_lower(&c->ecs_zone[c->necs_zone]);
-        c->necs_zone++;
-        return ELPIS_OK;
-    }
+    if (KEY("ecs-zone"))
+        return want_zone(&p, key, val, c->ecs_zone, &c->necs_zone,
+                         ELPIS_ARRAY_LEN(c->ecs_zone));
     if (KEY("outgoing-interface")) {
         elpis_addr_t a;
         if (elpis_addr_parse(&a, val, 0) != 0) { perr(&p, key, val); return ELPIS_ERR; }
@@ -839,16 +852,27 @@ const char *elpis_ecs_type_name(unsigned type)
     }
 }
 
-int elpis_conf_ecs_zone_ok(const elpis_conf_t *c, const elpis_name_t *qname)
+/* Is `qname` at or below one of the `n` zones in `list`? */
+static int zone_list_has(const elpis_name_t *list, unsigned n,
+                         const elpis_name_t *qname)
 {
     unsigned i;
 
-    if (c->necs_zone == 0)
-        return 1;
-    for (i = 0; i < c->necs_zone; i++)
-        if (elpis_name_is_subdomain(qname, &c->ecs_zone[i]))
+    for (i = 0; i < n; i++)
+        if (elpis_name_is_subdomain(qname, &list[i]))
             return 1;
     return 0;
+}
+
+int elpis_conf_ecs_zone_ok(const elpis_conf_t *c, const elpis_name_t *qname)
+{
+    return c->necs_zone == 0 ||
+           zone_list_has(c->ecs_zone, c->necs_zone, qname);
+}
+
+int elpis_conf_caps_exempt(const elpis_conf_t *c, const elpis_name_t *qname)
+{
+    return zone_list_has(c->caps_exempt, c->ncaps_exempt, qname);
 }
 
 void elpis_conf_dump(const elpis_conf_t *c)
@@ -865,6 +889,11 @@ void elpis_conf_dump(const elpis_conf_t *c)
                (int)c->dnssec, (int)c->qname_minimisation, (int)c->use_cookies,
                (int)c->use_0x20, (int)c->dns64,
                (c->dns64 && c->dns64_strip_a) ? " (A stripped)" : "");
+    for (i = 0; c->use_0x20 && i < c->ncaps_exempt; i++) {
+        char zb[ELPIS_MAX_NAME * 4];
+        elpis_info("  caps-exempt %s",
+                   elpis_name_str(&c->caps_exempt[i], zb, sizeof zb));
+    }
     elpis_info("  max-pending=%u per worker%s", c->max_pending,
                c->max_pending_auto ? " (auto)" : "");
     if (c->edns_auto)

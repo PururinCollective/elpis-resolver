@@ -24,6 +24,7 @@
 #define ELPIS_MAX_STUB   16
 #define ELPIS_MAX_OUT_SRC 8
 #define ELPIS_MAX_ECS_ZONES 32
+#define ELPIS_MAX_CAPS_EXEMPT 32
 
 /* ecs-ip-type: what goes in the EDNS Client Subnet option sent upstream. */
 #define ELPIS_ECS_TYPE_NONE    0   /* a /0: tailor to nobody             */
@@ -159,6 +160,16 @@ typedef struct {
     uint8_t      do_ipv6;
     uint8_t      tcp_upstream;
     /*
+     * Names at or below these zones go out without 0x20 (caps-exempt:, as in
+     * Unbound).  For an authority that answers a case-randomised name but
+     * does not recognise it: dnsprobe.online records only the lowercase
+     * spelling of the names it hands out, so a resolver that randomises is
+     * never seen.  Nothing in its answers gives that away, unlike a server
+     * that drops such names, so it has to be named here.
+     */
+    elpis_name_t caps_exempt[ELPIS_MAX_CAPS_EXEMPT];
+    unsigned     ncaps_exempt;
+    /*
      * Source addresses for outbound queries.  More than one of a family is
      * allowed and they are used round-robin across the socket pool: a query
      * an off-path attacker wants to forge then has to guess the source
@@ -256,6 +267,8 @@ void elpis_conf_dump(const elpis_conf_t *c);
 const char *elpis_ecs_type_name(unsigned type);
 /* May a query for `qname` carry a subnet, as far as ecs-zone: goes? */
 int  elpis_conf_ecs_zone_ok(const elpis_conf_t *c, const elpis_name_t *qname);
+/* Does a query for `qname` go out without 0x20, by caps-exempt:? */
+int  elpis_conf_caps_exempt(const elpis_conf_t *c, const elpis_name_t *qname);
 /* 1 when `a` may query us; sets *snoop when RD-clear queries are allowed. */
 int  elpis_conf_acl_check(const elpis_conf_t *c, const elpis_addr_t *a,
                           int *snoop);

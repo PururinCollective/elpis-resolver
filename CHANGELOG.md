@@ -10,6 +10,22 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**`caps-exempt:` sends names under a zone without case randomisation.** The
+DNS leak test at publicdns.info resolves a one-off name under
+`dnsprobe.online` and asks that zone's server which resolver came for it. The
+server answers a case-randomised name correctly but records it only when it
+arrives in lowercase, so through Elpis, with `use-0x20` on as it is by
+default, the test found no resolver at all and scored the leak check 50. It
+does the same to Google Public DNS. A server like this cannot be spotted from
+its answers, unlike one that drops randomised names, so the zone has to be
+named. `caps-exempt` takes a zone, is repeatable, and covers every name at or
+below it, as in Unbound. The shipped config lists `dnsprobe.online`, and the
+config merge brings that line into existing installs.
+
 ## 2.3.0 — 2026-10-03
 
 Two DNSSEC features, both checked by dnstest.dev. Post-quantum downgrade
