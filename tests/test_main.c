@@ -30,6 +30,8 @@
 #include "crypto/bn.h"
 #include "crypto/aes.h"
 #include "elpis/tlscrypto.h"
+#include "elpis/tls.h"
+#include "rfc8448.h"
 
 #include "vectors.h"
 
@@ -4350,6 +4352,329 @@ static void test_x25519(void)
     CHECK(memcmp(r, out, 32) == 0, "the top bit of u is ignored");
 }
 
+/* ================================================================== */
+/*
+ * The TLS 1.3 client (tls.c).  RFC 8448 gives a whole handshake with the
+ * client's ephemeral key, so the engine can be replayed against it and its
+ * records compared byte for byte.  The trace's server keys are in it too,
+ * which lets the tests re-encrypt the server's flight -- split differently,
+ * or with one byte changed -- and see the engine cope or refuse.
+ */
+static size_t tls_take(elpis_tls_t *t, uint8_t *buf, size_t cap)
+{
+    const uint8_t *p;
+    size_t n = elpis_tls_out(t, &p);
+    if (n > cap)
+        n = cap;
+    if (n > 0)
+        memcpy(buf, p, n);
+    elpis_tls_out_done(t, n);
+    return n;
+}
+
+static void tls_feed_hex(elpis_tls_t *t, const char *hex)
+{
+    static uint8_t b[1024];
+    size_t n = unhex(hex, b, sizeof b);
+    elpis_tls_feed(t, b, n);
+}
+
+/* An engine started from the trace's ClientHello and key; 1 when its first
+ * record is the RFC's. */
+static int rfc8448_start(elpis_tls_t *t)
+{
+    uint8_t ch[256], priv[32], out[512];
+    size_t chn = unhex(rfc8448_client_hello, ch, sizeof ch), n;
+
+    unhex(rfc8448_client_priv, priv, sizeof priv);
+    if (elpis_tls_init_raw(t, ch, chn, priv) != 0)
+        return 0;
+    n = tls_take(t, out, sizeof out);
+    return bytes_are(out, n, rfc8448_ch_record);
+}
+
+/* An AES-128-GCM record under a traffic key, as a TLS 1.3 peer seals it. */
+static size_t seal_record(const char *keyhex, const char *ivhex, uint64_t seq,
+                          uint8_t type, const uint8_t *p, size_t n, uint8_t *out)
+{
+    uint8_t key[16], iv[12];
+    elpis_aead_t a;
+    int i;
+
+    unhex(keyhex, key, sizeof key);
+    unhex(ivhex, iv, sizeof iv);
+    for (i = 0; i < 8; i++)
+        iv[11 - i] ^= (uint8_t)(seq >> (8 * i));
+    elpis_aead_init(&a, ELPIS_AEAD_AES128_GCM, key, 16);
+    out[0] = 0x17; out[1] = 3; out[2] = 3;
+    elpis_put16(out + 3, (uint16_t)(n + 1 + 16));
+    memcpy(out + 5, p, n);
+    out[5 + n] = type;
+    elpis_aead_seal(&a, iv, out, 5, out + 5, n + 1, out + 5, out + 5 + n + 1);
+    return 5 + n + 1 + 16;
+}
+
+/* The content and type of a record sealed under keyhex/ivhex at seq. */
+static size_t open_record(const uint8_t *key, const uint8_t *ivin, uint64_t seq,
+                          const uint8_t *rec, size_t n, uint8_t *out, uint8_t *type)
+{
+    uint8_t iv[12];
+    elpis_aead_t a;
+    size_t clen;
+    int i;
+
+    if (n < 5 + 17)
+        return 0;
+    memcpy(iv, ivin, 12);
+    for (i = 0; i < 8; i++)
+        iv[11 - i] ^= (uint8_t)(seq >> (8 * i));
+    elpis_aead_init(&a, ELPIS_AEAD_AES128_GCM, key, 16);
+    clen = n - 5 - 16;
+    if (elpis_aead_open(&a, iv, rec, 5, rec + 5, clen, rec + 5 + clen, out) != 0)
+        return 0;
+    while (clen > 0 && out[clen - 1] == 0)
+        clen--;
+    if (clen == 0)
+        return 0;
+    *type = out[clen - 1];
+    return clen - 1;
+}
+
+/* The server's flight decrypted: EncryptedExtensions to Finished. */
+static size_t rfc8448_flight_plain(uint8_t *out)
+{
+    uint8_t rec[1024], key[16], iv[12], type = 0;
+    size_t n = unhex(rfc8448_server_flight, rec, sizeof rec);
+    unhex(rfc8448_s_hs_key, key, 16);
+    unhex(rfc8448_s_hs_iv, iv, 12);
+    n = open_record(key, iv, 0, rec, n, out, &type);
+    return type == 22 ? n : 0;
+}
+
+static void test_tls(void)
+{
+    static uint8_t buf[2048], rec[2048], plain[1024];
+    uint8_t app[50];
+    elpis_tls_t t;
+    size_t n, i, fl;
+
+    section("tls 1.3 client (RFC 8448)");
+
+    for (i = 0; i < sizeof app; i++) app[i] = (uint8_t)i;
+
+    /* The trace, start to finish. */
+    CHECK(rfc8448_start(&t), "ClientHello record as RFC 8448 has it");
+    tls_feed_hex(&t, rfc8448_sh_record);
+    {
+        const uint8_t *q;
+        CHECK(t.state == ELPIS_TLS_HANDSHAKE && t.suite == 0x1301 &&
+              elpis_tls_out(&t, &q) == 0, "ServerHello accepted");
+    }
+    tls_feed_hex(&t, rfc8448_server_flight);
+    n = tls_take(&t, buf, sizeof buf);
+    CHECK(t.state == ELPIS_TLS_OPEN && bytes_are(buf, n, rfc8448_client_fin_record),
+          "the server's Finished verifies, and ours is RFC 8448's (state %d, err %s)",
+          (int)t.state, elpis_tls_err_name(t.err));
+    tls_feed_hex(&t, rfc8448_ticket_record);
+    CHECK(t.state == ELPIS_TLS_OPEN && tls_take(&t, buf, sizeof buf) == 0,
+          "a NewSessionTicket is passed over");
+    CHECK(elpis_tls_write(&t, app, sizeof app) == 0, "writes once open");
+    n = tls_take(&t, buf, sizeof buf);
+    CHECK(bytes_are(buf, n, rfc8448_client_app_record),
+          "application data record as RFC 8448 has it");
+    tls_feed_hex(&t, rfc8448_server_app_record);
+    CHECK(elpis_tls_pending(&t) == 50 && elpis_tls_read(&t, buf, sizeof buf) == 50 &&
+          memcmp(buf, app, 50) == 0, "the server's application data decrypts");
+    elpis_tls_close(&t);
+    n = tls_take(&t, buf, sizeof buf);
+    CHECK(bytes_are(buf, n, rfc8448_client_alert_record), "close_notify as RFC 8448 has it");
+    CHECK(elpis_tls_write(&t, app, 1) == -1, "no writing after close_notify");
+    tls_feed_hex(&t, rfc8448_server_alert_record);
+    CHECK(t.state == ELPIS_TLS_CLOSED, "the server's close_notify closes");
+    elpis_tls_trim(&t);
+    CHECK(t.rec.p == NULL && t.out.p == NULL && t.app.p == NULL && t.hsbuf.p == NULL,
+          "trim releases empty buffers");
+    elpis_tls_free(&t);
+
+    /* The same, fed one byte at a time, with a middlebox CCS in between. */
+    {
+        size_t a = unhex(rfc8448_sh_record, rec, sizeof rec), b;
+        static const uint8_t ccs[6] = { 0x14, 0x03, 0x03, 0x00, 0x01, 0x01 };
+        memcpy(rec + a, ccs, sizeof ccs);
+        b = unhex(rfc8448_server_flight, rec + a + 6, sizeof rec - a - 6);
+        rfc8448_start(&t);
+        for (i = 0; i < a + 6 + b; i++)
+            elpis_tls_feed(&t, rec + i, 1);
+        n = tls_take(&t, buf, sizeof buf);
+        CHECK(t.state == ELPIS_TLS_OPEN && bytes_are(buf, n, rfc8448_client_fin_record),
+              "byte at a time, with a CCS dropped, same Finished");
+        elpis_tls_free(&t);
+    }
+
+    /* The flight re-sealed as three records, splitting a message header and
+     * a message: the engine joins them, and the transcript is unchanged. */
+    fl = rfc8448_flight_plain(plain);
+    CHECK(fl == 657, "the trace's flight decrypts under its handshake key (%zu)", fl);
+    {
+        size_t cut1 = 2, cut2 = 300, off;
+        rfc8448_start(&t);
+        tls_feed_hex(&t, rfc8448_sh_record);
+        off = seal_record(rfc8448_s_hs_key, rfc8448_s_hs_iv, 0, 22, plain, cut1, rec);
+        off += seal_record(rfc8448_s_hs_key, rfc8448_s_hs_iv, 1, 22, plain + cut1,
+                           cut2 - cut1, rec + off);
+        off += seal_record(rfc8448_s_hs_key, rfc8448_s_hs_iv, 2, 22, plain + cut2,
+                           fl - cut2, rec + off);
+        elpis_tls_feed(&t, rec, off);
+        n = tls_take(&t, buf, sizeof buf);
+        CHECK(t.state == ELPIS_TLS_OPEN && bytes_are(buf, n, rfc8448_client_fin_record),
+              "a flight split over three records gives the same Finished");
+        elpis_tls_free(&t);
+    }
+
+    /* One bit of ciphertext changed: refused with an encrypted alert. */
+    rfc8448_start(&t);
+    tls_feed_hex(&t, rfc8448_sh_record);
+    n = unhex(rfc8448_server_flight, rec, sizeof rec);
+    rec[100] ^= 0x01;
+    elpis_tls_feed(&t, rec, n);
+    n = tls_take(&t, buf, sizeof buf);
+    CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_DECRYPT && t.alert == 20 &&
+          n == 24 && buf[0] == 0x17, "a changed record is refused, bad_record_mac sealed");
+    elpis_tls_free(&t);
+
+    /* A Finished that does not verify, sealed properly. */
+    if (fl > 0) {
+        rfc8448_start(&t);
+        tls_feed_hex(&t, rfc8448_sh_record);
+        plain[fl - 1] ^= 0x01;
+        n = seal_record(rfc8448_s_hs_key, rfc8448_s_hs_iv, 0, 22, plain, fl, rec);
+        plain[fl - 1] ^= 0x01;
+        elpis_tls_feed(&t, rec, n);
+        CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_FINISHED && t.alert == 51,
+              "a wrong Finished is refused with decrypt_error");
+        elpis_tls_free(&t);
+    }
+
+    /* ServerHellos that must be refused. */
+    {
+        size_t shn = unhex(rfc8448_sh_record, rec, sizeof rec);
+        static const uint8_t hrr[32] = {
+            0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02,
+            0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+            0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c };
+
+        memcpy(buf, rec, shn);
+        memcpy(buf + 11, hrr, 32);              /* header 5 + 4, version 2 */
+        rfc8448_start(&t);
+        elpis_tls_feed(&t, buf, shn);
+        CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_HRR,
+              "a HelloRetryRequest ends it as hello-retry");
+        elpis_tls_free(&t);
+
+        memcpy(buf, rec, shn);
+        buf[45] = 0x02;                         /* TLS_AES_256_GCM_SHA384 */
+        rfc8448_start(&t);
+        elpis_tls_feed(&t, buf, shn);
+        CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_PARAM && t.alert == 47,
+              "a suite we did not offer is refused");
+        elpis_tls_free(&t);
+
+        /* Without supported_versions it is TLS 1.2: drop the last extension
+         * (00 2b 00 02 03 04) and fix the three lengths. */
+        memcpy(buf, rec, shn - 6);
+        elpis_put16(buf + 3, (uint16_t)(elpis_get16(buf + 3) - 6));
+        buf[8] = (uint8_t)(buf[8] - 6);
+        elpis_put16(buf + 47, (uint16_t)(elpis_get16(buf + 47) - 6));
+        rfc8448_start(&t);
+        elpis_tls_feed(&t, buf, shn - 6);
+        n = tls_take(&t, buf, sizeof buf);
+        CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_VERSION &&
+              bytes_are(buf, n, "15030300020246"),
+              "no supported_versions is TLS 1.2: protocol_version, in the clear");
+        elpis_tls_free(&t);
+    }
+
+    /* Not TLS at all. */
+    rfc8448_start(&t);
+    elpis_tls_feed(&t, (const uint8_t *)"HTTP/1.1 400 Bad Request\r\n", 26);
+    CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_DECODE,
+          "an HTTP reply on the port is not TLS");
+    elpis_tls_free(&t);
+
+    /* Content out of turn. */
+    rfc8448_start(&t);
+    elpis_tls_test_plain(&t, 23, app, 10);
+    CHECK(t.state == ELPIS_TLS_FAILED && t.err == ELPIS_TLS_E_UNEXPECTED,
+          "application data before the handshake is refused");
+    elpis_tls_free(&t);
+
+    /* KeyUpdate, with update_requested: the engine moves both keys on. */
+    {
+        uint8_t s1[32], c1[32], key[16], iv[12], type = 0, sec[32];
+        static const uint8_t ku[5] = { 24, 0, 0, 1, 1 };
+
+        rfc8448_start(&t);
+        tls_feed_hex(&t, rfc8448_sh_record);
+        tls_feed_hex(&t, rfc8448_server_flight);
+        tls_take(&t, buf, sizeof buf);
+        tls_feed_hex(&t, rfc8448_ticket_record);             /* server seq 0 */
+        n = seal_record(rfc8448_s_ap_key, rfc8448_s_ap_iv, 1, 22, ku, 5, rec);
+        elpis_tls_feed(&t, rec, n);
+        n = tls_take(&t, buf, sizeof buf);
+        unhex(rfc8448_c_ap_key, key, 16);
+        unhex(rfc8448_c_ap_iv, iv, 12);
+        CHECK(t.state == ELPIS_TLS_OPEN &&
+              open_record(key, iv, 0, buf, n, plain, &type) == 5 && type == 22 &&
+              memcmp(plain, "\x18\x00\x00\x01\x00", 5) == 0,
+              "answers KeyUpdate with its own, under the old key");
+
+        unhex(rfc8448_s_ap_secret, sec, 32);
+        elpis_hkdf_expand_label(sec, "traffic upd", NULL, 0, s1, 32);
+        elpis_hkdf_expand_label(s1, "key", NULL, 0, key, 16);
+        elpis_hkdf_expand_label(s1, "iv", NULL, 0, iv, 12);
+        {
+            char kh[33], ih[25];
+            for (i = 0; i < 16; i++) snprintf(kh + 2 * i, 3, "%02x", key[i]);
+            for (i = 0; i < 12; i++) snprintf(ih + 2 * i, 3, "%02x", iv[i]);
+            n = seal_record(kh, ih, 0, 23, app, sizeof app, rec);
+        }
+        elpis_tls_feed(&t, rec, n);
+        CHECK(elpis_tls_read(&t, buf, sizeof buf) == 50 && memcmp(buf, app, 50) == 0,
+              "reads under the server's next key");
+
+        unhex(rfc8448_c_ap_secret, sec, 32);
+        elpis_hkdf_expand_label(sec, "traffic upd", NULL, 0, c1, 32);
+        elpis_hkdf_expand_label(c1, "key", NULL, 0, key, 16);
+        elpis_hkdf_expand_label(c1, "iv", NULL, 0, iv, 12);
+        elpis_tls_write(&t, app, 7);
+        n = tls_take(&t, buf, sizeof buf);
+        CHECK(open_record(key, iv, 0, buf, n, plain, &type) == 7 && type == 23 &&
+              memcmp(plain, app, 7) == 0, "writes under its own next key");
+        elpis_tls_free(&t);
+    }
+
+    /* A real start: one ClientHello record offering TLS 1.3, X25519 and
+     * ALPN "dot", with a 32-byte session id. */
+    CHECK(elpis_tls_init(&t, "dot", "ns1.example.net") == 0, "init");
+    n = tls_take(&t, buf, sizeof buf);
+    {
+        static const uint8_t alpn[] = { 0x00, 0x10, 0x00, 0x06, 0x00, 0x04, 0x03, 'd', 'o', 't' };
+        static const uint8_t sv[] = { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 };
+        int has_alpn = 0, has_sv = 0, has_sni = 0;
+        for (i = 0; i + sizeof alpn <= n; i++)
+            has_alpn |= memcmp(buf + i, alpn, sizeof alpn) == 0;
+        for (i = 0; i + sizeof sv <= n; i++)
+            has_sv |= memcmp(buf + i, sv, sizeof sv) == 0;
+        for (i = 0; i + 15 <= n; i++)
+            has_sni |= memcmp(buf + i, "ns1.example.net", 15) == 0;
+        CHECK(n > 5 && buf[0] == 0x16 && buf[1] == 3 && buf[2] == 1 &&
+              elpis_get16(buf + 3) == n - 5 && buf[5] == 1 && buf[43] == 32 &&
+              has_alpn && has_sv && has_sni, "a ClientHello with ALPN dot, TLS 1.3 and SNI");
+    }
+    CHECK(elpis_tls_write(&t, app, 1) == -1, "no writing during the handshake");
+    elpis_tls_free(&t);
+}
+
 static void test_tlscrypto(void)
 {
     test_hkdf();
@@ -4379,6 +4704,7 @@ int main(void)
     test_held_rows();
     test_hashes();
     test_tlscrypto();
+    test_tls();
     test_signatures();
     test_bignum();
     test_keytrap();
