@@ -40,6 +40,9 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <poll.h>
+#include <pthread.h>
+#include <errno.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -4675,6 +4678,603 @@ static void test_tls(void)
     elpis_tls_free(&t);
 }
 
+/* ================================================================== */
+/*
+ * authoritative-dot: the per-server state, the settings, and the whole path
+ * through a worker -- test, use, safety net, refusal -- against a small
+ * TLS 1.3 server on loopback.
+ *
+ * The server is just enough to talk to tls.c: X25519, the suite it is told
+ * to pick, an empty certificate (the client does not look at it), and DNS
+ * answers made by setting QR on the query.  It runs in its own thread with
+ * blocking sockets, while the test drives the worker's loop.
+ */
+typedef struct {
+    int          lfd;
+    volatile int stop;
+    volatile int silent;        /* read queries, answer none          */
+    volatile int queries;       /* DNS queries read over TLS          */
+    volatile int conns;         /* handshakes it finished             */
+    volatile int qlen;          /* length of the last query           */
+    uint16_t     suite;
+} dotsrv_t;
+
+/* Reads time out every 100 ms to look at `stop`, and give up after 3 s. */
+static int full_read(int fd, uint8_t *p, size_t n, volatile int *stop)
+{
+    int idle = 0;
+    while (n > 0) {
+        ssize_t r = recv(fd, p, n, 0);
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            !*stop && ++idle < 30)
+            continue;
+        if (r <= 0)
+            return -1;
+        idle = 0;
+        p += r;
+        n -= (size_t)r;
+    }
+    return 0;
+}
+
+/* One record: type, and the body into buf.  Its length, or -1. */
+static long rec_read(int fd, uint8_t *type, uint8_t *buf, size_t cap,
+                     volatile int *stop)
+{
+    uint8_t h[5];
+    size_t n;
+    if (full_read(fd, h, 5, stop) != 0)
+        return -1;
+    n = elpis_get16(h + 3);
+    if (n > cap || full_read(fd, buf, n, stop) != 0)
+        return -1;
+    *type = h[0];
+    return (long)n;
+}
+
+static void srv_keys(uint16_t suite, const uint8_t secret[32], elpis_aead_t *a,
+                     uint8_t iv[12])
+{
+    uint8_t key[32];
+    int aead = suite == 0x1303 ? ELPIS_AEAD_CHACHA20_POLY1305 : ELPIS_AEAD_AES128_GCM;
+    size_t kl = elpis_aead_key_len(aead);
+    elpis_hkdf_expand_label(secret, "key", NULL, 0, key, kl);
+    elpis_hkdf_expand_label(secret, "iv", NULL, 0, iv, 12);
+    elpis_aead_init(a, aead, key, kl);
+}
+
+static void srv_nonce(uint8_t out[12], const uint8_t iv[12], uint64_t seq)
+{
+    int i;
+    memcpy(out, iv, 12);
+    for (i = 0; i < 8; i++)
+        out[11 - i] ^= (uint8_t)(seq >> (8 * i));
+}
+
+static int srv_seal(int fd, const elpis_aead_t *a, const uint8_t iv[12],
+                    uint64_t *seq, uint8_t type, const uint8_t *p, size_t n)
+{
+    static uint8_t r[16384 + 64];
+    uint8_t nonce[12];
+    r[0] = 0x17; r[1] = 3; r[2] = 3;
+    elpis_put16(r + 3, (uint16_t)(n + 17));
+    memcpy(r + 5, p, n);
+    r[5 + n] = type;
+    srv_nonce(nonce, iv, (*seq)++);
+    elpis_aead_seal(a, nonce, r, 5, r + 5, n + 1, r + 5, r + 5 + n + 1);
+    return send(fd, r, 5 + n + 17, MSG_NOSIGNAL) == (ssize_t)(5 + n + 17) ? 0 : -1;
+}
+
+/* Decrypt a record read whole into rec (header + body); the content type
+ * and length, or -1. */
+static long srv_open(const elpis_aead_t *a, const uint8_t iv[12], uint64_t *seq,
+                     uint8_t *rec, size_t n, uint8_t *type)
+{
+    uint8_t nonce[12];
+    size_t clen;
+    if (n < 5 + 17)
+        return -1;
+    clen = n - 5 - 16;
+    srv_nonce(nonce, iv, (*seq)++);
+    if (elpis_aead_open(a, nonce, rec, 5, rec + 5, clen, rec + 5 + clen, rec + 5) != 0)
+        return -1;
+    while (clen > 0 && rec[5 + clen - 1] == 0)
+        clen--;
+    if (clen == 0)
+        return -1;
+    *type = rec[5 + clen - 1];
+    return (long)(clen - 1);
+}
+
+static void dotsrv_conn(dotsrv_t *s, int fd)
+{
+    static uint8_t buf[17000], rec[17000], app[70000];
+    uint8_t type, sid[32], sidlen = 0, cpub[32], priv[32], pub[32], shared[32];
+    uint8_t early[32], salt[32], hs[32], th[32], chs[32], shs[32], master[32];
+    uint8_t cap[32], sap[32], fk[32], empty[32], sh[128];
+    elpis_sha256_t tr;
+    elpis_aead_t rd, wr;
+    uint8_t rdiv[12], wriv[12];
+    uint64_t rdseq = 0, wrseq = 0;
+    long n;
+    size_t off, shn = 0, applen = 0;
+    int have_key = 0;
+    struct timeval tv;
+
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    /* ClientHello: the session id and the X25519 share. */
+    n = rec_read(fd, &type, buf, sizeof buf, &s->stop);
+    if (n < 43 || type != 22 || buf[0] != 1)
+        return;
+    elpis_sha256_init(&tr);
+    elpis_sha256_update(&tr, buf, (size_t)n);
+    off = 4 + 2 + 32;
+    sidlen = buf[off];
+    if (sidlen > 32)
+        return;
+    memcpy(sid, buf + off + 1, sidlen);
+    off += 1u + sidlen;
+    off += 2u + elpis_get16(buf + off);         /* cipher suites */
+    off += 1u + buf[off];                       /* compression   */
+    off += 2;                                   /* extensions length */
+    while (off + 4 <= (size_t)n) {
+        unsigned et = elpis_get16(buf + off), el = elpis_get16(buf + off + 2);
+        if (et == 51 && el >= 38 && elpis_get16(buf + off + 6) == 0x001d) {
+            memcpy(cpub, buf + off + 10, 32);
+            have_key = 1;
+        }
+        off += 4u + el;
+    }
+    if (!have_key)
+        return;
+
+    elpis_random_bytes(priv, 32);
+    elpis_x25519_base(pub, priv);
+    sh[shn++] = 2;
+    shn += 3;
+    elpis_put16(sh + shn, 0x0303); shn += 2;
+    elpis_random_bytes(sh + shn, 32); shn += 32;
+    sh[shn++] = sidlen;
+    memcpy(sh + shn, sid, sidlen); shn += sidlen;
+    elpis_put16(sh + shn, s->suite); shn += 2;
+    sh[shn++] = 0;
+    elpis_put16(sh + shn, 6 + 40); shn += 2;
+    memcpy(sh + shn, "\x00\x2b\x00\x02\x03\x04", 6); shn += 6;
+    memcpy(sh + shn, "\x00\x33\x00\x24\x00\x1d\x00\x20", 8); shn += 8;
+    memcpy(sh + shn, pub, 32); shn += 32;
+    sh[1] = 0; sh[2] = 0; sh[3] = (uint8_t)(shn - 4);
+    rec[0] = 22; rec[1] = 3; rec[2] = 3;
+    elpis_put16(rec + 3, (uint16_t)shn);
+    memcpy(rec + 5, sh, shn);
+    if (send(fd, rec, 5 + shn, MSG_NOSIGNAL) != (ssize_t)(5 + shn))
+        return;
+    elpis_sha256_update(&tr, sh, shn);
+
+    if (elpis_x25519(shared, priv, cpub) != 0)
+        return;
+    memset(empty, 0, 32);
+    elpis_hkdf_extract(empty, 32, empty, 32, early);
+    elpis_sha256("", 0, empty);
+    elpis_hkdf_expand_label(early, "derived", empty, 32, salt, 32);
+    elpis_hkdf_extract(salt, 32, shared, 32, hs);
+    { elpis_sha256_t c = tr; elpis_sha256_final(&c, th); }
+    elpis_hkdf_expand_label(hs, "c hs traffic", th, 32, chs, 32);
+    elpis_hkdf_expand_label(hs, "s hs traffic", th, 32, shs, 32);
+    srv_keys(s->suite, shs, &wr, wriv);
+    srv_keys(s->suite, chs, &rd, rdiv);
+    if (sidlen > 0 && send(fd, "\x14\x03\x03\x00\x01\x01", 6, MSG_NOSIGNAL) != 6)
+        return;
+
+    /* EncryptedExtensions, an empty Certificate, a CertificateVerify the
+     * client hashes and ignores, and Finished: one record. */
+    off = 0;
+    memcpy(buf + off, "\x08\x00\x00\x02\x00\x00", 6); off += 6;
+    memcpy(buf + off, "\x0b\x00\x00\x04\x00\x00\x00\x00", 8); off += 8;
+    memcpy(buf + off, "\x0f\x00\x00\x04\x08\x04\x00\x00", 8); off += 8;
+    elpis_sha256_update(&tr, buf, off);
+    elpis_hkdf_expand_label(shs, "finished", NULL, 0, fk, 32);
+    { elpis_sha256_t c = tr; elpis_sha256_final(&c, th); }
+    buf[off] = 20; buf[off + 1] = 0; buf[off + 2] = 0; buf[off + 3] = 32;
+    elpis_hmac_sha256(fk, 32, th, 32, buf + off + 4);
+    elpis_sha256_update(&tr, buf + off, 36);
+    off += 36;
+    if (srv_seal(fd, &wr, wriv, &wrseq, 22, buf, off) != 0)
+        return;
+    { elpis_sha256_t c = tr; elpis_sha256_final(&c, th); }
+    elpis_hkdf_expand_label(hs, "derived", empty, 32, salt, 32);
+    memset(early, 0, 32);
+    elpis_hkdf_extract(salt, 32, early, 32, master);
+    elpis_hkdf_expand_label(master, "c ap traffic", th, 32, cap, 32);
+    elpis_hkdf_expand_label(master, "s ap traffic", th, 32, sap, 32);
+
+    /* The client's CCS, then its Finished. */
+    for (;;) {
+        n = rec_read(fd, &type, rec + 5, sizeof rec - 5, &s->stop);
+        if (n < 0)
+            return;
+        if (type == 20)
+            continue;
+        rec[0] = type; rec[1] = 3; rec[2] = 3;
+        elpis_put16(rec + 3, (uint16_t)n);
+        if (srv_open(&rd, rdiv, &rdseq, rec, 5u + (size_t)n, &type) != 36 || type != 22)
+            return;
+        break;
+    }
+    srv_keys(s->suite, cap, &rd, rdiv);
+    srv_keys(s->suite, sap, &wr, wriv);
+    rdseq = wrseq = 0;
+    s->conns++;
+
+    /* Queries, answered by setting QR. */
+    while (!s->stop) {
+        long m;
+        n = rec_read(fd, &type, rec + 5, sizeof rec - 5, &s->stop);
+        if (n < 0)
+            return;
+        rec[0] = type; rec[1] = 3; rec[2] = 3;
+        elpis_put16(rec + 3, (uint16_t)n);
+        m = srv_open(&rd, rdiv, &rdseq, rec, 5u + (size_t)n, &type);
+        if (m < 0 || type == 21)
+            return;
+        if (type != 23 || applen + (size_t)m > sizeof app)
+            continue;
+        memcpy(app + applen, rec + 5, (size_t)m);
+        applen += (size_t)m;
+        while (applen >= 2 && applen >= 2u + elpis_get16(app)) {
+            size_t ql = elpis_get16(app);
+            s->queries++;
+            s->qlen = (int)ql;
+            if (!s->silent && ql >= 12) {
+                app[2 + 2] |= 0x80;             /* QR */
+                if (srv_seal(fd, &wr, wriv, &wrseq, 23, app, 2 + ql) != 0)
+                    return;
+            }
+            memmove(app, app + 2 + ql, applen - 2 - ql);
+            applen -= 2 + ql;
+        }
+    }
+}
+
+static void *dotsrv_main(void *arg)
+{
+    dotsrv_t *s = (dotsrv_t *)arg;
+    while (!s->stop) {
+        struct pollfd pfd;
+        int fd;
+        pfd.fd = s->lfd;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 50) != 1)
+            continue;
+        fd = accept(s->lfd, NULL, NULL);
+        if (fd < 0)
+            continue;
+        dotsrv_conn(s, fd);
+        close(fd);
+    }
+    return NULL;
+}
+
+/* Run the worker's loop until done(ctx) or the time is up; 1 when done. */
+static int run_until(elpis_worker_t *w, int (*done)(void *), void *ctx, int ms)
+{
+    int i;
+    for (i = 0; i < ms / 10; i++) {
+        if (done(ctx))
+            return 1;
+        elpis_loop_once(w->loop, 10);
+    }
+    return done(ctx);
+}
+
+typedef struct { elpis_worker_t *w; elpis_addr_t srv; int want; dotsrv_t *s;
+                 elpis_task_t *t; } dotwait_t;
+
+static int dw_state(void *p)
+{
+    dotwait_t *d = (dotwait_t *)p;
+    elpis_infra_info_t inf;
+    elpis_infra_get(d->w->ctx->infra, &d->srv, &inf);
+    return inf.dot_state == (uint8_t)d->want;
+}
+
+static int dw_answered(void *p)
+{
+    return ((dotwait_t *)p)->t->out == NULL;
+}
+
+static int dw_noconn(void *p)
+{
+    dotwait_t *d = (dotwait_t *)p;
+    return d->w->n_dot == 0;
+}
+
+/* A datagram on the plain server's socket within ms: its length, or -1. */
+static long udp_wait(int fd, uint8_t *buf, size_t cap, struct sockaddr_in *from,
+                     elpis_worker_t *w, int ms)
+{
+    int i;
+    for (i = 0; i < ms / 10; i++) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 0) == 1) {
+            socklen_t fl = sizeof *from;
+            return (long)recvfrom(fd, buf, cap, 0, (struct sockaddr *)from, &fl);
+        }
+        if (w != NULL)
+            elpis_loop_once(w->loop, 10);
+        else
+            poll(NULL, 0, 10);
+    }
+    return -1;
+}
+
+static void test_dot(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_cache_t *ic = elpis_infra_new(1u << 20, 2);
+    elpis_conf_t c;
+    elpis_infra_info_t inf;
+    elpis_addr_t a, srv;
+    dotsrv_t ds;
+    dotwait_t dw;
+    pthread_t th;
+    int th_started = 0, lfd = -1, i;
+    char line[128];
+    uint32_t now = 1000000;
+    struct sockaddr_in sin, from;
+    socklen_t slen = sizeof sin;
+    uint8_t pkt[1024];
+    long n;
+
+    section("authoritative DoT");
+
+    /* The settings. */
+    elpis_conf_defaults(&c);
+    CHECK(!c.adot && c.adot_ttl_s == 86400 && c.adot_retry_s == 3600 &&
+          c.adot_max_try == 24, "off by default; 24h, 1h and 24 tries");
+    elpis_strlcpy(line, "authoritative-dot: opportunistic", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && c.adot,
+          "authoritative-dot: opportunistic");
+    elpis_strlcpy(line, "authoritative-dot: yes", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK && c.adot,
+          "yes is refused, kept for a strict mode");
+    elpis_strlcpy(line, "authoritative-dot: no", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && !c.adot, "no");
+    elpis_strlcpy(line, "authoritative-dot-ttl: 12h", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.adot_ttl_s == 43200, "authoritative-dot-ttl: 12h");
+    elpis_strlcpy(line, "authoritative-dot-ttl: 5s", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.adot_ttl_s == 60, "a ttl under a minute is a minute");
+    elpis_strlcpy(line, "authoritative-dot-retry: 30m", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.adot_retry_s == 1800, "authoritative-dot-retry: 30m");
+    elpis_strlcpy(line, "authoritative-dot-max-try: 1000", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.adot_max_try == 255, "max-try is at most 255");
+
+    /* The state, on a fixed clock. */
+    elpis_addr_parse(&a, "192.0.2.53", 53);
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_state == ELPIS_DOT_UNKNOWN &&
+          elpis_infra_dot_mode(&inf, now) == ELPIS_DOTM_TEST, "untested: test it");
+    CHECK(elpis_infra_dot_claim(ic, &a, now) == 1 &&
+          elpis_infra_dot_claim(ic, &a, now + 1) == 0, "one test at a time");
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(elpis_infra_dot_mode(&inf, now + 1) == ELPIS_DOTM_PLAIN &&
+          elpis_infra_dot_mode(&inf, now + ELPIS_DOT_CLAIM_S) == ELPIS_DOTM_TEST,
+          "plain while a test is out, a new test once its claim lapses");
+    elpis_infra_dot_ok(ic, &a, now, 86400);
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_state == ELPIS_DOT_AVAILABLE &&
+          elpis_infra_dot_mode(&inf, now + 86399) == ELPIS_DOTM_USE &&
+          elpis_infra_dot_mode(&inf, now + 86400) == ELPIS_DOTM_TEST,
+          "an answer: DoT for 24 hours, then tested again");
+    CHECK(elpis_infra_dot_fail(ic, &a, now, 3600, 24) == ELPIS_DOT_FAILED, "fails");
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_tries == 1 && elpis_infra_dot_mode(&inf, now + 3599) == ELPIS_DOTM_PLAIN &&
+          elpis_infra_dot_mode(&inf, now + 3600) == ELPIS_DOTM_TEST,
+          "failed: plain for an hour, then tested again");
+    for (i = 0; i < 23; i++)
+        elpis_infra_dot_fail(ic, &a, now + 3600u * (unsigned)(i + 1), 3600, 24);
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_state == ELPIS_DOT_FAILED && inf.dot_tries == 24,
+          "still failed after 23 retries");
+    CHECK(elpis_infra_dot_fail(ic, &a, now + 86400, 3600, 24) == ELPIS_DOT_UNAVAILABLE,
+          "the 24th failed retry gives up");
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(elpis_infra_dot_mode(&inf, now + 400u * 86400u) == ELPIS_DOTM_PLAIN &&
+          inf.dot_keep >= elpis_cached_now_s() + 29u * 86400u,
+          "unavailable: plain for good, its entry kept for it");
+    elpis_addr_parse(&a, "192.0.2.54", 53);
+    for (i = 0; i < 300; i++)
+        elpis_infra_dot_fail(ic, &a, now + (unsigned)i, 3600, 0);
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_state == ELPIS_DOT_FAILED, "max-try 0 never gives up");
+    elpis_infra_dot_ok(ic, &a, now, 86400);
+    elpis_infra_get(ic, &a, &inf);
+    CHECK(inf.dot_tries == 0 && inf.dot_state == ELPIS_DOT_AVAILABLE,
+          "an answer clears the failures");
+    elpis_cache_free(ic);
+
+    /* The whole path through a worker. */
+    memset(&ds, 0, sizeof ds);
+    ds.lfd = -1;
+    ds.suite = 0x1303;
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 16;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    ctx->conf.adot        = 1;
+    ctx->infra = elpis_infra_new(1u << 20, 2);
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rxbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    ds.lfd = socket(AF_INET, SOCK_STREAM, 0);
+    memset(&sin, 0, sizeof sin);
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (ctx->infra == NULL || w->loop == NULL || w->txbuf == NULL ||
+        w->rxbuf == NULL || ds.lfd < 0 ||
+        bind(ds.lfd, (struct sockaddr *)&sin, sizeof sin) != 0 ||
+        listen(ds.lfd, 4) != 0 ||
+        getsockname(ds.lfd, (struct sockaddr *)&sin, &slen) != 0) {
+        CHECK(0, "a TLS listener on 127.0.0.1");
+        goto out;
+    }
+    ctx->dot_port = ntohs(sin.sin_port);
+    slen = sizeof sin;
+    if (elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "a plain DNS socket on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+    elpis_addr_parse(&srv, "127.0.0.1", ntohs(sin.sin_port));
+    if (pthread_create(&th, NULL, dotsrv_main, &ds) != 0) {
+        CHECK(0, "the TLS server thread");
+        goto out;
+    }
+    th_started = 1;
+    dw.w = w;
+    dw.srv = srv;
+    dw.s = &ds;
+
+    /* 1. Untested: the query goes plain, and a copy over DoT tests it. */
+    {
+        elpis_task_t *t = elpis_task_new(w);
+        elpis_name_from_text(&t->qname, "test.dot.example.");
+        t->qtype = ELPIS_T_A;
+        CHECK(elpis_out_send(t, &srv, 0) == ELPIS_OK && t->out != NULL &&
+              !t->out->over_dot, "an untested server is asked plain");
+        t->state = ELPIS_TS_DEAD;               /* answers go nowhere */
+        n = udp_wait(lfd, pkt, sizeof pkt, &from, NULL, 1000);
+        CHECK(n >= 12, "the plain query arrives");
+        dw.want = ELPIS_DOT_AVAILABLE;
+        CHECK(run_until(w, dw_state, &dw, 3000),
+              "the DoT copy is answered: the server is available");
+        CHECK(w->stats.dot_tests == 1 && w->stats.dot_tests_ok == 1 &&
+              w->stats.dot_handshakes == 1 && ds.conns == 1,
+              "one test, answered, over one handshake");
+        elpis_task_free(t);
+    }
+
+    /* 2. Available: DoT only, on the same connection, nothing plain. */
+    {
+        elpis_task_t *t = elpis_task_new(w);
+        elpis_name_from_text(&t->qname, "use.dot.example.");
+        t->qtype = ELPIS_T_A;
+        CHECK(elpis_out_send(t, &srv, 0) == ELPIS_OK && t->out != NULL &&
+              t->out->over_dot, "an available server is asked over DoT");
+        t->state = ELPIS_TS_DEAD;
+        dw.t = t;
+        CHECK(run_until(w, dw_answered, &dw, 2000) && ds.queries == 2,
+              "and answered there");
+        CHECK(ds.qlen > 0 && ds.qlen % 128 == 0,
+              "padded to a multiple of 128 bytes (%d)", ds.qlen);
+        CHECK(udp_wait(lfd, pkt, sizeof pkt, &from, w, 100) < 0,
+              "with nothing sent plain");
+        CHECK(w->stats.dot_opened == 1, "on the connection the test opened");
+        elpis_task_free(t);
+    }
+
+    /* 3. DoT goes quiet: the safety net asks plain, and plain answering
+     *    marks DoT failed. */
+    ds.silent = 1;
+    {
+        elpis_task_t *t = elpis_task_new(w);
+        elpis_name_from_text(&t->qname, "quiet.dot.example.");
+        t->qtype = ELPIS_T_A;
+        elpis_out_send(t, &srv, 0);
+        t->state = ELPIS_TS_DEAD;
+        CHECK(t->out != NULL && t->out->over_dot, "over DoT");
+        n = udp_wait(lfd, pkt, sizeof pkt, &from, w, 3000);
+        CHECK(n >= 12 && w->stats.dot_safety == 1,
+              "unanswered, the same question goes plain");
+        if (n >= 12) {
+            pkt[2] |= 0x80;
+            sendto(lfd, pkt, (size_t)n, 0, (struct sockaddr *)&from, sizeof from);
+        }
+        dw.t = t;
+        dw.want = ELPIS_DOT_FAILED;
+        CHECK(run_until(w, dw_answered, &dw, 2000) && dw_state(&dw),
+              "plain answers, so DoT is marked failed");
+        elpis_infra_get(ctx->infra, &srv, &inf);
+        CHECK(inf.dot_tries == 1, "one failure counted");
+        elpis_task_free(t);
+    }
+
+    /* 4. Failed: plain only until the retry is due. */
+    {
+        uint64_t tests = w->stats.dot_tests;
+        elpis_task_t *t = elpis_task_new(w);
+        elpis_name_from_text(&t->qname, "after.dot.example.");
+        t->qtype = ELPIS_T_A;
+        elpis_out_send(t, &srv, 0);
+        CHECK(t->out != NULL && !t->out->over_dot && w->stats.dot_tests == tests,
+              "a failed server is asked plain, with no test");
+        elpis_task_free(t);
+        (void)udp_wait(lfd, pkt, sizeof pkt, &from, NULL, 200);
+    }
+
+    /* 5. The server stops listening: a refused connection is a failure too,
+     *    and the query goes plain at once. */
+    ds.stop = 1;
+    pthread_join(th, NULL);
+    th_started = 0;
+    close(ds.lfd);
+    ds.lfd = -1;
+    CHECK(run_until(w, dw_noconn, &dw, 5000), "the closed connection is let go");
+    elpis_infra_dot_ok(ctx->infra, &srv, elpis_cached_now_s(), 86400);
+    {
+        uint64_t before = w->stats.dot_fail_refused;
+        elpis_task_t *t = elpis_task_new(w);
+        elpis_name_from_text(&t->qname, "refused.dot.example.");
+        t->qtype = ELPIS_T_A;
+        elpis_out_send(t, &srv, 0);
+        t->state = ELPIS_TS_DEAD;
+        n = udp_wait(lfd, pkt, sizeof pkt, &from, w, 2000);
+        elpis_infra_get(ctx->infra, &srv, &inf);
+        CHECK(n >= 12 && w->stats.dot_fail_refused == before + 1 &&
+              inf.dot_state == ELPIS_DOT_FAILED,
+              "refused: marked failed, and the query arrives plain");
+        elpis_task_free(t);
+    }
+
+out:
+    if (th_started) {
+        ds.stop = 1;
+        pthread_join(th, NULL);
+    }
+    if (ds.lfd >= 0)
+        close(ds.lfd);
+    if (lfd >= 0)
+        close(lfd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->txbuf);
+        elpis_free(w->rxbuf);
+    }
+    if (ctx != NULL)
+        elpis_cache_free(ctx->infra);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
 static void test_tlscrypto(void)
 {
     test_hkdf();
@@ -4705,6 +5305,7 @@ int main(void)
     test_hashes();
     test_tlscrypto();
     test_tls();
+    test_dot();
     test_signatures();
     test_bignum();
     test_keytrap();

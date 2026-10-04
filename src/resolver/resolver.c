@@ -660,6 +660,21 @@ static int next_round(elpis_task_t *t)
  * machine instead of spreading.
  */
 #define UNKNOWN_JITTER_MS 64u
+
+/*
+ * With authoritative-dot: on, a server that takes DoT is chosen before any
+ * that does not, however much faster they are: with most answers coming
+ * from the cache, a slower DoT server costs little and keeps the name out of
+ * sight.  Not a server that is failing (ELPIS_RTT_BAN), and a held one is
+ * not considered at all, as before.  0 sorts first.
+ */
+static int dot_rank(const elpis_conf_t *c, const elpis_infra_info_t *inf,
+                    uint32_t cost, uint32_t now)
+{
+    return !(c->adot && cost < ELPIS_RTT_BAN &&
+             elpis_infra_dot_mode(inf, now) == ELPIS_DOTM_USE);
+}
+
 static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
                          elpis_infra_info_t *out_inf)
 {
@@ -667,7 +682,7 @@ static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
     const elpis_conf_t *c = &w->ctx->conf;
     uint32_t best_cost = 0xFFFFFFFFu;
     uint32_t now = elpis_cached_now_s();
-    int found = 0, held = 0;
+    int found = 0, held = 0, best_rank = 2;
     unsigned i, j;
     elpis_addr_t best;
     elpis_infra_info_t best_inf;
@@ -684,6 +699,7 @@ static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
             elpis_addr_t a;
             elpis_infra_info_t inf;
             uint32_t cost;
+            int rank;
             elpis_addr_from6(&a, r->a6[j], r->port ? r->port : 53);
             if (already_tried(t, &a))
                 continue;
@@ -697,14 +713,17 @@ static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (!c->prefer_ipv6)
                 cost += 20;      /* mild bias: v4 paths are still more reliable */
-            if (cost < best_cost) {
-                best_cost = cost; best = a; best_inf = inf; found = 1;
+            rank = dot_rank(c, &inf, cost, now);
+            if (rank < best_rank || (rank == best_rank && cost < best_cost)) {
+                best_cost = cost; best_rank = rank; best = a; best_inf = inf;
+                found = 1;
             }
         }
         for (j = 0; j < r->n4 && c->do_ipv4; j++) {
             elpis_addr_t a;
             elpis_infra_info_t inf;
             uint32_t cost;
+            int rank;
             elpis_addr_from4(&a, r->a4[j], r->port ? r->port : 53);
             if (already_tried(t, &a))
                 continue;
@@ -718,8 +737,10 @@ static int choose_server(elpis_task_t *t, uint16_t qtype, elpis_addr_t *out,
                 cost += elpis_random_below(UNKNOWN_JITTER_MS);
             if (c->prefer_ipv6)
                 cost += 20;
-            if (cost < best_cost) {
-                best_cost = cost; best = a; best_inf = inf; found = 1;
+            rank = dot_rank(c, &inf, cost, now);
+            if (rank < best_rank || (rank == best_rank && cost < best_cost)) {
+                best_cost = cost; best_rank = rank; best = a; best_inf = inf;
+                found = 1;
             }
         }
     }
@@ -821,6 +842,9 @@ static int send_query(elpis_task_t *t, const elpis_addr_t *server,
     if (elpis_out_send(t, server, 0) != ELPIS_OK)
         return ELPIS_ERR;
     if (t->forwarding || t->deleg_from_route || t->warming)
+        return ELPIS_OK;
+    /* Over DoT: no plain copies of the question to anyone else. */
+    if (t->out != NULL && t->out->over_dot)
         return ELPIS_OK;
     if (known && sinf->srtt < RACE_ABOVE_MS)
         return ELPIS_OK;

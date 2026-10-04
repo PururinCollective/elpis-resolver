@@ -44,6 +44,9 @@ static uint64_t g_rss_bytes;
 /* Held servers; a row whose server family is 0 is free. */
 static elpis_tmheld_t g_held[ELPIS_TM_HELD];
 
+/* Servers that speak DoT; the same rule for a free row. */
+static elpis_tmdot_t g_dot[ELPIS_TM_DOT];
+
 /* Merged from every worker's counters, which only ever grow. */
 static uint64_t g_rx_total, g_tx_total, g_rtt_sum_us, g_rtt_count;
 static uint64_t g_verify_total;
@@ -61,6 +64,7 @@ void elpis_tm_init(int enabled)
     g_log_n = g_log_head = 0;
     memset(&g_prev, 0, sizeof g_prev);
     memset(g_held, 0, sizeof g_held);
+    memset(g_dot, 0, sizeof g_dot);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -360,6 +364,82 @@ void elpis_tm_held(const elpis_tmhold_t *h)
     pthread_mutex_unlock(&g_lock);
 }
 
+/*
+ * The row for a DoT server, under the lock.  With `make`, a server not yet
+ * in the table takes a free row or the one used longest ago; otherwise NULL.
+ */
+static elpis_tmdot_t *dot_row(const elpis_addr_t *server, int make)
+{
+    elpis_tmdot_t *oldest = NULL;
+    unsigned i;
+
+    for (i = 0; i < ELPIS_TM_DOT; i++) {
+        elpis_tmdot_t *r = &g_dot[i];
+        if (r->server.u.sa.sa_family == 0) {
+            if (oldest == NULL || oldest->server.u.sa.sa_family != 0)
+                oldest = r;
+            continue;
+        }
+        if (elpis_addr_eq(&r->server, server))
+            return r;
+        if (oldest == NULL || (oldest->server.u.sa.sa_family != 0 &&
+                               r->last < oldest->last))
+            oldest = r;
+    }
+    if (!make || oldest == NULL)
+        return NULL;
+    memset(oldest, 0, sizeof *oldest);
+    oldest->server = *server;
+    return oldest;
+}
+
+void elpis_tm_dot_handshake(const elpis_addr_t *server, uint16_t suite,
+                            uint32_t ms, uint32_t now)
+{
+    elpis_tmdot_t *r;
+
+    if (!elpis_tm_enabled || server == NULL)
+        return;
+    pthread_mutex_lock(&g_lock);
+    r = dot_row(server, 1);
+    r->suite = suite;
+    r->hs_ms = ms;
+    r->last  = now;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void elpis_tm_dot_answers(const elpis_addr_t *server, const elpis_name_t *zone,
+                          uint32_t n, uint32_t now)
+{
+    elpis_tmdot_t *r;
+
+    if (!elpis_tm_enabled || server == NULL)
+        return;
+    pthread_mutex_lock(&g_lock);
+    r = dot_row(server, 1);
+    r->answers += n;
+    r->last = now;
+    if (zone != NULL && zone->len > 0)
+        elpis_tm_name_text(zone, r->zone, sizeof r->zone);
+    pthread_mutex_unlock(&g_lock);
+}
+
+void elpis_tm_dot_failed(const elpis_addr_t *server, int state, uint32_t now)
+{
+    elpis_tmdot_t *r;
+
+    (void)state;
+    if (!elpis_tm_enabled || server == NULL)
+        return;
+    pthread_mutex_lock(&g_lock);
+    r = dot_row(server, 0);             /* only servers it had worked for */
+    if (r != NULL) {
+        r->fails++;
+        r->last = now;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
 void elpis_tm_bytes(elpis_wtm_t *w, uint64_t rx, uint64_t tx)
 {
     if (!elpis_tm_enabled || w == NULL)
@@ -615,6 +695,29 @@ unsigned elpis_tm_held_rows(elpis_tmheld_t *out, unsigned max)
         if (r->server.u.sa.sa_family == 0)
             continue;
         for (j = n; j > 0 && out[j - 1].last.at < r->last.at; j--) {
+            if (j < max)
+                out[j] = out[j - 1];
+        }
+        if (j < max) {
+            out[j] = *r;
+            if (n < max)
+                n++;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return n;
+}
+
+unsigned elpis_tm_dot_rows(elpis_tmdot_t *out, unsigned max)
+{
+    unsigned n = 0, i, j;
+
+    pthread_mutex_lock(&g_lock);
+    for (i = 0; i < ELPIS_TM_DOT; i++) {
+        const elpis_tmdot_t *r = &g_dot[i];
+        if (r->server.u.sa.sa_family == 0)
+            continue;
+        for (j = n; j > 0 && out[j - 1].answers < r->answers; j--) {
             if (j < max)
                 out[j] = out[j - 1];
         }

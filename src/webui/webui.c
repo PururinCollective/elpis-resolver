@@ -731,6 +731,102 @@ static void json_holds(elpis_ctx_t *ctx, buf_t *b)
     bputs(b, "]},");
 }
 
+/*
+ * DNS over TLS to authoritative servers (authoritative-dot:): the counters,
+ * and the servers that have answered over it, most answers first.  As for
+ * held servers, the rows say what happened and the infra cache says where
+ * each server stands now, so the page and the resolver cannot disagree.
+ */
+#define DOT_SHOW 100u
+
+static void json_adot(elpis_ctx_t *ctx, buf_t *b)
+{
+    static elpis_tmdot_t rows[ELPIS_TM_DOT];
+    const elpis_stats_t *s = &ctx->stats;
+    const elpis_conf_t *c = &ctx->conf;
+    uint32_t now = elpis_now_s();
+    unsigned n, i, out = 0, avail = 0, failed = 0, gone = 0;
+
+    n = elpis_tm_dot_rows(rows, ELPIS_TM_DOT);
+
+    bputs(b, "\"adot\":{\"mode\":"); bputq(b, c->adot ? "opportunistic" : "no");
+    bputs(b, ",\"ttl\":");       bputu(b, c->adot_ttl_s);
+    bputs(b, ",\"retry\":");     bputu(b, ELPIS_MIN(c->adot_retry_s, c->adot_ttl_s));
+    bputs(b, ",\"maxtry\":");    bputu(b, c->adot_max_try);
+    bputs(b, ",\"tests\":");     bputu(b, s->dot_tests);
+    bputs(b, ",\"testsok\":");   bputu(b, s->dot_tests_ok);
+    bputs(b, ",\"refused\":");   bputu(b, s->dot_fail_refused);
+    bputs(b, ",\"timeout\":");   bputu(b, s->dot_fail_timeout);
+    bputs(b, ",\"closed\":");    bputu(b, s->dot_fail_closed);
+    bputs(b, ",\"nogroup\":");   bputu(b, s->dot_fail_nogroup);
+    bputs(b, ",\"version\":");   bputu(b, s->dot_fail_version);
+    bputs(b, ",\"alpn\":");      bputu(b, s->dot_fail_alpn);
+    bputs(b, ",\"tls\":");       bputu(b, s->dot_fail_tls);
+    bputs(b, ",\"queries\":");   bputu(b, s->dot_queries);
+    bputs(b, ",\"answers\":");   bputu(b, s->dot_answers);
+    bputs(b, ",\"safety\":");    bputu(b, s->dot_safety);
+    bputs(b, ",\"lost\":");      bputu(b, s->dot_lost);
+    bputs(b, ",\"open\":");
+    bputu(b, s->dot_opened > s->dot_closed ? s->dot_opened - s->dot_closed : 0);
+    bputs(b, ",\"handshakes\":"); bputu(b, s->dot_handshakes);
+    bputs(b, ",\"hsms\":");
+    bputu(b, s->dot_handshakes ? s->dot_hs_ms / s->dot_handshakes : 0);
+    bputs(b, ",\"servers\":[");
+    for (i = 0; i < n; i++) {
+        const elpis_tmdot_t *r = &rows[i];
+        elpis_infra_info_t inf;
+        const char *state;
+        uint32_t eta = 0;
+        char ab[80];
+
+        elpis_infra_get(ctx->infra, &r->server, &inf);
+        switch (inf.dot_state) {
+        case ELPIS_DOT_AVAILABLE:
+            if (now < inf.dot_until) {
+                state = "available";
+                eta = inf.dot_until - now;
+            } else {
+                state = "due";              /* the next query tests it */
+            }
+            avail++;
+            break;
+        case ELPIS_DOT_FAILED:
+            state = "failed";
+            eta = now < inf.dot_until ? inf.dot_until - now : 0;
+            failed++;
+            break;
+        case ELPIS_DOT_UNAVAILABLE:
+            state = "unavailable";
+            gone++;
+            break;
+        default:
+            state = "forgotten";            /* its infra entry went */
+            break;
+        }
+        if (out >= DOT_SHOW)
+            continue;
+        if (out++) bputs(b, ",");
+        elpis_addr_str(&r->server, ab, sizeof ab);
+        bputs(b, "{\"server\":");  bputq(b, ab);
+        bputs(b, ",\"zone\":");    bputq(b, r->zone);
+        bputs(b, ",\"state\":");   bputq(b, state);
+        bputs(b, ",\"eta\":");     bputu(b, eta);
+        bputs(b, ",\"tries\":");   bputu(b, inf.dot_tries);
+        bputs(b, ",\"answers\":"); bputu(b, r->answers);
+        bputs(b, ",\"hsms\":");    bputu(b, r->hs_ms);
+        bputs(b, ",\"suite\":");
+        bputq(b, r->suite == 0x1303 ? "ChaCha20-Poly1305" :
+                 r->suite == 0x1301 ? "AES-128-GCM" : "");
+        bputs(b, ",\"ago\":");     bputu(b, now > r->last ? now - r->last : 0);
+        bputs(b, ",\"fails\":");   bputu(b, r->fails);
+        bputs(b, "}");
+    }
+    bputs(b, "],\"available\":"); bputu(b, avail);
+    bputs(b, ",\"failed\":");     bputu(b, failed);
+    bputs(b, ",\"unavailable\":"); bputu(b, gone);
+    bputs(b, "},");
+}
+
 static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 {
     const elpis_stats_t *s = &ctx->stats;
@@ -802,6 +898,7 @@ static void json_snapshot(elpis_ctx_t *ctx, buf_t *b)
 
     json_roots(ctx, b);
     json_holds(ctx, b);
+    json_adot(ctx, b);
 
     bputs(b, "\"loop\":{\"turns\":");
     bputu(b, ctx->loop.turns);

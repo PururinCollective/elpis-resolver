@@ -94,7 +94,8 @@ SERVER_SRC := \
 # The upstream side: recursion, queries out, and warming at startup.
 RESOLVER_SRC := \
   src/resolver/resolver.c src/resolver/outbound.c src/resolver/roots.c \
-  src/resolver/tld.c src/resolver/axfr.c src/resolver/probe.c
+  src/resolver/tld.c src/resolver/axfr.c src/resolver/probe.c \
+  src/resolver/dot.c
 
 DNSSEC_SRC := \
   src/dnssec/dnssec.c src/dnssec/nsec.c src/dnssec/nsec3.c \

@@ -14,6 +14,28 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
+**`authoritative-dot: opportunistic` encrypts what Elpis asks authoritative
+servers, where they allow it.** RFC 9539's unilateral opportunistic DNS over
+TLS: each root, TLD and authoritative server is asked plain as before, with a
+copy of the query over TLS on its port 853. A server that answers there gets
+its queries over DoT only, on a kept-open connection, for
+`authoritative-dot-ttl` (24 h) after its last answer, and is preferred over
+servers that do not take it. One whose DoT fails is asked plain and tested
+again every `authoritative-dot-retry` (1 h), and given up after
+`authoritative-dot-max-try` (24) failed retries. A DoT query that goes
+unanswered is asked again plain at once, so a server whose DoT breaks costs a
+lookup no more than its usual timeout. Queries over DoT are padded to
+128-byte blocks. The certificate is not checked, as RFC 9539 has it, so this
+stops someone watching the path, not someone sitting on it. Off by default.
+The status page has a **DoT servers** window. From a host in Malaysia,
+`b.root-servers.net` and Facebook's authoritative servers answered over DoT;
+most others drop port 853.
+
+The TLS 1.3 client for it is written in this tree, as the rest of the
+cryptography is, so Elpis is still one static binary with no dependencies:
+X25519, HKDF, ChaCha20-Poly1305 and AES-128-GCM (on AES-NI where the CPU has
+it), checked against RFC 7748, 8439, 5869 and 8448 and against OpenSSL.
+
 **`caps-exempt:` sends names under a zone without case randomisation.** The
 DNS leak test at publicdns.info resolves a one-off name under
 `dnsprobe.online` and asks that zone's server which resolver came for it. The

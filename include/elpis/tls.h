@@ -115,6 +115,8 @@ int    elpis_tls_write(elpis_tls_t *t, const uint8_t *p, size_t n);
 /* Decrypted bytes waiting, and taking them out. */
 size_t elpis_tls_pending(const elpis_tls_t *t);
 size_t elpis_tls_read(elpis_tls_t *t, uint8_t *buf, size_t cap);
+/* The decrypted bytes waiting, without taking them; NULL when none. */
+const uint8_t *elpis_tls_peek(const elpis_tls_t *t, size_t *n);
 
 /* Queue close_notify.  The caller sends it and closes the socket. */
 void   elpis_tls_close(elpis_tls_t *t);

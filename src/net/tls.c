@@ -1106,6 +1106,12 @@ size_t elpis_tls_read(elpis_tls_t *t, uint8_t *buf, size_t cap)
     return n;
 }
 
+const uint8_t *elpis_tls_peek(const elpis_tls_t *t, size_t *n)
+{
+    *n = buf_live(&t->app);
+    return *n > 0 ? t->app.p + t->app.off : NULL;
+}
+
 void elpis_tls_close(elpis_tls_t *t)
 {
     static const uint8_t cn[2] = { 1, AL_CLOSE_NOTIFY };    /* warning */

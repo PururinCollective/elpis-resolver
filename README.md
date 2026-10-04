@@ -37,6 +37,9 @@
   upstream to trust and nothing to forward to.
 - 🔐 **DNSSEC validation.** RSA, ECDSA, Ed25519, and post-quantum ML-DSA. It
   catches forged and stripped answers, even behind a forwarder.
+- 🔒 **DNS over TLS to authoritative servers**, where they offer it
+  (`authoritative-dot: opportunistic`, RFC 9539), so what it asks the root,
+  the TLDs and the authorities is not readable on the path.
 - ⚡ **Fast.** 0.6 ms median from cache, and hand-written AVX2, SSE2 and NEON
   code chosen at runtime for the CPU it runs on.
 - 📦 **One static binary with no dependencies.** The crypto, the event loop and
