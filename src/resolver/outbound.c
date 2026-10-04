@@ -229,11 +229,15 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
     q->qnamelen = t->qname.len;
     /*
      * Not over TCP, where the handshake already shuts out an off-path
-     * attacker and the entropy buys nothing.  Not to a server known to drop
-     * randomised names.  And not, once, to a server that has timed out
-     * without ever answering one -- that is the test for the first case.
+     * attacker and the entropy buys nothing.  Not for a name under
+     * caps-exempt:, whose servers answer a randomised name without knowing
+     * it for theirs.  Not to a server known to drop randomised names.  And
+     * not, once, to a server that has timed out without ever answering one
+     * -- that is the test for the last case.  An exempt name is neither, so
+     * it teaches the server's infra entry nothing about 0x20.
      */
-    if (c->use_0x20 && !q->over_tcp && !(inf->flags & ELPIS_INF_NO_0X20)) {
+    if (c->use_0x20 && !q->over_tcp && !(inf->flags & ELPIS_INF_NO_0X20) &&
+        !elpis_conf_caps_exempt(c, &t->qname)) {
         if ((inf->flags & ELPIS_INF_0X20_OK) || inf->timeouts == 0) {
             apply_0x20(q->qname_wire, q->qnamelen);
             q->used_0x20 = 1;

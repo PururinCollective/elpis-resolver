@@ -31,8 +31,14 @@
 
 #include "vectors.h"
 
+#include "elpis/sock.h"
+
 #include <stdio.h>
 #include <unistd.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 static int g_pass, g_fail;
 
@@ -3783,6 +3789,132 @@ static void test_ecs(void)
 }
 
 /* ================================================================== */
+/*
+ * caps-exempt: a name under a listed zone goes out exactly as asked, 0x20 or
+ * not.  dnsprobe.online, behind publicdns.info's DNS leak test, answers a
+ * case-randomised name but records only the lowercase spelling, so through
+ * Elpis the test never saw a resolver at all.  The query is built and sent
+ * by the real outbound path to a socket on 127.0.0.1 -- loopback, not the
+ * network -- and read back off the wire.
+ */
+static void test_caps_exempt(void)
+{
+    /* 39 letters each: the control comes out all lowercase once in 2^39. */
+    static const char *const names[2] = {
+        "abcdefghijklmnopqrstuvwxyz.dnsprobe.online.",
+        "abcdefghijklmnopqrstuvwxyz.example.online.",
+    };
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_conf_t c;
+    elpis_name_t n;
+    elpis_addr_t srv;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    char line[128];
+    unsigned i;
+    int lfd = -1;
+
+    section("caps-exempt");
+
+    elpis_conf_defaults(&c);
+    CHECK(c.use_0x20 && c.ncaps_exempt == 0,
+          "0x20 on and nothing exempt by default");
+    elpis_name_from_text(&n, names[0]);
+    CHECK(!elpis_conf_caps_exempt(&c, &n), "so every name is randomised");
+    elpis_strlcpy(line, "caps-exempt: DNSprobe.Online", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.ncaps_exempt == 1, "caps-exempt parses");
+    CHECK(elpis_conf_caps_exempt(&c, &n), "then a name below it is exempt");
+    elpis_name_from_text(&n, "DNSPROBE.online.");
+    CHECK(elpis_conf_caps_exempt(&c, &n), "and the zone itself, in any case");
+    elpis_name_from_text(&n, "notdnsprobe.online.");
+    CHECK(!elpis_conf_caps_exempt(&c, &n), "on a label boundary");
+    elpis_strlcpy(line, "caps-exempt: dnsprobe..online", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK &&
+          c.ncaps_exempt == 1, "a bad name is an error");
+
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 16;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    elpis_strlcpy(line, "caps-exempt: dnsprobe.online", sizeof line);
+    elpis_conf_parse_line(&ctx->conf, line, "-", 1);
+    ctx->infra = elpis_infra_new(1u << 20, 2);
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);      /* never run: nothing is answered */
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    if (ctx->infra == NULL || w->loop == NULL || w->txbuf == NULL ||
+        elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "a socket on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+    elpis_addr_parse(&srv, "127.0.0.1", ntohs(sin.sin_port));
+
+    for (i = 0; i < 2; i++) {
+        elpis_task_t *t = elpis_task_new(w);
+        uint8_t pkt[512];
+        struct pollfd pfd;
+        ssize_t got = -1;
+        size_t j, upper = 0, differ = 0;
+
+        if (t == NULL)
+            break;
+        elpis_name_from_text(&t->qname, names[i]);
+        t->qtype = ELPIS_T_A;
+        n = t->qname;
+        if (elpis_out_send(t, &srv, 0) == ELPIS_OK) {
+            pfd.fd = lfd;
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 2000) == 1)
+                got = recv(lfd, pkt, sizeof pkt, 0);
+        }
+        elpis_task_free(t);
+        if (got < (ssize_t)(12u + n.len)) {
+            CHECK(0, "%s: the query arrives", names[i]);
+            continue;
+        }
+        for (j = 0; j < n.len; j++) {
+            uint8_t ch = pkt[12 + j];
+            if (ch >= 'A' && ch <= 'Z') {
+                upper++;
+                ch = (uint8_t)(ch | 0x20u);
+            }
+            if (ch != n.d[j])
+                differ++;
+        }
+        if (i == 0)
+            CHECK(differ == 0 && upper == 0,
+                  "a name under caps-exempt goes out in lowercase, as asked");
+        else
+            CHECK(differ == 0 && upper > 0,
+                  "any other name is still randomised (%zu capitals)", upper);
+    }
+
+out:
+    if (lfd >= 0)
+        close(lfd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->txbuf);
+    }
+    if (ctx != NULL)
+        elpis_cache_free(ctx->infra);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -3822,6 +3954,7 @@ int main(void)
     test_quirks();
     test_localzone();
     test_ecs();
+    test_caps_exempt();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

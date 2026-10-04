@@ -325,6 +325,33 @@ The reply should carry `"edns0-client-subnet 175.139.1.0/24"`. With `this`, it
 shows this resolver's own subnet; with `none`, `"edns0-client-subnet was not
 used"`.
 
+## Names asked without case randomisation
+
+```
+use-0x20: yes
+caps-exempt: dnsprobe.online    # repeatable
+```
+
+With `use-0x20` on, Elpis randomises the case of every name it sends upstream
+over UDP (`wWw.ExAmPlE.cOm`). The authority answers with the name exactly as
+it was sent, so an attacker forging a reply has to guess the case pattern as
+well. DNS names are case-insensitive, so the answer is the same.
+
+A server that drops randomised names is caught automatically: it is asked once
+in lowercase, and if that is answered, it is remembered and the log says so.
+That does not work for a server that answers a randomised name correctly but
+does something else with it. `dnsprobe.online`, which runs the DNS leak test at
+publicdns.info, records which resolver asked for each test name, but only if
+the name arrives in lowercase. Through Elpis the test never sees a resolver at
+all. The same happens with Google Public DNS, which randomises too. Nothing in
+the answers shows this, so the zone has to be named.
+
+`caps-exempt` names a zone whose names always go out as asked. It is matched
+against the name being sent, so it covers the zone and every name below it,
+whichever server is asked. Up to 32 entries. The shipped config lists `dnsprobe.online`. The
+name is Unbound's, and Elpis also accepts Unbound's `use-caps-for-id` for
+`use-0x20`.
+
 ## Zones whose servers misbehave
 
 ```
