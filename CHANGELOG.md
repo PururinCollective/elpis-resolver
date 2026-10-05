@@ -14,7 +14,16 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.1 "Lettersong" — 2026-10-05
+
+Starting at boot in an LXC container or a VM, before the network has
+finished coming up. A listen address that was not there yet stopped Elpis
+until someone restarted it, and an `outgoing-interface:` address that was
+not there yet was given up on, which could leave it asking nothing over IPv6
+until a restart. Both are now waited for, with a warning at startup naming
+any address that is not up yet.
+
+No config that worked stops working.
 
 ### Fixed
 
