@@ -75,6 +75,8 @@ int  elpis_addr_parse(elpis_addr_t *a, const char *s, uint16_t defport);
 int  elpis_addr_from4(elpis_addr_t *a, const uint8_t ip[4], uint16_t port);
 int  elpis_addr_from6(elpis_addr_t *a, const uint8_t ip[16], uint16_t port);
 const char *elpis_addr_str(const elpis_addr_t *a, char *buf, size_t sz);
+/* The address alone, no port or brackets: for outgoing-interface, which has none. */
+const char *elpis_addr_host_str(const elpis_addr_t *a, char *buf, size_t sz);
 int  elpis_addr_eq(const elpis_addr_t *a, const elpis_addr_t *b);
 int  elpis_addr_eq_ip(const elpis_addr_t *a, const elpis_addr_t *b);
 uint16_t elpis_addr_port(const elpis_addr_t *a);

@@ -380,6 +380,12 @@ struct elpis_worker {
     elpis_osock_t   osock[ELPIS_MAX_OSOCK];
     unsigned        n_osock;
     unsigned        osock_rr;
+    /* Pool slots waiting for their outgoing-interface address to come up;
+     * see elpis_out_refill(). */
+    uint8_t         osock_missing[ELPIS_MAX_OSOCK];
+    unsigned        n_osock_missing;
+    unsigned        osock_backoff;      /* seconds until the next try */
+    uint64_t        osock_retry_ms;
 
     elpis_outq_t   *outhash[ELPIS_OUT_HASH];
     unsigned        n_out;
@@ -451,6 +457,9 @@ elpis_task_t *elpis_task_child(elpis_task_t *parent, const elpis_name_t *qname,
 
 /* ---- outbound (outbound.c) ---- */
 int  elpis_out_init(elpis_worker_t *w);
+/* From the maintenance tick: open pool sockets whose outgoing-interface
+ * address was not up when elpis_out_init() ran. */
+void elpis_out_refill(elpis_worker_t *w);
 void elpis_out_fini(elpis_worker_t *w);
 int  elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp);
 /* Ask the question just sent by elpis_out_send() of a second server too; the

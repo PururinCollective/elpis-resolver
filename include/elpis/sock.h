@@ -34,7 +34,10 @@ void elpis_sock_freebind(int fd, int family);
  */
 int elpis_sock_addr_usable(const elpis_addr_t *a);
 
-/* Outbound UDP socket bound to a random high port on `family`. */
+/*
+ * Outbound UDP socket bound to a random high port on `family`.  On failure
+ * errno says why; EADDRNOTAVAIL means `src_hint` is not on this host yet.
+ */
 int elpis_sock_udp_client(int family, const elpis_addr_t *src_hint,
                           uint16_t lo, uint16_t hi, int *fd_out);
 /* Outbound TCP, non-blocking connect. */

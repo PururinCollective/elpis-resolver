@@ -287,7 +287,12 @@ int elpis_sock_udp_client(int family, const elpis_addr_t *src_hint,
         if (errno != EADDRINUSE && errno != EACCES)
             break;
     }
-    close(fd);
+    {
+        /* The caller reads errno: EADDRNOTAVAIL means the source is not up yet. */
+        int e = errno;
+        close(fd);
+        errno = e;
+    }
     return ELPIS_ERR;
 }
 

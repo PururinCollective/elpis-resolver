@@ -286,6 +286,23 @@ They're used round-robin across the outbound socket pool.
 <sub>An off-path attacker forging a reply then has to guess the source address
 as well as the port and the message ID.</sub>
 
+An address that isn't up yet when Elpis starts, which is normal at boot, is
+tried again until it is, and queries start leaving from it then:
+
+```
+WARN  outgoing-interface 2402:4e20:bab1::1001: this host does not have that
+      address yet; upstream queries start leaving from it as soon as it comes
+      up (if it never does, check the address)
+INFO  outgoing-interface 2402:4e20:bab1::1001 is up; upstream queries leave
+      from it now
+```
+
+<sub>Tried after 1 s, 2, 4 and 8, then every 10 s. Earlier builds gave up on it
+at startup: an IPv4 address made Elpis exit, and an IPv6 one quietly left it
+asking nothing over IPv6 until a restart. These sockets don't use
+`IP_FREEBIND` the way listeners do, because on Linux an IPv6 socket with it
+sends from an address the host doesn't have.</sub>
+
 ## 📍 EDNS Client Subnet
 
 ```

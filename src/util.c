@@ -1004,6 +1004,22 @@ const char *elpis_addr_str(const elpis_addr_t *a, char *buf, size_t sz)
     return buf;
 }
 
+const char *elpis_addr_host_str(const elpis_addr_t *a, char *buf, size_t sz)
+{
+    uint8_t raw[16];
+
+    if (a != NULL && a->u.sa.sa_family == AF_INET) {
+        memcpy(raw, &a->u.v4.sin_addr, 4);
+        if (elpis_ntop4(raw, buf, sz) == 0)
+            return buf;
+    } else if (a != NULL && a->u.sa.sa_family == AF_INET6) {
+        memcpy(raw, &a->u.v6.sin6_addr, 16);
+        if (elpis_ntop6(raw, buf, sz) == 0)
+            return buf;
+    }
+    return elpis_addr_str(a, buf, sz);
+}
+
 int elpis_addr_family(const elpis_addr_t *a)
 {
     return a->u.sa.sa_family;

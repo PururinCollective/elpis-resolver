@@ -33,6 +33,57 @@ ELPIS_INLINE unsigned out_slot(uint16_t id, int sockidx)
 /* Socket pool                                                         */
 /* ------------------------------------------------------------------ */
 
+/* Pool slot i: families alternate, so both are always available. */
+static int slot_family(const elpis_conf_t *c, unsigned i)
+{
+    if (c->do_ipv4 && c->do_ipv6)
+        return (i % 2u == 0) ? AF_INET : AF_INET6;
+    return c->do_ipv6 ? AF_INET6 : AF_INET;
+}
+
+/* The outgoing-interface address slot i leaves from, or NULL for any. */
+static const elpis_addr_t *slot_src(const elpis_conf_t *c, int family,
+                                    unsigned i)
+{
+    if (family == AF_INET)
+        return c->have_src4 ? &c->out_src4[i % c->have_src4] : NULL;
+    return c->have_src6 ? &c->out_src6[i % c->have_src6] : NULL;
+}
+
+#define SLOT_ABSENT 1                  /* its source address is not here yet */
+
+/*
+ * Open pool slot i.  SLOT_ABSENT when its outgoing-interface address is not
+ * on this host yet, or is still tentative; ELPIS_ERR for anything else.
+ */
+static int slot_open(elpis_worker_t *w, unsigned i)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+    int family = slot_family(c, i);
+    const elpis_addr_t *src = slot_src(c, family, i);
+    elpis_osock_t *s;
+    int fd;
+
+    if (w->n_osock >= ELPIS_MAX_OSOCK)
+        return ELPIS_ERR;
+    if (elpis_sock_udp_client(family, src, c->port_lo, c->port_hi,
+                              &fd) != ELPIS_OK)
+        return (src != NULL && errno == EADDRNOTAVAIL) ? SLOT_ABSENT
+                                                       : ELPIS_ERR;
+    s = &w->osock[w->n_osock];
+    memset(s, 0, sizeof *s);
+    s->fd     = fd;
+    s->family = family;
+    s->w      = w;
+    if (elpis_loop_add(w->loop, &s->ev, fd, ELPIS_EV_READ,
+                       out_udp_event, s) != ELPIS_OK) {
+        close(fd);
+        return ELPIS_ERR;
+    }
+    w->n_osock++;
+    return ELPIS_OK;
+}
+
 int elpis_out_init(elpis_worker_t *w)
 {
     const elpis_conf_t *c = &w->ctx->conf;
@@ -43,50 +94,83 @@ int elpis_out_init(elpis_worker_t *w)
         want = ELPIS_MAX_OSOCK;
 
     for (i = 0; i < want; i++) {
-        int family;
-        int fd;
-        elpis_osock_t *s;
+        int rc = slot_open(w, i);
 
-        /* Alternate families so both are always available. */
-        if (c->do_ipv4 && c->do_ipv6)
-            family = (i % 2u == 0) ? AF_INET : AF_INET6;
-        else if (c->do_ipv6)
-            family = AF_INET6;
-        else
-            family = AF_INET;
-
-        if (elpis_sock_udp_client(family,
-                                  family == AF_INET
-                                      ? (c->have_src4
-                                         ? &c->out_src4[i % c->have_src4] : NULL)
-                                      : (c->have_src6
-                                         ? &c->out_src6[i % c->have_src6] : NULL),
-                                  c->port_lo, c->port_hi, &fd) != ELPIS_OK) {
-            if (family == AF_INET6) {
+        if (rc == SLOT_ABSENT) {
+            /*
+             * An outgoing-interface address that is not up yet, which is
+             * normal at boot.  This used to lose the slot for good: an IPv6
+             * one quietly, so the worker asked nothing over IPv6 until a
+             * restart, and an IPv4 one by failing the worker, so elpis
+             * exited.  Keep it for elpis_out_refill() instead.
+             */
+            w->osock_missing[w->n_osock_missing++] = (uint8_t)i;
+            continue;
+        }
+        if (rc != ELPIS_OK) {
+            if (slot_family(c, i) == AF_INET6) {
                 /* No IPv6 on this host: stop asking for it. */
                 continue;
             }
             break;
         }
-        s = &w->osock[w->n_osock];
-        memset(s, 0, sizeof *s);
-        s->fd     = fd;
-        s->family = family;
-        s->w      = w;
-        if (elpis_loop_add(w->loop, &s->ev, fd, ELPIS_EV_READ,
-                           out_udp_event, s) != ELPIS_OK) {
-            close(fd);
-            break;
-        }
-        w->n_osock++;
     }
 
-    if (w->n_osock == 0) {
+    if (w->n_osock == 0 && w->n_osock_missing == 0) {
         elpis_error("worker %u: no outbound sockets could be created", w->index);
         return ELPIS_ERR;
     }
-    elpis_debug("worker %u: %u outbound sockets", w->index, w->n_osock);
+    w->osock_backoff  = 1;
+    w->osock_retry_ms = elpis_now_ms() + 1000u;
+    elpis_debug("worker %u: %u outbound sockets, %u waiting for their address",
+                w->index, w->n_osock, w->n_osock_missing);
     return ELPIS_OK;
+}
+
+/*
+ * Open the slots elpis_out_init() kept for an address that was not up yet.
+ * Called every second from the maintenance tick; tries after 1 s, then 2, 4
+ * and 8, then every 10 s until all are open.  A typo in outgoing-interface
+ * therefore costs one bind() per slot every 10 s, and startup has said so.
+ */
+void elpis_out_refill(elpis_worker_t *w)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+    const elpis_addr_t *told[2 * ELPIS_MAX_OUT_SRC];
+    unsigned i, keep = 0, ntold = 0;
+    uint64_t now;
+
+    if (w->n_osock_missing == 0)
+        return;
+    now = elpis_now_ms();
+    if (now < w->osock_retry_ms)
+        return;
+
+    for (i = 0; i < w->n_osock_missing; i++) {
+        unsigned slot = w->osock_missing[i];
+        const elpis_addr_t *src = slot_src(c, slot_family(c, slot), slot);
+        unsigned k;
+
+        if (slot_open(w, slot) != ELPIS_OK) {
+            w->osock_missing[keep++] = (uint8_t)slot;
+            continue;
+        }
+        /* Once per address, from one worker: they all get there together. */
+        if (w->index != 0)
+            continue;
+        for (k = 0; k < ntold && told[k] != src; k++)
+            ;
+        if (k == ntold && ntold < sizeof told / sizeof told[0]) {
+            char ab[80];
+            told[ntold++] = src;
+            elpis_info("outgoing-interface %s is up; upstream queries leave "
+                       "from it now", elpis_addr_host_str(src, ab, sizeof ab));
+        }
+    }
+    w->n_osock_missing = keep;
+
+    w->osock_backoff = w->osock_backoff * 2u > 10u ? 10u : w->osock_backoff * 2u;
+    w->osock_retry_ms = now + (uint64_t)w->osock_backoff * 1000u;
 }
 
 void elpis_out_fini(elpis_worker_t *w)
@@ -112,6 +196,7 @@ void elpis_out_fini(elpis_worker_t *w)
         close(w->osock[i].fd);
     }
     w->n_osock = 0;
+    w->n_osock_missing = 0;
 }
 
 static int pick_socket(elpis_worker_t *w, int family)

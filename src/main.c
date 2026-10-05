@@ -490,6 +490,7 @@ static void maint_tick(elpis_loop_t *lp, elpis_timer_t *tm)
     elpis_cache_expire(ctx->infra, now, 128);
 
     maybe_trim_heap(w);
+    elpis_out_refill(w);
 
     if (ctx->shutdown) {
         elpis_loop_stop(lp);
@@ -819,10 +820,11 @@ static void warn_redundant_listeners(const elpis_conf_t *c)
 
 /*
  * A listen address the host does not have yet still binds (see
- * elpis_sock_freebind), which is right at boot and wrong for a typo.  Both
- * look the same from here, so say it once and let the operator tell which.
+ * elpis_sock_freebind), and an outgoing-interface address waits for it (see
+ * elpis_out_refill).  That is right at boot and wrong for a typo.  Both look
+ * the same from here, so say it once and let the operator tell which.
  */
-static void warn_absent_listeners(const elpis_conf_t *c)
+static void warn_absent_addresses(const elpis_conf_t *c)
 {
     char buf[80];
     unsigned i;
@@ -840,6 +842,18 @@ static void warn_absent_listeners(const elpis_conf_t *c)
                    "yet; bound anyway, and the status page appears as soon "
                    "as the address comes up",
                    elpis_addr_str(&c->web_listen, buf, sizeof buf));
+
+    for (i = 0; i < (unsigned)c->have_src4 + c->have_src6; i++) {
+        int v6 = i >= c->have_src4;
+        const elpis_addr_t *a = v6 ? &c->out_src6[i - c->have_src4]
+                                   : &c->out_src4[i];
+        if ((v6 ? !c->do_ipv6 : !c->do_ipv4) || elpis_sock_addr_usable(a))
+            continue;
+        elpis_warn("outgoing-interface %s: this host does not have that "
+                   "address yet; upstream queries start leaving from it as "
+                   "soon as it comes up (if it never does, check the address)",
+                   elpis_addr_host_str(a, buf, sizeof buf));
+    }
 }
 
 static int resolve_port_conflicts(elpis_conf_t *c)
@@ -1188,7 +1202,7 @@ int main(int argc, char **argv)
     if (resolve_port_conflicts(&ctx.conf) != ELPIS_OK)
         return 1;
     warn_redundant_listeners(&ctx.conf);
-    warn_absent_listeners(&ctx.conf);
+    warn_absent_addresses(&ctx.conf);
 
     /*
      * Running as root with nowhere to drop to is a choice, not a mistake, but

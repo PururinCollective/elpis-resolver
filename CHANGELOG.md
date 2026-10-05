@@ -31,6 +31,17 @@ any address that is not there yet, so a typo still shows. Outbound sockets
 are not changed: an IPv6 socket with that option would send from an address
 the host does not have.
 
+**An `outgoing-interface:` address that is not up yet is waited for.** The
+same boot race on the outbound side. Elpis gave up on the address at
+startup: an IPv6 one quietly, so it asked nothing over IPv6 until a restart,
+and an IPv4 one by exiting. In a container whose IPv6 address was still
+tentative, IPv4 worked and IPv6 was simply gone. Now the sockets for it are
+tried again after 1 s, 2, 4 and 8, then every 10 s, with a warning at
+startup and a line in the log when the address comes up. Tested with a veth
+pair in a network namespace, with duplicate address detection running: the
+IPv4 sockets opened 2 s after start and the IPv6 ones 2 s later, and an
+upstream saw queries from both addresses.
+
 ## 2.4.0 "Intrinsic Future" — 2026-10-05
 
 DNS over TLS to authoritative servers. With `authoritative-dot:
