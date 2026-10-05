@@ -67,14 +67,14 @@ The About window carries the version, the release name, and the commit `make`
 built from:
 
 ```
-version   2.4.1
+version   2.4.2
 release   Lettersong
-build     v2.4.1
+build     v2.4.2
 ```
 
 | Built from | build reads |
 |---|---|
-| a release tag | `v2.4.1` |
+| a release tag | `v2.4.2` |
 | any other commit | branch and commit, `main@bcc97d252fac` |
 | a tarball, no git | *not a git checkout* |
 

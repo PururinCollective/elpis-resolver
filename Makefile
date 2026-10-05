@@ -27,7 +27,7 @@ BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
 BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
-VERSION   := 2.4.1
+VERSION   := 2.4.2
 # Each release has a name as well, from 2.4.0 on: shown beside the version by
 # `elpis -V`, at startup, in the status page's About window and in the
 # identity probe (codename=).  Spaces are fine; they are escaped below.

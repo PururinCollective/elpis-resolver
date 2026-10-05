@@ -18,6 +18,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.3.0 | 2026-10-03 | post-quantum downgrade protection, RFC 8509 root key sentinels |
 | 2.4.0 "Intrinsic Future" | 2026-10-05 | opportunistic DoT to authoritative servers (RFC 9539) with an in-tree TLS 1.3 client; `caps-exempt:`; release names begin |
 | 2.4.1 "Lettersong" | 2026-10-05 | starting at boot (LXC, VM) before the addresses are up: listeners bind anyway, `outgoing-interface` sockets wait and retry |
+| 2.4.2 "Lettersong" | 2026-10-05 | the shipped unit drops `Conflicts=systemd-resolved`, which silently cancelled Elpis at boot; Elpis names resolved's stub when it holds the port |
 
 ## 🧭 Decisions, and why
 

@@ -14,7 +14,18 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.2 "Lettersong" — 2026-10-05
+
+Elpis comes up after a reboot under the shipped systemd unit. The unit could
+lose a silent race with systemd-resolved at boot and leave Elpis not
+running, with nothing in its log; 2.4.1's fixes for addresses not up yet
+never got the chance to run. The unit no longer touches resolved, and Elpis
+says plainly when resolved is in the way. Same name as 2.4.1: it finishes
+what that release set out to fix.
+
+No `elpis.conf` that worked stops working. If you install the new systemd
+unit on a host where systemd-resolved still holds port 53, Elpis will refuse
+to start until you free it: see below.
 
 ### Fixed
 
