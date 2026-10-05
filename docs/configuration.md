@@ -164,6 +164,27 @@ INFO    bound tcp [::]:53
 INFO  listening with 8 workers
 ```
 
+### Listening on one address
+
+A specific address doesn't have to be up when Elpis starts. That's normal at
+boot in a container or a VM: DHCP can finish after the service starts, and a
+new IPv6 address is unusable for a second or two while duplicate address
+detection runs. Elpis binds it anyway and answers as soon as it arrives:
+
+```
+WARN  listen 192.168.1.5:53: this host does not have that address yet; bound
+      anyway, and it answers as soon as the address comes up (if it never
+      does, check the address)
+```
+
+If it never comes up, check the address for a typo. `webgui-listen` works the
+same way.
+
+<sub>This is `IP_FREEBIND` on Linux (`IP_BINDANY` on FreeBSD, which needs
+root), the same thing unbound's `ip-freebind` does. Earlier builds failed here
+with "Cannot assign requested address" and exited, and needed a restart once
+the machine was up.</sub>
+
 ## 🪪 Asking a resolver what it is
 
 Every Elpis answers one TXT name about itself, so you can identify it without
@@ -175,8 +196,8 @@ dig +short TXT elpis.sakurako.oomuro @127.0.0.1     # the same
 ```
 
 ```
-elpis.sakurako.oomuro   text = "elpis=2.4.0" "codename=Intrinsic Future"
-                               "edition=community" "build=v2.4.0"
+elpis.sakurako.oomuro   text = "elpis=2.4.1" "codename=Lettersong"
+                               "edition=community" "build=v2.4.1"
                                "uptime=3601" "workers=8" "simd=avx2"
                                "dnssec=validating"
 ```
@@ -264,6 +285,23 @@ They're used round-robin across the outbound socket pool.
 
 <sub>An off-path attacker forging a reply then has to guess the source address
 as well as the port and the message ID.</sub>
+
+An address that isn't up yet when Elpis starts, which is normal at boot, is
+tried again until it is, and queries start leaving from it then:
+
+```
+WARN  outgoing-interface 2402:4e20:bab1::1001: this host does not have that
+      address yet; upstream queries start leaving from it as soon as it comes
+      up (if it never does, check the address)
+INFO  outgoing-interface 2402:4e20:bab1::1001 is up; upstream queries leave
+      from it now
+```
+
+<sub>Tried after 1 s, 2, 4 and 8, then every 10 s. Earlier builds gave up on it
+at startup: an IPv4 address made Elpis exit, and an IPv6 one quietly left it
+asking nothing over IPv6 until a restart. These sockets don't use
+`IP_FREEBIND` the way listeners do, because on Linux an IPv6 socket with it
+sends from an address the host doesn't have.</sub>
 
 ## 📍 EDNS Client Subnet
 

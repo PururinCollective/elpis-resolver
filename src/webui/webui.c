@@ -18,6 +18,7 @@
 #include "elpis/infra.h"
 #include "elpis/deleg.h"
 #include "elpis/licence.h"
+#include "elpis/sock.h"
 #include "webui_assets.h"
 
 #include <errno.h>
@@ -1299,6 +1300,11 @@ static int listen_on(const elpis_addr_t *a)
     fd = socket(a->u.sa.sa_family, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+    /*
+     * A webgui-listen address that was not up yet at boot used to leave the
+     * resolver running and the status page missing until a restart.
+     */
+    elpis_sock_freebind(fd, a->u.sa.sa_family);
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
 #if defined(IPV6_V6ONLY)
     if (a->u.sa.sa_family == AF_INET6)

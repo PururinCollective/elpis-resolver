@@ -14,6 +14,43 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 2.4.1 "Lettersong" — 2026-10-05
+
+Starting at boot in an LXC container or a VM, before the network has
+finished coming up. A listen address that was not there yet stopped Elpis
+until someone restarted it, and an `outgoing-interface:` address that was
+not there yet was given up on, which could leave it asking nothing over IPv6
+until a restart. Both are now waited for, with a warning at startup naming
+any address that is not up yet.
+
+No config that worked stops working.
+
+### Fixed
+
+**A listen address that is not up yet no longer stops Elpis at boot.** In an
+LXC container or a VM, Elpis can start before its LAN or IPv6 address is
+there: DHCP finishes later, and a new IPv6 address stays tentative for a
+second or two while duplicate address detection runs. A `listen:` line on
+that address failed with "Cannot assign requested address", Elpis exited,
+and it needed a restart once the machine was up. A `webgui-listen:` address
+failed the same way, which left the resolver running and the status page
+missing. Listeners now bind with `IP_FREEBIND`, as unbound's `ip-freebind`
+does, and answer as soon as the address comes up. A warning at startup names
+any address that is not there yet, so a typo still shows. Outbound sockets
+are not changed: an IPv6 socket with that option would send from an address
+the host does not have.
+
+**An `outgoing-interface:` address that is not up yet is waited for.** The
+same boot race on the outbound side. Elpis gave up on the address at
+startup: an IPv6 one quietly, so it asked nothing over IPv6 until a restart,
+and an IPv4 one by exiting. In a container whose IPv6 address was still
+tentative, IPv4 worked and IPv6 was simply gone. Now the sockets for it are
+tried again after 1 s, 2, 4 and 8, then every 10 s, with a warning at
+startup and a line in the log when the address comes up. Tested with a veth
+pair in a network namespace, with duplicate address detection running: the
+IPv4 sockets opened 2 s after start and the IPv6 ones 2 s later, and an
+upstream saw queries from both addresses.
+
 ## 2.4.0 "Intrinsic Future" — 2026-10-05
 
 DNS over TLS to authoritative servers. With `authoritative-dot:

@@ -17,6 +17,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.2.1 | 2026-10-02 | DNSKEY/DS with TTL 0 validate; a proof too big for UDP is truncated |
 | 2.3.0 | 2026-10-03 | post-quantum downgrade protection, RFC 8509 root key sentinels |
 | 2.4.0 "Intrinsic Future" | 2026-10-05 | opportunistic DoT to authoritative servers (RFC 9539) with an in-tree TLS 1.3 client; `caps-exempt:`; release names begin |
+| 2.4.1 "Lettersong" | 2026-10-05 | starting at boot (LXC, VM) before the addresses are up: listeners bind anyway, `outgoing-interface` sockets wait and retry |
 
 ## 🧭 Decisions, and why
 
@@ -37,6 +38,14 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | TLS 1.3 only, X25519 only, no SNI, ALPN `dot`, padding to 128 | What DoT servers actually run; SNI would send the name in the clear. A server without X25519 alerts 40 ("no X25519"), not HRR. |
 | Suite order by hardware: AES-GCM first with AES-NI, ChaCha20 first otherwise | Fastest on each CPU. |
 | No DoQ | A QUIC stack is several times the rest of the crypto, and few servers offer it. |
+
+### Addresses not up yet at boot (2.4.1)
+
+| decision | why |
+|---|---|
+| `IP_FREEBIND` on listeners, **not** on outbound sockets | Tested: on Linux an IPv6 socket with it, bound to an address the host doesn't have, sends from it (IPv4 gets `ENETUNREACH`). A listener only replies to queries that reached its address. |
+| Outbound slots kept and retried (1, 2, 4, 8 s, then every 10 s); an absent IPv4 source no longer exits | The same "start, warn, catch up" as listeners. Before, IPv6 slots vanished silently until a restart. |
+| "Not here yet" is a throwaway `bind()` to port 0, not `getifaddrs()` | The shipped unit's `RestrictAddressFamilies=AF_INET AF_INET6` refuses the netlink socket `getifaddrs()` needs, so it always fails under systemd. |
 
 ### Older ones
 
@@ -73,6 +82,11 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   state needs keeping.
 - **The status API wants a session**: `POST /api/login` then `GET /api/status`.
 - **`webui_assets.h` is generated.** Edit `web/index.html` and run `make`.
+- **No sudo, but `unshare -rn sh script.sh` works**: root inside a private
+  network namespace, so `ip addr add`, veth pairs and port 53 all work. That
+  is how the boot race was reproduced: start Elpis, then add the address. Use
+  a **veth pair** for IPv6: a dummy link is NOARP and skips duplicate address
+  detection, so its addresses are never `tentative`.
 
 ## 📌 Open items
 
@@ -83,3 +97,4 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | DoT session resumption | not done; each handshake is full. |
 | P-256 key share | only if the "no X25519" counter shows real servers need it. |
 | README contact for commercial support | a TODO comment, waiting on the maintainer. |
+| The boot failure the maintainer saw | 2.4.1 fixes addresses not up yet, but under the shipped unit `Restart=on-failure` should already have recovered a failed DNS bind. Another suspect: something starting systemd-resolved after boot (D-Bus or varlink activation), which `Conflicts=` turns into a stop of elpis. Waiting on `journalctl -b -u elpis` from a bad boot. |

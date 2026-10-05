@@ -1405,6 +1405,70 @@ static void test_dns64(void)
 }
 
 /* ================================================================== */
+
+/* net.ipv{4,6}.ip_nonlocal_bind: when set, every address binds anyway. */
+static int nonlocal_bind_allowed(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    int v = 0;
+    if (fp == NULL)
+        return 0;
+    if (fscanf(fp, "%d", &v) != 1)
+        v = 0;
+    fclose(fp);
+    return v != 0;
+}
+
+static void test_listen_absent(void)
+{
+    static const struct { const char *addr; const char *nonlocal; } tv[] = {
+        { "192.0.2.1@5397",     "/proc/sys/net/ipv4/ip_nonlocal_bind" },
+        { "[2001:db8::1]@5397", "/proc/sys/net/ipv6/ip_nonlocal_bind" },
+    };
+    elpis_addr_t a;
+    unsigned i;
+
+    section("listening on an address that is not up yet");
+
+    elpis_addr_parse(&a, "127.0.0.1@5397", 53);
+    CHECK(elpis_sock_addr_usable(&a), "127.0.0.1 is usable");
+    elpis_addr_parse(&a, "0.0.0.0@5397", 53);
+    CHECK(elpis_sock_addr_usable(&a), "the IPv4 wildcard is usable");
+
+    /*
+     * At boot a DHCP or IPv6 address can come up after elpis starts.  A plain
+     * bind() then failed with EADDRNOTAVAIL, and the resolver stayed down
+     * until a restart.  These are documentation addresses no test host has.
+     */
+    for (i = 0; i < sizeof tv / sizeof tv[0]; i++) {
+        int fd = -1, probe;
+
+        elpis_addr_parse(&a, tv[i].addr, 53);
+        probe = socket(elpis_addr_family(&a), SOCK_DGRAM, 0);
+        if (probe < 0)
+            continue;                  /* no IPv6 on this host */
+        close(probe);
+
+        if (!nonlocal_bind_allowed(tv[i].nonlocal))
+            CHECK(!elpis_sock_addr_usable(&a), "%s is reported as not here",
+                  tv[i].addr);
+#if defined(__linux__)
+        CHECK(elpis_sock_udp_listen(&a, 1, &fd) == ELPIS_OK,
+              "udp listener binds %s anyway", tv[i].addr);
+        if (fd >= 0)
+            close(fd);
+        fd = -1;
+        CHECK(elpis_sock_tcp_listen(&a, 1, 16, &fd) == ELPIS_OK,
+              "tcp listener binds %s anyway", tv[i].addr);
+        if (fd >= 0)
+            close(fd);
+#else
+        (void)fd;
+#endif
+    }
+}
+
+/* ================================================================== */
 static void test_conflict(void)
 {
     elpis_addr_t addr, want;
@@ -3939,6 +4003,110 @@ out:
 }
 
 /* ================================================================== */
+static unsigned pool_count(const elpis_worker_t *w, int family)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < w->n_osock; i++)
+        n += w->osock[i].family == family;
+    return n;
+}
+
+static void test_pool_refill(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_addr_t up;
+    char line[96];
+    int have_v6 = 0;
+
+    section("outbound sockets whose outgoing-interface is not up yet");
+
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    {
+        int probe = socket(AF_INET6, SOCK_DGRAM, 0);
+        if (probe >= 0) {
+            elpis_addr_parse(&up, "::1", 0);
+            have_v6 = elpis_sock_addr_usable(&up);
+            close(probe);
+        }
+    }
+
+    /*
+     * IPv4 from 192.0.2.1, which no test host has.  That failed the worker,
+     * and elpis exited.  Now the slots wait for it.
+     */
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 4;
+    elpis_strlcpy(line, "outgoing-interface: 192.0.2.1", sizeof line);
+    elpis_conf_parse_line(&ctx->conf, line, "-", 1);
+    w->ctx  = ctx;
+    w->loop = elpis_loop_new(16);
+    if (w->loop == NULL) {
+        CHECK(0, "a loop");
+        goto out;
+    }
+    CHECK(elpis_out_init(w) == ELPIS_OK, "the worker starts with its IPv4 "
+          "source missing");
+    CHECK(w->n_osock == 0 && w->n_osock_missing == 4,
+          "no sockets yet, 4 waiting (got %u, %u)", w->n_osock,
+          w->n_osock_missing);
+
+    w->osock_retry_ms = elpis_now_ms() + 60000u;
+    elpis_out_refill(w);
+    CHECK(w->n_osock_missing == 4, "no retry before it is due");
+
+    w->osock_retry_ms = 0;
+    elpis_out_refill(w);
+    CHECK(w->n_osock_missing == 4 && w->osock_backoff == 2,
+          "a retry while it is still missing backs off (backoff %u)",
+          w->osock_backoff);
+
+    /* The address comes up: here, by pointing the slots at one that is. */
+    elpis_addr_parse(&ctx->conf.out_src4[0], "127.0.0.1", 0);
+    w->osock_retry_ms = 0;
+    elpis_out_refill(w);
+    CHECK(w->n_osock == 4 && w->n_osock_missing == 0 &&
+          pool_count(w, AF_INET) == 4,
+          "once it is up, all 4 open (got %u open, %u waiting)",
+          w->n_osock, w->n_osock_missing);
+    elpis_out_fini(w);
+
+    /*
+     * Both families, IPv6 from 2001:db8::1.  The IPv6 slots used to be
+     * skipped without a word, and the worker asked nothing over IPv6 until a
+     * restart.
+     */
+    if (!have_v6)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.out_sockets = 4;
+    elpis_strlcpy(line, "outgoing-interface: 2001:db8::1", sizeof line);
+    elpis_conf_parse_line(&ctx->conf, line, "-", 1);
+    CHECK(elpis_out_init(w) == ELPIS_OK &&
+          pool_count(w, AF_INET) == 2 && pool_count(w, AF_INET6) == 0 &&
+          w->n_osock_missing == 2,
+          "IPv4 open, IPv6 waiting (got %u, %u, %u)", pool_count(w, AF_INET),
+          pool_count(w, AF_INET6), w->n_osock_missing);
+    elpis_addr_parse(&ctx->conf.out_src6[0], "::1", 0);
+    w->osock_retry_ms = 0;
+    elpis_out_refill(w);
+    CHECK(pool_count(w, AF_INET6) == 2 && w->n_osock_missing == 0,
+          "once it is up, IPv6 opens too (got %u, %u waiting)",
+          pool_count(w, AF_INET6), w->n_osock_missing);
+
+out:
+    if (w != NULL && w->loop != NULL) {
+        elpis_out_fini(w);
+        elpis_loop_free(w->loop);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 /* ================================================================== */
 /*
  * The TLS 1.3 primitives (tlscrypto.h).  The RFC vectors are the RFCs' own;
@@ -5334,6 +5502,7 @@ int main(void)
     test_dnssec();
     test_dns64();
     test_conflict();
+    test_listen_absent();
     test_conf();
     test_licence();
     test_insecure_delegation();
@@ -5346,6 +5515,7 @@ int main(void)
     test_localzone();
     test_ecs();
     test_caps_exempt();
+    test_pool_refill();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
