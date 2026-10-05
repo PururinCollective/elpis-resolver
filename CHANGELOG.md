@@ -14,7 +14,19 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.3 "Resilient Journey" — 2026-10-06
+
+Looking after the host, not just the binary. `contrib/elpis-install.sh` sets
+up and keeps current what `elpis-update.sh` never reached: the `elpis`
+account, the systemd unit, and enabling it, so Elpis starts at boot. With
+`RESOLVED=replace` it also puts Elpis in systemd-resolved's place on
+`127.0.0.53`. Both scripts run in place from the git clone, `/opt/elpis-resolver`
+recommended, and copy nothing out of it but the unit. Tried on a Proxmox LXC
+container: after the script and a reboot, Elpis came up by itself.
+
+No `elpis.conf` that worked stops working. `elpis-update.sh` now runs from
+the clone itself; a copy left in `/usr/local/sbin` by the old instructions
+goes on working as the old version, but nothing needs it.
 
 ### Added
 
