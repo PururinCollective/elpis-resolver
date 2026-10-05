@@ -32,6 +32,9 @@
 #
 #   install -m0644 contrib/elpis.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now elpis
+#
+# contrib/elpis-reinstall.sh does all of this, and keeps it current: run it
+# again whenever elpis-update says contrib/ has changed.
 
 [Unit]
 Description=ELPIS recursive DNS resolver
@@ -45,10 +48,16 @@ Wants=network-online.target
 #   systemctl disable --now systemd-resolved
 #   systemctl mask systemd-resolved          # so nothing starts it again
 #
-# and repoint /etc/resolv.conf, which links to that stub, at elpis -- e.g.
-# "nameserver 127.0.0.1".  Or keep resolved for this host's own lookups with
-# DNSStubListener=no in /etc/systemd/resolved.conf.  On another port, behind
-# AdGuard Home or Pi-hole, none of this applies.
+# and repoint /etc/resolv.conf, which links to that stub, at elpis.  Elpis
+# can take the stub's place itself -- 'listen: 127.0.0.53@53', or the
+# wildcard on port 53 -- and "nameserver 127.0.0.53" then works as before.
+# All three steps at once:
+#
+#   RESOLVED=replace elpis-reinstall
+#
+# Or keep resolved for this host's own lookups with DNSStubListener=no in
+# /etc/systemd/resolved.conf.  On another port, behind AdGuard Home or
+# Pi-hole, none of this applies.
 #
 # This unit used to do it with Conflicts=systemd-resolved.service, and at
 # boot that lost without a word: when anything else asked for resolved while

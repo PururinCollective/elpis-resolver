@@ -129,8 +129,11 @@ sudo cp elpis elpis.conf /opt/elpis-resolver/bin/
 > [!TIP]
 > `sudo make install` puts a source build in the same place. The systemd unit
 > in [contrib/elpis.service](contrib/elpis.service) binds port 53 without
-> running as root. On a host with systemd-resolved, free port 53 first:
-> [here's how](docs/troubleshooting.md#under-the-shipped-systemd-unit).
+> running as root, and
+> [contrib/elpis-reinstall.sh](contrib/elpis-reinstall.sh) installs it, the
+> `elpis` account and the update command. With `RESOLVED=replace` it also puts
+> Elpis on `127.0.0.53` in systemd-resolved's place:
+> [details](docs/configuration.md#taking-systemd-resolveds-place-on-127053).
 
 ## 🔧 Configure
 

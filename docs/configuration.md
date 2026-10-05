@@ -185,6 +185,42 @@ root), the same thing unbound's `ip-freebind` does. Earlier builds failed here
 with "Cannot assign requested address" and exited, and needed a restart once
 the machine was up.</sub>
 
+### Taking systemd-resolved's place on 127.0.0.53
+
+On a host where Elpis is the resolver, it can answer on the address
+systemd-resolved's stub used, so everything that expects `127.0.0.53` keeps
+working:
+
+```
+listen: 127.0.0.53@53      # or 0.0.0.0@53, which covers it
+```
+
+```
+ before:  programs ──► 127.0.0.53 ──► systemd-resolved ──► upstream
+ after:   programs ──► 127.0.0.53 ──► Elpis ──► root, TLDs, authorities
+```
+
+Resolved has to be out of the way first, and `/etc/resolv.conf`, a link into
+`/run/systemd/resolve`, has to become a file of its own, because nothing writes
+there once resolved is gone. One command does both, and installs the unit:
+
+```bash
+sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-reinstall.sh
+```
+
+It masks resolved, keeps the old `resolv.conf` as `/etc/resolv.conf.elpis-bak`,
+and writes:
+
+```
+nameserver 127.0.0.53
+options edns0 trust-ad
+```
+
+<sub>All of `127.0.0.0/8` is local on Linux, so no address needs adding. Replies
+leave from `127.0.0.53` whether Elpis listens there or on the wildcard, as glibc
+expects. `trust-ad` lets programs that ask see Elpis's DNSSEC verdict, as
+resolved's own file did. `DRY_RUN=1` shows what the script would do first.</sub>
+
 ## 🪪 Asking a resolver what it is
 
 Every Elpis answers one TXT name about itself, so you can identify it without

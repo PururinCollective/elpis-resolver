@@ -308,9 +308,23 @@ sudo make uninstall          # removes the binary, keeps your config
 - `make install PREFIX=/usr/local` for another place, `DESTDIR=` for a
   packaging root.
 
-<sub>A systemd unit is in [contrib/elpis.service](../contrib/elpis.service).
-It expects the `/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE`
-rather than running as root.</sub>
+For a checkout at `/opt/elpis-resolver` that runs as a service:
+
+| script | does |
+|---|---|
+| [`contrib/elpis-update.sh`](../contrib/elpis-update.sh) | pull, build, check the config, restart. Says when `contrib/` has changed since it was installed |
+| [`contrib/elpis-reinstall.sh`](../contrib/elpis-reinstall.sh) | everything around the binary: the `elpis` account, the systemd unit, both commands in `/usr/local/sbin`, enabling the service. `RESOLVED=replace` also takes systemd-resolved's place on `127.0.0.53` |
+
+```bash
+sudo bash /opt/elpis-resolver/contrib/elpis-reinstall.sh    # the first time
+sudo elpis-update                                           # from then on
+sudo elpis-reinstall                                        # when it says so
+```
+
+<sub>The unit, [contrib/elpis.service](../contrib/elpis.service), expects the
+`/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE` rather than running as
+root. Both scripts look before they change anything; `DRY_RUN=1 elpis-reinstall`
+shows what it would do.</sub>
 
 ## 🔬 Working on Elpis
 

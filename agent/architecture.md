@@ -84,7 +84,7 @@ Where things live and how one query moves through them.
 | `tests/test_main.c` | every self-test; `vectors.h` (frozen crypto vectors), `rfc8448.h` (TLS trace) |
 | `tests/fuzz_*.c` | libFuzzer: DNS messages, TLS client |
 | `tools/` | `conf-merge.sh` (3-way config merge), `mkassets.py`, `licence.c` (licence tool), `tls-probe.c`, `cputarget.sh` |
-| `contrib/` | systemd unit, `elpis-update.sh` |
+| `contrib/` | systemd unit, `elpis-update.sh` (pull, build, restart), `elpis-reinstall.sh` (account, unit, commands, systemd-resolved, resolv.conf) |
 
 ## 🧱 Key types
 

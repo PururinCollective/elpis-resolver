@@ -65,6 +65,15 @@ fi
 ./bin/elpis -t >/dev/null 2>&1 || die "built binary rejects the config; not restarting"
 new=$(./bin/elpis -V)
 
+# git pull updates contrib/, not the copies of it installed on this host.
+stale=()
+unit_file=/etc/systemd/system/$UNIT.service
+[ ! -f "$unit_file" ] || cmp -s contrib/elpis.service "$unit_file" ||
+    stale+=("$unit_file")
+self=$(readlink -f "$0")
+[ "$self" = "$(readlink -f contrib/elpis-update.sh)" ] ||
+    cmp -s contrib/elpis-update.sh "$self" || stale+=("$self")
+
 say "restarting $UNIT"
 systemctl restart "$UNIT"
 
@@ -80,6 +89,14 @@ fi
 say "running $new"
 say "$(dig +short +tries=1 +timeout=3 TXT elpis.sakurako.oomuro @127.0.0.1 2>/dev/null | head -1 || echo '(probe did not answer)')"
 [ "$was_running" -eq 1 ] || say "note: $UNIT was not running before this"
+if [ "${#stale[@]}" -gt 0 ]; then
+    echo "[!] contrib/ has changed since these were installed: ${stale[*]}"
+    if command -v elpis-reinstall >/dev/null; then
+        echo "[!] run elpis-reinstall to bring them up to date"
+    else
+        echo "[!] run 'bash $SRC/contrib/elpis-reinstall.sh' to bring them up to date"
+    fi
+fi
 if [ -f bin/elpis.conf.shipped.pending ]; then
     echo "[!] new defaults in elpis.conf clash with your edits in bin/elpis.conf;"
     echo "[!] it is unchanged -- see bin/elpis.conf.new to merge them by hand"
