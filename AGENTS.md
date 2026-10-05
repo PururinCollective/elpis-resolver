@@ -12,6 +12,10 @@ project's request. Each section says which.
 
 Build with `make` and test with `make test`.
 
+A map of the code, the conventions, how to check a change, and what earlier
+sessions decided and why are in [`agent/`](agent/README.md). Those notes never
+override this file.
+
 ## Licence and credit: keep them
 
 These are copyright and licence notices. GPL-2.0 requires every copy,
