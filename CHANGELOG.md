@@ -179,7 +179,7 @@ a query carries more than one ECS option, the last one is used. AdGuard Home
 appends the client's subnet to the `0.0.0.0/0` Firefox's DNS over HTTPS sends.
 The first build refused such queries with FORMERR, and Firefox in TRR-only mode
 then could not resolve any name it had not cached. See
-[EDNS Client Subnet](docs/configuration.md#edns-client-subnet).
+[EDNS Client Subnet](docs/configuration.md#-edns-client-subnet).
 
 **`make` merges new shipped defaults into `bin/elpis.conf`.** The config used
 to be seeded once and never touched again, so a setting added in a new release
@@ -216,7 +216,7 @@ counts these answers as **cut short by a hold**, and SIGUSR1 as `held=`. A new
 **Held servers** window lists each server held, the zone, the types it is held
 for, a countdown to its next try, and the client and name whose query set the
 hold off. Set `0` to turn holds off. See
-[a zone whose servers never answer](docs/troubleshooting.md#a-zone-whose-servers-never-answer).
+[a zone whose servers never answer](docs/troubleshooting.md#-a-zone-whose-servers-never-answer).
 
 ### Fixed
 

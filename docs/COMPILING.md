@@ -1,27 +1,24 @@
-# Compiling Elpis
+# 🔨 Compiling Elpis
 
-Everything about building Elpis from source: what you need, the make targets
-and variables, tuning for your CPU, static and cross builds, and the tools for
-working on the code.
+Build it, tune it for your CPU, make one static binary, or cross-compile it.
 
-- [What you need](#what-you-need)
-- [Building](#building)
-- [Make targets](#make-targets)
-- [Build variables](#build-variables)
-- [Tuning for your CPU](#tuning-for-your-cpu)
-- [SIMD kernels](#simd-kernels)
-- [Static builds](#static-builds)
-- [Cross-compiling](#cross-compiling)
-- [What a binary says about itself](#what-a-binary-says-about-itself)
-- [Installing](#installing)
-- [Working on Elpis](#working-on-elpis)
-- [When the build goes wrong](#when-the-build-goes-wrong)
+**On this page:**
+[What you need](#-what-you-need) ·
+[Building](#-building) ·
+[Make targets](#-make-targets) ·
+[Build variables](#-build-variables) ·
+[Tuning for your CPU](#-tuning-for-your-cpu) ·
+[SIMD kernels](#-simd-kernels) ·
+[Static builds](#-static-builds) ·
+[Cross-compiling](#-cross-compiling) ·
+[What a binary says](#-what-a-binary-says-about-itself) ·
+[Installing](#-installing) ·
+[Working on Elpis](#-working-on-elpis) ·
+[When the build goes wrong](#-when-the-build-goes-wrong)
 
-## What you need
+## 📦 What you need
 
-A C99 compiler, **GNU make** and the C library headers. That is all. The
-cryptography, the event loop and the DNS wire format are in this tree, and the
-binary links nothing but libc.
+A C99 compiler, **GNU make** and the C library headers. That's all.
 
 | System | Command |
 |---|---|
@@ -33,20 +30,22 @@ binary links nothing but libc.
 | FreeBSD | `pkg install gmake git`, then build with `gmake` |
 | macOS | `xcode-select --install` |
 
-Two tools are optional:
+<sub>The cryptography, the TLS client, the event loop and the DNS wire format
+are all in this tree. The binary links nothing but libc.</sub>
 
-- **git** is only needed to clone the tree and to stamp the release or commit
-  into the binary. A tarball builds without it, and the binary then reports
-  `no git checkout`.
-- **python3** regenerates the status page from `web/index.html` when you edit
-  it. Without python3 the committed copy in `src/webui/webui_assets.h` is
-  used, and the build says so.
+**Optional:**
+- **git** — to clone, and to stamp the release or commit into the binary.
+  <br><sub>A tarball builds without it; the binary then reports `no git checkout`.</sub>
+- **python3** — regenerates the status page from `web/index.html` when you
+  edit it.
+  <br><sub>Without it the committed `src/webui/webui_assets.h` is used, and the build says so.</sub>
 
-Linux builds with gcc and clang are tested for each release: gcc 13.3 and
-clang 18.1 for 2.4.0. The BSDs (kqueue) and macOS (kqueue) are supported by
-the code, but no build on them was tested for this release.
+> [!NOTE]
+> Tested for each release on Linux with gcc and clang: gcc 13.3 and clang 18.1
+> for 2.4.0. The BSDs and macOS (kqueue) are supported by the code, but no
+> build on them was tested for this release.
 
-## Building
+## 🧱 Building
 
 ```bash
 git clone https://github.com/PururinCollective/elpis-resolver.git
@@ -55,45 +54,50 @@ make
 ./bin/elpis            # 127.0.0.1:5335, with the config beside it
 ```
 
-Everything the build produces goes in `bin/`, which git ignores, so
-`git pull && make` never leaves anything behind for git to notice.
+Everything lands in `bin/`, which git ignores:
 
-`bin/` is a complete bundle: the binary, plus `bin/elpis.conf` seeded from the
-shipped defaults the first time you build. Copy the directory to another
-machine and it runs. After that the config is yours, and your edits survive
-every rebuild and `make clean`. When a pull changes the shipped `elpis.conf`,
-`make` merges the change into `bin/elpis.conf` and keeps your edits; where the
-two clash it changes nothing and warns you (see
-[when the shipped defaults change](configuration.md#when-the-shipped-defaults-change)).
-`elpis.conf` in the source tree stays the reference.
+```
+bin/
+├── elpis                  the resolver
+├── elpis.conf             your config, seeded from the shipped one on the first build
+└── elpis.conf.shipped     the defaults your config was last merged with
+```
 
-Changing compiler flags needs no `make clean`. The flags are kept in a stamp
-file that every object depends on, so a changed `OPT` or `CFLAGS` recompiles
-everything, and repeating a build with the same flags compiles nothing.
+- **`bin/` is a complete bundle.** Copy the directory to another machine and it runs.
+- **Your config is yours.** Edits survive every rebuild and `make clean`.
+- **New shipped defaults are merged in.** When a pull changes `elpis.conf`,
+  `make` merges the change into `bin/elpis.conf` and keeps your edits.
+  <br><sub>Where the two clash it changes nothing and warns you — see
+  [when the shipped defaults change](configuration.md#when-the-shipped-defaults-change).
+  `elpis.conf` in the source tree stays the reference.</sub>
+- **No `make clean` after changing flags.** A stamp file every object depends
+  on holds the flags, so a changed `OPT` or `CFLAGS` recompiles everything, and
+  the same flags again compile nothing.
 
-## Make targets
+## 🎯 Make targets
 
 | Target | What it does |
 |---|---|
 | `make` | Ordinary build: `bin/elpis`, and `bin/elpis.conf` seeded or brought up to date |
-| `make static` | One statically linked binary with no shared libraries (runs `make clean` first) |
-| `make test` | The self-tests: 416 of them, no network needed |
+| `make static` | One statically linked binary, no shared libraries (runs `make clean` first) |
+| `make test` | The self-tests: 677 at 2.4.0, no network needed |
 | `make debug` | `-O0 -g3` with debug assertions |
 | `make asan` | AddressSanitizer and UndefinedBehaviorSanitizer build |
-| `make fuzz` | libFuzzer harness for the message parser, `bin/fuzz-msg` (needs clang) |
+| `make fuzz` | libFuzzer harnesses `bin/fuzz-msg` (DNS messages) and `bin/fuzz-tls` (the TLS client). Needs clang |
+| `make tls-probe` | `bin/elpis-tls-probe`: the TLS client against one DoT server, with a query over it |
 | `make licence-tool` | `bin/elpis-licence`, which signs deployment licences (see [licensing](licensing.md)) |
-| `make install` | Install to `/opt/elpis-resolver/bin` (see [Installing](#installing)) |
-| `make uninstall` | Remove the binary and leave your config alone |
+| `make install` | Install to `/opt/elpis-resolver/bin` (see [Installing](#-installing)) |
+| `make uninstall` | Remove the binary, leave your config alone |
 | `make clean` | Objects and binaries. Keeps `bin/elpis.conf` and `bin/elpis.conf.shipped` |
 | `make distclean` | `bin/` and everything in it |
 
-`debug`, `asan` and `static` run `make clean` first, because they change what
-every object is compiled with.
+<sub>`debug`, `asan` and `static` run `make clean` first, because they change
+what every object is compiled with. `tls-probe` and `licence-tool` are never
+built by `all` and never installed.</sub>
 
-## Build variables
+## 🧰 Build variables
 
-Pass these on the make command line, for example `make OPT="-O2"`, or keep
-them in `local.mk` (below).
+On the command line (`make OPT="-O2"`), or kept in `local.mk` (below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -109,8 +113,9 @@ them in `local.mk` (below).
 | `FUZZ_CC` | `clang` | The compiler for `make fuzz` |
 | `LICENCE_ISSUER` | built in | Ed25519 public key that licences are checked against |
 
-Keep `-fno-strict-aliasing` when you replace `OPT`. It is in the default,
-and it is what the code is built and tested with.
+> [!IMPORTANT]
+> Keep `-fno-strict-aliasing` when you replace `OPT`. It is in the default, and
+> it is what the code is built and tested with.
 
 ### Keeping them in `local.mk`
 
@@ -126,28 +131,26 @@ OPT = -O3 -fno-strict-aliasing -march=znver3 -mtune=znver3
 LICENCE_ISSUER = 6cd740f1...dd6315
 ```
 
-Git ignores the file, so a pull never touches it, and `make` says which
-settings it took from it:
+`make` says what it took from it:
 
 ```
   local.mk sets: OPT LICENCE_ISSUER
 ```
 
-It also reaches the builds that do not get your shell's environment:
-`sudo make install`, and `contrib/elpis-update.sh`, which runs as root. A
-variable set in `.bashrc` is lost in both, and that matters most for
-`LICENCE_ISSUER`, because a binary built without the key rejects every
-licence.
+- Git ignores the file, so a pull never touches it.
+- It reaches builds that don't get your shell's environment: `sudo make install`,
+  and `contrib/elpis-update.sh`, which runs as root.
+  <br><sub>A variable set in `.bashrc` is lost in both. That matters most for
+  `LICENCE_ISSUER`: a binary built without the key rejects every licence.</sub>
+- Command line beats `local.mk`, and `local.mk` beats the environment.
+- No `make clean` needed: the flags and the issuer key are watched, and
+  whatever they affect is rebuilt.
 
-A value on the command line still wins over `local.mk`, and `local.mk` wins
-over the environment. Changing it needs no `make clean`: the flags and the
-issuer key are watched, and whatever they affect is rebuilt.
+## 💨 Tuning for your CPU
 
-## Tuning for your CPU
-
-The default build targets the generic baseline of its architecture, so the
-binary runs on any CPU of that kind. To get the last few percent, compile for
-the CPU the resolver runs on:
+The default build targets the generic baseline of its architecture, so it runs
+on any CPU of that kind. For the last few percent, compile for the CPU it will
+run on:
 
 ```bash
 make OPT="-O3 -fno-strict-aliasing -march=znver3 -mtune=znver3"
@@ -155,8 +158,7 @@ make OPT="-O3 -fno-strict-aliasing -march=znver3 -mtune=znver3"
 
 ### x86-64
 
-The simplest choice is a microarchitecture level, which covers a whole
-generation of CPUs from both vendors:
+A microarchitecture level covers a whole generation from both vendors:
 
 | Level | Adds | Runs on |
 |---|---|---|
@@ -178,15 +180,15 @@ Or name the CPU exactly:
 | Intel Sapphire Rapids | `-march=sapphirerapids` |
 | The machine you are building on | `-march=native -mtune=native` |
 
-A binary built with `-march` needs that CPU or a newer one: on an older CPU it
-dies with "Illegal instruction", usually before it prints anything. Use
-`-march=native` only when you build on the machine that will run it. For a
-fleet of mixed hardware, the lowest `x86-64-vN` they all support is the safe
-choice.
+> [!WARNING]
+> A binary built with `-march` needs that CPU or a newer one. On an older CPU it
+> dies with "Illegal instruction", usually before it prints anything. Use
+> `-march=native` only when you build on the machine that will run it. For a
+> fleet of mixed hardware, pick the lowest `x86-64-vN` they all support.
 
 ### ARM64
 
-On ARM, `-mcpu` sets the architecture and the tuning together:
+`-mcpu` sets the architecture and the tuning together:
 
 | CPU | Flags |
 |---|---|
@@ -198,53 +200,53 @@ On ARM, `-mcpu` sets the architecture and the tuning together:
 
 ### Other architectures
 
-Anything with a C99 compiler and POSIX builds: RISC-V, POWER, and others use
-the scalar code paths, and 32-bit ARM uses NEON (see below). RISC-V boards
-typically want `-march=rv64gc`.
+Anything with a C99 compiler and POSIX builds. RISC-V, POWER and others use the
+scalar code paths, and 32-bit ARM uses NEON (below).
 
-## SIMD kernels
+<sub>RISC-V boards typically want `-march=rv64gc`.</sub>
 
-The hot paths (cache lookups, name comparison, case folding) have hand-written
+## 🧮 SIMD kernels
+
+The hot paths — cache lookups, name comparison, case folding — have hand-written
 vector kernels:
 
 | Architecture | Kernels |
 |---|---|
-| x86-64 | SSE2 and AVX2 |
+| x86-64 | SSE2 and AVX2, plus AES-NI and PCLMULQDQ for DoT's AES-128-GCM |
 | ARM64 | NEON |
 | 32-bit ARM | NEON, where the compiler targets an FPU that has it |
 | everything else | scalar |
 
-**On x86-64 the kernel is chosen at runtime.** Each kernel file is compiled
-with its own instruction-set flags (the AVX2 file with `-mavx2 -mbmi
--mbmi2`), and the CPU is asked at startup what it supports. So a generic
-build still uses AVX2 on a CPU that has it, and still runs on one that does
-not. `-march` does not change which kernel runs; it changes how the compiler
-builds everything else.
+**On x86-64 the kernel is chosen at runtime.** Each kernel file is compiled with
+its own instruction-set flags (the AVX2 file with `-mavx2 -mbmi -mbmi2`, the
+AES file with `-maes -mpclmul -mssse3`), and the CPU is asked at startup what
+it supports. A generic build still uses AVX2 and AES-NI on a CPU that has them,
+and still runs on one that doesn't.
 
-The self-tests check that every vector path agrees with the scalar one, byte
-for byte. The kernels differ only in speed.
+<sub>`-march` does not change which kernel runs; it changes how the compiler
+builds everything else. The self-tests check every vector path against the
+scalar one, byte for byte, so kernels differ only in speed. Without AES-NI,
+AES-128-GCM uses a portable constant-time version, and ChaCha20-Poly1305 is the
+suite offered first.</sub>
 
-## Static builds
+## 📦 Static builds
 
 ```bash
 make static
 make static OPT="-O3 -fno-strict-aliasing -march=x86-64-v3"
 ```
 
-This gives one self-contained binary with no shared libraries, about 1.4 MB
-with glibc on x86-64. Copy it to any Linux of the same architecture and run
-it. Elpis never uses the system's name lookup (`getaddrinfo`, NSS), so the
-usual glibc warnings about static linking do not apply. `make static` strips
-the binary afterwards.
+One self-contained binary, no shared libraries: about 1.5 MB with glibc on
+x86-64, stripped. Copy it to any Linux of the same architecture and run it.
 
-On Alpine, the same command builds against musl, which usually gives a
-smaller static binary.
+<sub>Elpis never uses the system's name lookup (`getaddrinfo`, NSS), so the
+usual glibc warnings about static linking don't apply. On Alpine the same
+command builds against musl, which usually gives a smaller binary.</sub>
 
-## Cross-compiling
+## 🌍 Cross-compiling
 
 The Makefile picks the SIMD kernels from `UNAME_M`, which defaults to the
-architecture of the machine you build on. When cross-compiling, set it to the
-target, along with the cross compiler:
+machine you build on. Set it to the target, with the cross compiler:
 
 ```bash
 # Debian/Ubuntu: sudo apt install gcc-aarch64-linux-gnu
@@ -259,61 +261,60 @@ make static CC=aarch64-linux-gnu-gcc UNAME_M=aarch64 \
 | 32-bit ARM | `arm-linux-gnueabihf-gcc` | `armv7l` |
 | RISC-V 64 | `riscv64-linux-gnu-gcc` | `riscv64` |
 
-`make test` builds a binary for the target, so it cannot run on the build
-machine. Run `bin/elpis-test` on the target, or under `qemu-user`.
+> [!NOTE]
+> `make test` then builds a binary for the target, which can't run on the
+> build machine. Run `bin/elpis-test` on the target, or under `qemu-user`.
+> <br><sub>A dry run confirms the Makefile switches to the NEON kernels for
+> `UNAME_M=aarch64`. No cross build was run for this release.</sub>
 
-A dry run confirms that the Makefile switches to the NEON kernels for
-`UNAME_M=aarch64`. No cross build was run for this release.
+## 🔖 What a binary says about itself
 
-## What a binary says about itself
-
-The startup line names the compiler, the architecture, the CPU the build was
-tuned for, and the SIMD kernel in use:
+The startup line names the release, the compiler, the architecture, the CPU the
+build was tuned for, and the kernels in use:
 
 ```
-elpis 2.2.0 starting: avx2 kernels (cpu: sse2 ssse3 sse4.1 avx2 bmi2), epoll,
-              gcc 13.3.0, x86_64 znver3 (native), ...
+elpis 2.4.0 "Intrinsic Future" starting: avx2 kernels (cpu: sse2 ssse3 sse4.1
+      avx2 bmi2 aes pclmul), epoll, gcc 13.3.0, x86_64 znver3 (native), ...
 ```
 
-The tuning shows as `generic` when no `-march` was given, as `x86-64-v3` or
-`znver3` when one was, and as `znver3 (native)` for `-march=native`. The
-About window and the CPU pane of the status page show the same.
+The tuning reads `generic` with no `-march`, `x86-64-v3` or `znver3` with one,
+and `znver3 (native)` for `-march=native`.
 
-The **build** string shows where the binary came from:
+The **build** string says where the binary came from:
 
 | Built from | Build string |
 |---|---|
-| a release tag | `v2.2.0` |
+| a release tag | `v2.4.0` |
 | any other commit | `main@bcc97d252fac` (branch and commit) |
 | a tarball, no git | empty, and the status page says `no git checkout` |
 
-It appears in the About window, the status JSON, and the identity TXT record:
+It shows in the About window, the status JSON, and the identity TXT record:
 
 ```bash
 dig @127.0.0.1 -p 5335 elpis.sakurako.oomuro TXT
 ```
 
-## Installing
+## 📥 Installing
 
 ```bash
 sudo make install            # -> /opt/elpis-resolver/bin/{elpis,elpis.conf}
 sudo make uninstall          # removes the binary, keeps your config
 ```
 
-`/opt` keeps Elpis clear of anything the distribution manages, and the
-installed layout has the same shape as `bin/`, so the config is found the same
-way in both. An existing config is never overwritten. Use
-`make install PREFIX=/usr/local` for a different location, and `DESTDIR=` for
-a packaging staging root.
+- `/opt` keeps Elpis clear of anything the distribution manages.
+- The installed layout has the same shape as `bin/`, so the config is found the
+  same way in both.
+- An existing config is never overwritten.
+- `make install PREFIX=/usr/local` for another place, `DESTDIR=` for a
+  packaging root.
 
-A systemd unit is in [contrib/elpis.service](../contrib/elpis.service). It
-expects the `/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE` rather
-than running as root.
+<sub>A systemd unit is in [contrib/elpis.service](../contrib/elpis.service).
+It expects the `/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE`
+rather than running as root.</sub>
 
-## Working on Elpis
+## 🔬 Working on Elpis
 
-Four more tools come in when you work on the code rather than run it. None of
-them is needed to build or run Elpis:
+None of these is needed to build or run Elpis:
 
 ```bash
 sudo apt install valgrind cppcheck clang
@@ -332,13 +333,16 @@ make asan && bin/elpis -c bin/elpis.conf              # Ctrl-C for the leak repo
 valgrind --leak-check=full bin/elpis -c bin/elpis.conf
 cppcheck --enable=warning,portability -q -Iinclude -Isrc src src/crypto
 make fuzz && mkdir -p bin/corpus && cd bin && ./fuzz-msg -max_total_time=300 corpus/
+make fuzz && mkdir -p bin/corpus-tls && cd bin && ./fuzz-tls -max_total_time=300 corpus-tls/
+make tls-probe && bin/elpis-tls-probe 1.1.1.1 example.com A
 ```
 
-For readable valgrind stacks, build with `make OPT="-O1 -g -fno-strict-aliasing
--fno-omit-frame-pointer"`. The code builds without warnings under gcc and
-clang at the warning level the Makefile sets, and should stay that way.
+<sub>For readable valgrind stacks, build with
+`make OPT="-O1 -g -fno-strict-aliasing -fno-omit-frame-pointer"`. The code
+builds without warnings under gcc and clang at the Makefile's warning level,
+and should stay that way.</sub>
 
-## When the build goes wrong
+## 🩹 When the build goes wrong
 
 | Symptom | Cause |
 |---|---|
@@ -347,3 +351,7 @@ clang at the warning level the Makefile sets, and should stay that way.
 | The binary stops with "Illegal instruction" | Built with `-march` for a newer CPU than this one. Rebuild with a lower level or no `-march`. |
 | The startup line says `generic` after you changed `OPT` | `CFLAGS` was also set, and it overrides `OPT`. Unset it. |
 | `make fuzz` fails | Needs clang with libFuzzer (`sudo apt install clang`). |
+
+---
+
+<sub>[README](../README.md) · [Configuration](configuration.md) · [Caching](caching.md) · [DNSSEC](dnssec.md) · [Status page](status-page.md) · [Troubleshooting](troubleshooting.md) · [Quirks](quirks.md) · [Internals](internals.md) · [Licensing](licensing.md)</sub>
