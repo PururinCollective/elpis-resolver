@@ -19,6 +19,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.0 "Intrinsic Future" | 2026-10-05 | opportunistic DoT to authoritative servers (RFC 9539) with an in-tree TLS 1.3 client; `caps-exempt:`; release names begin |
 | 2.4.1 "Lettersong" | 2026-10-05 | starting at boot (LXC, VM) before the addresses are up: listeners bind anyway, `outgoing-interface` sockets wait and retry |
 | 2.4.2 "Lettersong" | 2026-10-05 | the shipped unit drops `Conflicts=systemd-resolved`, which silently cancelled Elpis at boot; Elpis names resolved's stub when it holds the port |
+| 2.4.3 "Resilient Journey" | 2026-10-06 | `contrib/elpis-install.sh`: account, unit, enable, and `RESOLVED=replace` to take systemd-resolved's place on 127.0.0.53; scripts run in place from the clone (`/opt` recommended); 127.0.0.53 messages fixed |
 
 ## 🧭 Decisions, and why
 
