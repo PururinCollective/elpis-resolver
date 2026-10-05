@@ -10,7 +10,8 @@ have to guess.
 | SERVFAIL, and `bogus answer` in the log | [A name answered SERVFAIL as bogus](#-a-name-answered-servfail-as-bogus) |
 | DoT is on, but nothing goes over it | [DoT not being used](#-dot-not-being-used) |
 | Elpis won't start: something holds the port | [Something else on port 53](#-something-else-on-port-53) |
-| Silent after a reboot until restarted | [Listening on one address](configuration.md#listening-on-one-address) |
+| Not running after a reboot, and nothing in its log | [Under the shipped systemd unit](#under-the-shipped-systemd-unit) |
+| A warning that an address isn't there yet | [Listening on one address](configuration.md#listening-on-one-address) |
 | `dropped` counts climbing | [Malformed input](#-malformed-input) |
 
 > [!TIP]
@@ -186,8 +187,9 @@ INFO  systemd-resolved stopped
 WARN  /etc/resolv.conf still points at the systemd-resolved stub (127.0.0.53),
       which is no longer listening -- this host cannot resolve names until you
       repoint it
-WARN  systemd-resolved will come back on reboot; make it permanent with
-      'systemctl disable --now systemd-resolved'
+WARN  systemd-resolved will come back on reboot, or as soon as anything asks
+      for it; make it permanent with 'systemctl disable --now
+      systemd-resolved && systemctl mask systemd-resolved'
 INFO  listening with 8 workers
 ```
 
@@ -195,11 +197,45 @@ INFO  listening with 8 workers
 - Nothing else is ever stopped: an unrelated daemon on the port is reported and
   Elpis exits.
 
-<sub>Under the shipped systemd unit it runs as `elpis`, not root, so it can't
-stop anything. The unit uses `Conflicts=systemd-resolved.service` and lets
-systemd do it. Stopping elpis starts resolved again, so the host isn't left with
-no resolver, unless resolved is disabled, in which case it stays off. A restart,
-or a crash that `Restart=` recovers from, leaves it stopped.</sub>
+### Under the shipped systemd unit
+
+Elpis runs as `elpis`, not root, so it can't stop resolved, and the unit
+doesn't either. Free port 53 once:
+
+```bash
+sudo systemctl disable --now systemd-resolved
+sudo systemctl mask systemd-resolved
+```
+
+Then point `/etc/resolv.conf` at Elpis (`nameserver 127.0.0.1`): it links to
+resolved's stub, which is gone now. Or keep resolved for the host's own
+lookups and turn off only its stub, with `DNSStubListener=no` in
+`/etc/systemd/resolved.conf`.
+
+Until the port is free, Elpis names what's in the way and exits, and
+`Restart=` tries again every 3 s:
+
+```
+FATAL systemd-resolved's stub is listening on 127.0.0.54:53, which conflicts
+      with 'listen: 0.0.0.0:53'
+FATAL   free the port for good: sudo systemctl disable --now systemd-resolved
+      && sudo systemctl mask systemd-resolved
+FATAL   or keep resolved without its stub: DNSStubListener=no in
+      /etc/systemd/resolved.conf
+FATAL   or listen on another port
+```
+
+> [!WARNING]
+> `disable` alone isn't enough. It only stops resolved starting at boot by
+> itself: any unit that wants it still starts it. `mask` stops that too.
+
+<sub>Up to 2.4.1 the unit stopped resolved for you, with
+`Conflicts=systemd-resolved.service`. At boot that could lose without a word:
+when anything asked for resolved while Elpis was still waiting for the network,
+systemd cancelled Elpis's start and logged nothing. Elpis just wasn't running
+after a reboot, and `Restart=` never fired, because nothing had failed. An
+installed copy of that unit still behaves this way: install it again from
+`contrib/`.</sub>
 
 ## 🧹 Malformed input
 

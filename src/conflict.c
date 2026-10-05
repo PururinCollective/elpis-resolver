@@ -411,8 +411,10 @@ int elpis_stop_systemd_resolved(const elpis_addr_t *a)
         elpis_warn("  e.g. 'nameserver 127.0.0.1' once elpis is listening, or "
                    "keep resolved's stub and run elpis on another port");
     }
-    elpis_warn("systemd-resolved will come back on reboot; make it permanent "
-               "with 'systemctl disable --now systemd-resolved'");
+    elpis_warn("systemd-resolved will come back on reboot, or as soon as "
+               "anything asks for it; make it permanent with 'systemctl "
+               "disable --now systemd-resolved && systemctl mask "
+               "systemd-resolved'");
     return ELPIS_OK;
 #else
     (void)a;
