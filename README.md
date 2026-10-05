@@ -61,7 +61,7 @@ hold the answers ever sees what you look up.
 
 ## ✨ What you get
 
-| | |
+| feature | |
 |---|---|
 | 🌳 **Real recursion** | Resolves from the root servers down. No upstream to trust, nothing to forward to. |
 | 🔐 **DNSSEC validation** | RSA, ECDSA, Ed25519 and post-quantum ML-DSA. Forged and stripped answers are refused, even behind a forwarder. |
@@ -210,7 +210,7 @@ with light and dark themes.
 
 ## 📚 Documentation
 
-| | |
+| guide | what's in it |
 |---|---|
 | 🔨 [Compiling](docs/COMPILING.md) | building on every platform, CPU tuning, static and cross builds |
 | 🔧 [Configuration](docs/configuration.md) | settings, privileged ports, ECS, DoT, the identity probe, signals |

@@ -469,7 +469,7 @@ Finished message is, which proves the two ends derived the same keys.</sub>
 
 ### What it costs
 
-| | |
+| cost | |
 |---|---|
 | **Few servers offer it yet** | Most authorities drop connections to port 853 without a reply, so most tests end in a 3-second timeout. That's a socket and a timer, not a wait: nobody is waiting on a test. At most 16 handshakes are in progress per worker. |
 | **Connections** | One per server per worker, closed after 15 s unused, at most 256 per worker. About 1.2 KB of TLS state each, plus buffers freed while it idles. |

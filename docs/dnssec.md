@@ -17,7 +17,7 @@ SERVFAIL and an extended DNS error. **It is never handed to the client.**
   example.com.   DS ──► DNSKEY ──► RRSIG ──► www.example.com  A  ✅
 ```
 
-| | |
+| | supported |
 |---|---|
 | **Signatures** | RSA (1024–4096), ECDSA P-256/P-384, Ed25519, **ML-DSA-44/65/87** (FIPS 204), all implemented from scratch |
 | **Denial of existence** | NSEC and NSEC3, including opt-out and the RFC 9276 iteration cap |

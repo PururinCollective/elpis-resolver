@@ -113,12 +113,14 @@ dnssec: bogus answer for imap-mail.outlook.com. A: atm.outlook.mira.tm.svc.cloud
 keys cloud.microsoft.: 61899 28146 24236; 5 of 64 signature checks spent (EDE 6 DNSSEC Bogus); replying SERVFAIL
 ```
 
-Reading it, left to right:
+Reading it, from the top:
 
 ```
- question ─► the RRset that failed ─► each signature and what stopped it ─► the signer's key tags ─► the EDE sent
-             (may be another name,
-              in a CNAME chain)
+ question
+  └─► the RRset that failed        may be another name, in a CNAME chain
+        └─► each signature, and what stopped it
+              └─► the signer's key tags
+                    └─► the EDE sent
 ```
 
 | The line says | What it means |

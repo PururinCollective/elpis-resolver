@@ -31,7 +31,7 @@ desktop you leave is the desktop you come back to: which windows are open,
 where, how big, which is in front and which Task Manager pane was showing are
 all remembered by the browser. **Reset** in the toolbar forgets the lot.</sub>
 
-| | |
+| window | shows |
 |---|---|
 | **Task Manager** | CPU, memory, network and queries in one window: a rail of live sparklines on the left, the one you pick drawn large on the right |
 | **Overview** | cache hit rate, response time from cache and upstream, queries and SERVFAIL per second, every counter the resolver keeps (queries over DoT among them), and how this host looks from outside: public IPv4 and IPv6, AS number and name |
@@ -90,7 +90,7 @@ the access-control list admits. See
 All three ML-DSA verifiers are always compiled in. About reports whether the
 DNSSEC algorithm number each answers to means anything to anyone else:
 
-| | |
+| status | means |
 |---|---|
 | **active** | the number is one others use too. `draft-westerbaan-dnssec-mldsa` assigns 18 to ML-DSA-44, and the deployed test zones sign with it |
 | **available** | built in and ready, but on a placeholder in unassigned space that's interoperable with nothing |
