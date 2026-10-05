@@ -160,6 +160,17 @@ typedef struct {
     uint8_t      do_ipv6;
     uint8_t      tcp_upstream;
     /*
+     * Opportunistic DNS over TLS to authoritative servers (RFC 9539),
+     * authoritative-dot: opportunistic.  adot_ttl_s is how long a server's
+     * DoT stands after its last answer, adot_retry_s how soon a failed one
+     * is tested again, adot_max_try how many retries fail before it is given
+     * up for good (0 = never).  See ELPIS_DOT_* in infra.h.
+     */
+    uint8_t      adot;
+    uint32_t     adot_ttl_s;
+    uint32_t     adot_retry_s;
+    uint32_t     adot_max_try;
+    /*
      * Names at or below these zones go out without 0x20 (caps-exempt:, as in
      * Unbound).  For an authority that answers a case-randomised name but
      * does not recognise it: dnsprobe.online records only the lowercase

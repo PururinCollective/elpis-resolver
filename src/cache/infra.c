@@ -40,6 +40,35 @@ elpis_cache_t *elpis_infra_new(uint64_t bytes, unsigned shards)
 /* Entries are kept for an hour of disuse; longer and the RTT is fiction. */
 #define INFRA_TTL 3600u
 
+static void info_defaults(elpis_infra_info_t *i)
+{
+    memset(i, 0, sizeof *i);
+    i->srtt       = ELPIS_RTT_INITIAL;
+    i->rttvar     = ELPIS_RTT_INITIAL / 2u;
+    i->edns_state = ELPIS_EDNS_UNKNOWN;
+}
+
+/*
+ * An entry can outlive the hour for its DoT state alone (dot_keep): a server
+ * that failed DoT has to stay failed between its hourly tests, and one that
+ * gave up has to stay given up.  Everything else in it is as stale as it
+ * ever was by then, so it starts over and only the DoT fields carry on.
+ */
+static void freshen(elpis_infra_info_t *i, uint32_t now)
+{
+    elpis_infra_info_t keep;
+
+    if (i->last_used == 0 || now < i->last_used + INFRA_TTL)
+        return;
+    keep = *i;
+    info_defaults(i);
+    i->dot_state = keep.dot_state;
+    i->dot_tries = keep.dot_tries;
+    i->dot_until = keep.dot_until;
+    i->dot_keep  = keep.dot_keep;
+    i->last_used = keep.last_used;
+}
+
 void elpis_infra_get(elpis_cache_t *c, const elpis_addr_t *a,
                      elpis_infra_info_t *out)
 {
@@ -47,16 +76,14 @@ void elpis_infra_get(elpis_cache_t *c, const elpis_addr_t *a,
     unsigned shard;
     ient_t *e;
 
-    memset(out, 0, sizeof *out);
-    out->srtt       = ELPIS_RTT_INITIAL;
-    out->rttvar     = ELPIS_RTT_INITIAL / 2u;
-    out->edns_state = ELPIS_EDNS_UNKNOWN;
+    info_defaults(out);
 
     ikey_init(&k, a);
     e = (ient_t *)elpis_cache_read_begin(c, k.hash, &k, &shard);
     if (e != NULL) {
         *out = e->info;
         elpis_cache_read_end(c, shard);
+        freshen(out, elpis_cached_now_s());
     }
 }
 
@@ -73,20 +100,23 @@ static void infra_update(elpis_cache_t *c, const elpis_addr_t *a,
     ient_t *e, *ne;
     elpis_infra_info_t info;
 
+    uint32_t now = elpis_cached_now_s(), expiry;
+
     ikey_init(&k, a);
     e = (ient_t *)elpis_cache_read_begin(c, k.hash, &k, &shard);
     if (e != NULL) {
         info = e->info;
         elpis_cache_read_end(c, shard);
+        freshen(&info, now);
     } else {
-        memset(&info, 0, sizeof info);
-        info.srtt       = ELPIS_RTT_INITIAL;
-        info.rttvar     = ELPIS_RTT_INITIAL / 2u;
-        info.edns_state = ELPIS_EDNS_UNKNOWN;
+        info_defaults(&info);
     }
 
     fn(&info, ctx);
-    info.last_used = elpis_cached_now_s();
+    info.last_used = now;
+    expiry = now + INFRA_TTL;
+    if (info.dot_state != ELPIS_DOT_UNKNOWN && info.dot_keep > expiry)
+        expiry = info.dot_keep;
 
     ne = (ient_t *)elpis_malloc(sizeof *ne);
     if (ne == NULL)
@@ -95,7 +125,7 @@ static void infra_update(elpis_cache_t *c, const elpis_addr_t *a,
     ne->hdr.hash   = k.hash;
     ne->hdr.size   = (uint32_t)(sizeof *ne + 64u);
     ne->hdr.ref    = 1;
-    ne->hdr.expiry = elpis_cached_now_s() + INFRA_TTL;
+    ne->hdr.expiry = expiry;
     ne->addr       = *a;
     ne->info       = info;
     elpis_cache_insert(c, ne, &k);
@@ -300,4 +330,107 @@ uint32_t elpis_infra_cost(const elpis_infra_info_t *i)
     if (cost > ELPIS_RTT_BAN)
         cost = ELPIS_RTT_BAN;
     return cost;
+}
+
+/* ------------------------------------------------------------------ */
+/* DNS over TLS                                                        */
+/* ------------------------------------------------------------------ */
+
+int elpis_infra_dot_mode(const elpis_infra_info_t *i, uint32_t now)
+{
+    int claimed = i->dot_claim != 0 && now < i->dot_claim;
+
+    switch (i->dot_state) {
+    case ELPIS_DOT_AVAILABLE:
+        if (now < i->dot_until)
+            return ELPIS_DOTM_USE;
+        return claimed ? ELPIS_DOTM_PLAIN : ELPIS_DOTM_TEST;
+    case ELPIS_DOT_FAILED:
+        if (now < i->dot_until || claimed)
+            return ELPIS_DOTM_PLAIN;
+        return ELPIS_DOTM_TEST;
+    case ELPIS_DOT_UNAVAILABLE:
+        return ELPIS_DOTM_PLAIN;
+    default:
+        return claimed ? ELPIS_DOTM_PLAIN : ELPIS_DOTM_TEST;
+    }
+}
+
+typedef struct { uint32_t now; int got; } claim_arg_t;
+
+static void fn_dot_claim(elpis_infra_info_t *i, void *ctx)
+{
+    claim_arg_t *a = (claim_arg_t *)ctx;
+    if (i->dot_claim != 0 && a->now < i->dot_claim)
+        return;
+    i->dot_claim = a->now + ELPIS_DOT_CLAIM_S;
+    a->got = 1;
+}
+
+int elpis_infra_dot_claim(elpis_cache_t *c, const elpis_addr_t *a, uint32_t now)
+{
+    claim_arg_t arg;
+    arg.now = now;
+    arg.got = 0;
+    infra_update(c, a, fn_dot_claim, &arg);
+    return arg.got;
+}
+
+typedef struct {
+    uint32_t now, ttl_s, retry_s, max_try;
+    int      state;
+} dot_arg_t;
+
+static void fn_dot_ok(elpis_infra_info_t *i, void *ctx)
+{
+    dot_arg_t *a = (dot_arg_t *)ctx;
+    i->dot_state = ELPIS_DOT_AVAILABLE;
+    i->dot_tries = 0;
+    i->dot_until = a->now + a->ttl_s;
+    i->dot_claim = 0;
+    i->dot_keep  = i->dot_until;
+}
+
+void elpis_infra_dot_ok(elpis_cache_t *c, const elpis_addr_t *a, uint32_t now,
+                        uint32_t ttl_s)
+{
+    dot_arg_t arg;
+    memset(&arg, 0, sizeof arg);
+    arg.now   = now;
+    arg.ttl_s = ttl_s;
+    infra_update(c, a, fn_dot_ok, &arg);
+}
+
+static void fn_dot_fail(elpis_infra_info_t *i, void *ctx)
+{
+    dot_arg_t *a = (dot_arg_t *)ctx;
+
+    if (i->dot_tries < 255)
+        i->dot_tries++;
+    i->dot_claim = 0;
+    /* The first failure, then max_try retries an interval apart. */
+    if (a->max_try != 0 && i->dot_tries > a->max_try) {
+        i->dot_state = ELPIS_DOT_UNAVAILABLE;
+        i->dot_until = 0;
+        i->dot_keep  = a->now + ELPIS_DOT_GIVE_UP_KEEP_S;
+    } else {
+        i->dot_state = ELPIS_DOT_FAILED;
+        i->dot_until = a->now + a->retry_s;
+        /* A day past the next test, so a server asked now and then still
+         * counts its retries rather than starting over. */
+        i->dot_keep  = i->dot_until + 86400u;
+    }
+    a->state = i->dot_state;
+}
+
+int elpis_infra_dot_fail(elpis_cache_t *c, const elpis_addr_t *a,
+                         uint32_t now, uint32_t retry_s, uint32_t max_try)
+{
+    dot_arg_t arg;
+    memset(&arg, 0, sizeof arg);
+    arg.now     = now;
+    arg.retry_s = retry_s;
+    arg.max_try = max_try;
+    infra_update(c, a, fn_dot_fail, &arg);
+    return arg.state;
 }

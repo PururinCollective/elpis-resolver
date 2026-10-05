@@ -44,6 +44,8 @@ typedef struct {
     unsigned avx512bw:1;
     unsigned neon   : 1;
     unsigned crc32  : 1;
+    unsigned aes    : 1;   /* AES-NI     */
+    unsigned pclmul : 1;   /* PCLMULQDQ  */
 } elpis_cpu_t;
 
 void               elpis_simd_init(void);

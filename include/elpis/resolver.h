@@ -15,11 +15,13 @@
 #include "elpis/msg.h"
 #include "elpis/edns.h"
 #include "elpis/telemetry.h"
+#include "elpis/tls.h"
 
 typedef struct elpis_worker  elpis_worker_t;
 typedef struct elpis_task    elpis_task_t;
 typedef struct elpis_outq    elpis_outq_t;
 typedef struct elpis_tcpconn elpis_tcpconn_t;
+typedef struct elpis_dotconn elpis_dotconn_t;
 
 /* ------------------------------------------------------------------ */
 /* Outbound                                                            */
@@ -90,6 +92,57 @@ struct elpis_outq {
     size_t         txlen, txsent;
     uint8_t       *rxbuf;
     size_t         rxlen, rxwant, rxcap;
+
+    /*
+     * DNS over TLS (dot.c).  over_dot: the query goes on conn, a TLS
+     * connection to the server's port 853, listed there through cnext, with
+     * txbuf holding it length-prefixed.  over_tcp is set as well, for what
+     * the two share: no 0x20, the whole buffer size, no TC, no race.
+     * dot_sent: written to the connection, which may still be in its
+     * handshake.  dot_test: a copy of a plain query, sent only to learn
+     * whether the server answers over DoT.  dot_safety: the plain query sent
+     * when a DoT one went unanswered, whose answer means DoT failed.
+     * dot_resent: already sent again once, after its connection was lost.
+     */
+    elpis_dotconn_t *conn;
+    elpis_outq_t   *cnext;
+    unsigned       over_dot   : 1;
+    unsigned       dot_sent   : 1;
+    unsigned       dot_test   : 1;
+    unsigned       dot_safety : 1;
+    unsigned       dot_resent : 1;
+};
+
+/* ------------------------------------------------------------------ */
+/* DNS over TLS to authoritative servers (dot.c)                       */
+/* ------------------------------------------------------------------ */
+
+#define ELPIS_DOT_HASH            256u
+#define ELPIS_DOT_MAX_CONNS       256u   /* per worker                      */
+#define ELPIS_DOT_MAX_HANDSHAKES  16u    /* per worker, at once             */
+#define ELPIS_DOT_MAX_PENDING     64u    /* queries in flight on one        */
+#define ELPIS_DOT_HANDSHAKE_MS    3000u  /* connect plus handshake          */
+#define ELPIS_DOT_IDLE_MS         15000u /* close after this long unused    */
+
+struct elpis_dotconn {
+    elpis_dotconn_t *hnext;
+    elpis_worker_t  *w;
+    elpis_addr_t     server;     /* as the infra cache knows it: port 53  */
+    elpis_addr_t     peer;       /* the same address, port 853            */
+    int              fd;
+    elpis_ev_t       ev;
+    elpis_timer_t    timer;      /* the handshake deadline, then idling   */
+    elpis_tls_t      tls;
+    elpis_outq_t    *pending;    /* through cnext, oldest first           */
+    unsigned         npending;
+    uint64_t         opened_ms, used_ms;
+    uint32_t         answers;    /* DNS answers read on it                */
+    uint32_t         unreported; /* ... not yet told to the status page   */
+    elpis_name_t     zone;       /* the zone last asked on it, for the page */
+    unsigned         connected : 1;
+    unsigned         open      : 1;   /* handshake done                  */
+    unsigned         in_event  : 1;   /* its event handler is running    */
+    unsigned         dead      : 1;   /* freed once the handler returns  */
 };
 
 /* ------------------------------------------------------------------ */
@@ -334,6 +387,11 @@ struct elpis_worker {
     elpis_tcpconn_t *conns;
     unsigned         n_conns;
 
+    /* DoT connections to authoritative servers, by server address. */
+    elpis_dotconn_t *dothash[ELPIS_DOT_HASH];
+    unsigned         n_dot;          /* open or opening                  */
+    unsigned         n_dot_hs;       /* of those, still in the handshake */
+
     elpis_task_t   *tasks;      /* live tasks, linked through live_next */
     unsigned        n_tasks;
 
@@ -402,6 +460,28 @@ int  elpis_out_race(elpis_task_t *t, const elpis_addr_t *server);
 int  elpis_out_probe(elpis_task_t *t, const elpis_addr_t *server);
 void elpis_out_cancel(elpis_task_t *t);
 void elpis_out_free(elpis_worker_t *w, elpis_outq_t *q);
+
+/* ---- DNS over TLS (dot.c) ---- */
+void elpis_dot_fini(elpis_worker_t *w);
+/* Could q's server take one more DoT query here, on a connection that is
+ * open or could be opened?  Nothing is changed. */
+int  elpis_dot_can_send(elpis_worker_t *w, const elpis_addr_t *server);
+/* The worker's connection to the server, open or opening, or NULL. */
+elpis_dotconn_t *elpis_dot_find(elpis_worker_t *w, const elpis_addr_t *server);
+/*
+ * Put q, its txbuf holding the length-prefixed query, on a connection to its
+ * server, opening one if need be.  0, or -1 when no connection could be had;
+ * q is then untouched.
+ */
+int  elpis_dot_send(elpis_worker_t *w, elpis_outq_t *q, const elpis_name_t *zone);
+/* q is going away: off its connection. */
+void elpis_dot_detach(elpis_outq_t *q);
+
+/* dot.c calls these in outbound.c: an answer for q, or q's connection gone.
+ * `lost` is a connection that had worked closing with q unanswered. */
+void elpis_out_dot_message(elpis_worker_t *w, elpis_outq_t *q,
+                           const elpis_msg_t *m);
+void elpis_out_dot_failed(elpis_worker_t *w, elpis_outq_t *q, int lost);
 
 /* Called by outbound.c when a response (or failure) arrives. */
 void elpis_resolver_on_response(elpis_task_t *t, elpis_outq_t *q,

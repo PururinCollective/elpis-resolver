@@ -27,7 +27,11 @@ BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
 BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
-VERSION   := 2.3.0
+VERSION   := 2.4.0
+# Each release has a name as well, from 2.4.0 on: shown beside the version by
+# `elpis -V`, at startup, in the status page's About window and in the
+# identity probe (codename=).  Spaces are fine; they are escaped below.
+CODENAME  := Intrinsic Future
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.
@@ -48,7 +52,11 @@ WARN      := -Wall -Wextra -Wshadow -Wpointer-arith -Wcast-align \
              -Wno-unused-parameter -Wvla
 
 OPT       ?= -O3 -fno-strict-aliasing -fomit-frame-pointer
-DEFS      := -DELPIS_VERSION=\"$(VERSION)\" -DELPIS_SYSCONFDIR=\"$(SYSCONFDIR)\"
+EMPTY     :=
+SPACE     := $(EMPTY) $(EMPTY)
+DEFS      := -DELPIS_VERSION=\"$(VERSION)\" \
+             -DELPIS_CODENAME=\"$(subst $(SPACE),\$(SPACE),$(CODENAME))\" \
+             -DELPIS_SYSCONFDIR=\"$(SYSCONFDIR)\"
 # The Ed25519 public key deployment licences are signed with.  Normally set
 # once in include/elpis/licence.h; this is here so a one-off build can carry a
 # different issuer without editing the tree.
@@ -84,7 +92,7 @@ CACHE_SRC := \
 
 # Event loop and sockets, used by both the server and the resolver side.
 NET_SRC := \
-  src/net/loop.c src/net/sock.c
+  src/net/loop.c src/net/sock.c src/net/tls.c
 
 # The client side: listeners, the answer path, rate limits, local names, DNS64.
 SERVER_SRC := \
@@ -94,7 +102,8 @@ SERVER_SRC := \
 # The upstream side: recursion, queries out, and warming at startup.
 RESOLVER_SRC := \
   src/resolver/resolver.c src/resolver/outbound.c src/resolver/roots.c \
-  src/resolver/tld.c src/resolver/axfr.c src/resolver/probe.c
+  src/resolver/tld.c src/resolver/axfr.c src/resolver/probe.c \
+  src/resolver/dot.c
 
 DNSSEC_SRC := \
   src/dnssec/dnssec.c src/dnssec/nsec.c src/dnssec/nsec3.c \
@@ -113,9 +122,17 @@ CORE_SRC := \
 CRYPTO_SRC := \
   src/crypto/sha1.c src/crypto/sha2.c src/crypto/keccak.c src/crypto/bn.c \
   src/crypto/rsa.c src/crypto/ec.c src/crypto/ecdsa.c src/crypto/ed25519.c \
-  src/crypto/mldsa.c src/crypto/rand.c
+  src/crypto/mldsa.c src/crypto/chacha20.c src/crypto/rand.c
 
-SRC      := $(CORE_SRC) $(CRYPTO_SRC)
+# What a TLS 1.3 client needs on top: HKDF, X25519 and the two record
+# ciphers (include/elpis/tlscrypto.h).  Kept apart from CRYPTO_SRC, which the
+# licence tool compiles as well and has no use for these.  The AES-NI half of
+# AES-128-GCM is in the x86 list below, built with the flags it needs.
+TLSCRYPTO_SRC := \
+  src/crypto/hkdf.c src/crypto/poly1305.c src/crypto/x25519.c \
+  src/crypto/aes.c src/crypto/aead.c
+
+SRC      := $(CORE_SRC) $(CRYPTO_SRC) $(TLSCRYPTO_SRC)
 OBJ      := $(SRC:.c=.o)
 
 # ---- build provenance ------------------------------------------------------
@@ -139,7 +156,7 @@ GITREV   := $(if $(GITBR),$(if $(GITHASH),$(GITBR)@$(GITHASH)),$(GITHASH))
 endif
 
 # SIMD kernels compiled with elevated ISA + selected at runtime via CPUID.
-SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c
+SIMD_X86_SRC := src/simd/simd_sse2.c src/simd/simd_avx2.c src/crypto/aes_ni.c
 SIMD_ARM_SRC := src/simd/simd_neon.c
 
 # Only when not given, so a cross build can set it in local.mk as well as on
@@ -165,7 +182,7 @@ OBJ += $(SIMD_OBJ)
 
 # ---- targets ---------------------------------------------------------------
 .PHONY: all static debug asan clean distclean install uninstall test check fmt \
-        licence-tool fuzz FORCE
+        licence-tool tls-probe fuzz FORCE
 
 
 all: $(BIN) $(BINCONF) $(BINCONF_BASE)
@@ -205,7 +222,7 @@ src/cflags.stamp: FORCE
 	@cmp -s $@.tmp $@ || mv -f $@.tmp $@
 	@rm -f $@.tmp
 
-$(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o: src/cflags.stamp
+$(OBJ) tests/test_main.o tests/ed25519_sign.o tests/licence_test.o tests/tls_test.o: src/cflags.stamp
 
 # The status page is compiled in, so the generated header has to be rebuilt
 # whenever the page changes.  Doing that by hand is a trap: regenerate it
@@ -247,6 +264,17 @@ $(LICENCE_BIN): $(LICENCE_SRC) src/gitrev.h src/buildtarget.h src/licence_issuer
 	$(CC) $(STD) $(POSIX) $(WARN) $(DEFS) -DELPIS_ED25519_SIGN=1 \
 	    $(CFLAGS) -Iinclude -Isrc -pthread -o $@ $(LICENCE_SRC) \
 	    $(ALL_LDFLAGS) $(LIBS)
+
+# ---- TLS probe -------------------------------------------------------------
+# tools/tls-probe.c: the TLS client against one server on port 853, a query
+# over it, and what came back.  For checking the engine against real TLS
+# stacks; not built by `all` and not installed.
+TLS_PROBE_BIN := $(BINDIR)/$(PROG)-tls-probe
+
+tls-probe: $(TLS_PROBE_BIN)
+
+$(TLS_PROBE_BIN): tools/tls-probe.c $(filter-out src/main.o,$(OBJ)) | $(BINDIR)
+	$(CC) $(ALL_CFLAGS) -o $@ $^ $(ALL_LDFLAGS) $(LIBS)
 
 $(BINDIR):
 	@mkdir -p $(BINDIR)
@@ -295,6 +323,9 @@ src/simd/simd_avx2.o: src/simd/simd_avx2.c
 src/simd/simd_sse2.o: src/simd/simd_sse2.c
 	$(CC) $(ALL_CFLAGS) -msse2 -c -o $@ $<
 
+src/crypto/aes_ni.o: src/crypto/aes_ni.c
+	$(CC) $(ALL_CFLAGS) -maes -mpclmul -mssse3 -c -o $@ $<
+
 src/simd/simd_neon.o: src/simd/simd_neon.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
@@ -309,8 +340,8 @@ src/simd/simd_neon.o: src/simd/simd_neon.c
 # therefore obviously not a secret, which is exactly what a test key should be.
 TEST_SRC    := tests/test_main.c
 TEST_ISSUER := d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
-TEST_OBJ    := $(filter-out src/main.o src/crypto/ed25519.o src/licence.o,$(OBJ)) \
-               tests/ed25519_sign.o tests/licence_test.o
+TEST_OBJ    := $(filter-out src/main.o src/crypto/ed25519.o src/licence.o src/net/tls.o,$(OBJ)) \
+               tests/ed25519_sign.o tests/licence_test.o tests/tls_test.o
 
 tests/ed25519_sign.o: src/crypto/ed25519.c
 	$(CC) $(ALL_CFLAGS) -DELPIS_ED25519_SIGN=1 -c -o $@ $<
@@ -319,8 +350,14 @@ tests/licence_test.o: src/licence.c
 	$(CC) $(ALL_CFLAGS) -UELPIS_LICENCE_ISSUER \
 	    -DELPIS_LICENCE_ISSUER=\"$(TEST_ISSUER)\" -c -o $@ $<
 
+# The TLS engine with its test entry points (ELPIS_TLS_TESTING): a start
+# from a given ClientHello and key, so the RFC 8448 trace replays byte for
+# byte.  bin/elpis is built without them.
+tests/tls_test.o: src/net/tls.c
+	$(CC) $(ALL_CFLAGS) -DELPIS_TLS_TESTING=1 -c -o $@ $<
+
 tests/test_main.o: tests/test_main.c
-	$(CC) $(ALL_CFLAGS) -DELPIS_ED25519_SIGN=1 -c -o $@ $<
+	$(CC) $(ALL_CFLAGS) -DELPIS_ED25519_SIGN=1 -DELPIS_TLS_TESTING=1 -c -o $@ $<
 
 $(TESTBIN): $(TEST_OBJ) tests/test_main.o | $(BINDIR)
 	$(CC) $(ALL_CFLAGS) -o $@ $^ $(ALL_LDFLAGS) $(LIBS)
@@ -331,25 +368,31 @@ test check: $(TESTBIN)
 # ---- fuzzing ---------------------------------------------------------------
 # libFuzzer over everything a DNS message passes through before it is trusted:
 # the parser, every record type's rdata, and the NSEC and NSEC3 proofs
-# (tests/fuzz_msg.c).  Needs clang.  Its objects are compiled apart from the
-# normal ones, under bin/fuzz/, with the fuzzer's coverage and ASan/UBSan.
+# (tests/fuzz_msg.c); and over the TLS client, records and handshake
+# messages from a server on port 853 (tests/fuzz_tls.c).  Needs clang.  Its
+# objects are compiled apart from the normal ones, under bin/fuzz/, with the
+# fuzzer's coverage and ASan/UBSan, and with the TLS engine's test entry
+# points.
 #
 #   make fuzz
 #   mkdir -p bin/corpus && cd bin && ./fuzz-msg -max_total_time=300 corpus/
+#   mkdir -p bin/corpus-tls && cd bin && ./fuzz-tls -max_total_time=300 corpus-tls/
 #
 # From bin/, because with -jobs libFuzzer writes a fuzz-N.log wherever it runs.
 FUZZ_CC     ?= clang
 FUZZ_BIN    := $(BINDIR)/fuzz-msg
+FUZZ_TLS_BIN := $(BINDIR)/fuzz-tls
 FUZZ_DIR    := $(BINDIR)/fuzz
 FUZZ_CFLAGS  = $(STD) $(POSIX) $(WARN) $(DEFS) $(DEPFLAGS) -O1 -g \
                -fno-omit-frame-pointer -fsanitize=address,undefined \
-               -Iinclude -Isrc -pthread
+               -DELPIS_TLS_TESTING=1 -Iinclude -Isrc -pthread
 FUZZ_OBJ    := $(patsubst %.c,$(FUZZ_DIR)/%.o,$(filter-out src/main.c,$(SRC) $(SIMD_SRC)))
 
-fuzz: $(FUZZ_BIN)
+fuzz: $(FUZZ_BIN) $(FUZZ_TLS_BIN)
 
 $(FUZZ_DIR)/src/simd/simd_avx2.o: FUZZ_ISA := -mavx2 -mbmi -mbmi2
 $(FUZZ_DIR)/src/simd/simd_sse2.o: FUZZ_ISA := -msse2
+$(FUZZ_DIR)/src/crypto/aes_ni.o: FUZZ_ISA := -maes -mpclmul -mssse3
 $(FUZZ_DIR)/src/util.o: src/gitrev.h src/buildtarget.h
 $(FUZZ_DIR)/src/webui/webui.o: src/webui/webui_assets.h
 $(FUZZ_DIR)/src/licence.o: src/licence_issuer.stamp
@@ -359,6 +402,9 @@ $(FUZZ_DIR)/%.o: %.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer-no-link $(FUZZ_ISA) -c -o $@ $<
 
 $(FUZZ_BIN): tests/fuzz_msg.c $(FUZZ_OBJ) | $(BINDIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -o $@ $^ $(LIBS)
+
+$(FUZZ_TLS_BIN): tests/fuzz_tls.c $(FUZZ_OBJ) | $(BINDIR)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -o $@ $^ $(LIBS)
 
 # Installs the same shape as the build tree, so the config lookup behaves
@@ -380,7 +426,9 @@ uninstall:
 # a build on another branch leaves objects for files this branch does not
 # have, or has somewhere else, and $(OBJ) would never name them.
 clean:
-	rm -f $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence $(FUZZ_BIN) $(FUZZ_BIN).d
+	rm -f $(BIN) $(TESTBIN) $(BINDIR)/$(PROG)-licence $(TLS_PROBE_BIN) $(TLS_PROBE_BIN).d \
+	      $(FUZZ_BIN) $(FUZZ_BIN).d \
+	      $(FUZZ_TLS_BIN) $(FUZZ_TLS_BIN).d
 	rm -rf $(FUZZ_DIR)
 	find src tests \( -name '*.o' -o -name '*.d' \) -exec rm -f {} +
 	rm -f src/gitrev.h src/licence_issuer.stamp src/buildtarget.h src/cflags.stamp
@@ -397,4 +445,4 @@ distclean: clean
 # includes the signing ed25519 and the test-issuer licence objects: a change to
 # the bignum header once left both behind, and every Ed25519 test failed.
 -include $(OBJ:.o=.d) tests/test_main.d tests/ed25519_sign.d \
-         tests/licence_test.d $(FUZZ_OBJ:.o=.d)
+         tests/licence_test.d tests/tls_test.d $(FUZZ_OBJ:.o=.d)

@@ -155,12 +155,14 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
 ```
-elpis.sakurako.oomuro   text = "elpis=1.0.0" "edition=community"
-                               "build=c662164779b7" "uptime=3601"
-                               "workers=8" "simd=avx2" "dnssec=validating"
+elpis.sakurako.oomuro   text = "elpis=2.4.0" "codename=Intrinsic Future"
+                               "edition=community" "build=v2.4.0"
+                               "uptime=3601" "workers=8" "simd=avx2"
+                               "dnssec=validating"
 ```
 
 `dig +short TXT elpis.sakurako.oomuro @127.0.0.1` does the same thing.
+`codename=` is the release's name, from 2.4.0 on, beside its version.
 
 Only clients the access-control list already admits get an answer. The default
 name sits in an undelegated TLD on purpose: nothing on the public internet can
@@ -351,6 +353,90 @@ against the name being sent, so it covers the zone and every name below it,
 whichever server is asked. Up to 32 entries. The shipped config lists `dnsprobe.online`. The
 name is Unbound's, and Elpis also accepts Unbound's `use-caps-for-id` for
 `use-0x20`.
+
+## DNS over TLS to authoritative servers
+
+```
+authoritative-dot: opportunistic     # default: no
+authoritative-dot-ttl: 24h
+authoritative-dot-retry: 1h
+authoritative-dot-max-try: 24        # 0 = never give up
+```
+
+Everything Elpis asks the root, the TLDs and the authoritative servers goes
+over plain DNS on port 53, readable by anyone on the path. With
+`authoritative-dot: opportunistic`, Elpis tries DNS over TLS on port 853 with
+each server it uses, as RFC 9539 describes, and keeps using it with the
+servers that answer there.
+
+| a server that | is asked |
+|---|---|
+| has not been tried | plain, as always, with a copy over DoT that nobody waits for: that is the test |
+| answered over DoT | over DoT only, on one connection per worker that is kept open, for `authoritative-dot-ttl` after its last DoT answer |
+| failed over DoT, or never answered there | plain, and tested again every `authoritative-dot-retry` |
+| failed `authoritative-dot-max-try` retries | plain, for good |
+
+So the first query to a server is no slower than before, and a server that
+takes DoT never sees a name in the clear again. A server that answers over DoT
+is chosen ahead of one that does not, however much faster the other is: most
+answers come from the cache, so a slower server costs little, and the name
+stays out of sight. A server that is failing or held down is not chosen for
+that, and no plain copy of a question asked over DoT goes to anyone else.
+
+If a DoT query goes unanswered for as long as the server usually takes, the
+same question goes plain to the same server. If that is answered, DoT is
+marked failed for the server. A connection that is refused, fails its
+handshake, or ends with a TLS alert is marked failed at once, and its queries
+go plain straight away. A connection that had worked and is merely closed
+under its queries has only lost them: they go again over a fresh one.
+
+`yes` is not accepted: it is kept for a strict mode, one day, that would rather
+fail than ask in the clear. Durations take `s`, `m`, `h` and `d`. The ttl and
+the retry run from a minute to a week, the retry is at most the ttl, and
+`authoritative-dot-max-try` is at most 255. Forwarders and stub zones are left
+alone: they are configuration, and asked the way it says.
+
+### What it protects, and what it does not
+
+The connection is encrypted but not authenticated. An NS record gives a name
+and an address, not an identity a certificate could be checked against, so the
+certificate is not checked; the server's Finished message is, which proves the
+two ends derived the same keys. That stops someone watching the path from
+reading what is asked. It does nothing against someone who can sit on the path,
+who could read it or simply block port 853 -- and blocking only pushes Elpis
+back to plain DNS, which is where it was without this.
+
+The authoritative server itself still sees every question, and an ECS subnet
+if one is sent. DNSSEC is unchanged: an answer over DoT is trusted no more than
+a plain one. Queries over DoT are padded to a multiple of 128 bytes (RFC
+8467), so their length gives less away.
+
+### What it costs
+
+- **Few servers offer it yet.** Most authorities drop connections to port 853
+  without a reply, so most tests end in a 3-second timeout. That is a socket
+  and a timer, not a wait: nobody is waiting on a test. At most 16 handshakes
+  are in progress per worker.
+- **Connections.** One per server per worker, closed after 15 s unused, at most
+  256 per worker. About 1.2 KB of TLS state each, plus buffers that are freed
+  while it idles.
+- **CPU.** An X25519 key exchange per handshake, about 0.3 ms. Records are
+  ChaCha20-Poly1305, or AES-128-GCM where the CPU has AES-NI.
+
+### Checking it
+
+The status page's **DoT servers** window lists every server that has answered
+over DoT, where each stands now, and why tests failed. `b.root-servers.net`
+and Facebook's authoritative servers take DoT, so asking for a few of
+Facebook's names shows it working:
+
+```bash
+dig @127.0.0.1 -p 5335 www.facebook.com A
+dig @127.0.0.1 -p 5335 www.whatsapp.com A
+```
+
+The first query to each server goes plain; once the test is answered, the
+window lists the server as available, and later queries to it go over DoT.
 
 ## Zones whose servers misbehave
 

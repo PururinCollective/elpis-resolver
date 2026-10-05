@@ -9,6 +9,7 @@
  * expose earlier values.
  */
 #include "elpis/crypto.h"
+#include "elpis/tlscrypto.h"
 #include "elpis/util.h"
 #include "elpis/log.h"
 
@@ -70,40 +71,6 @@ static int os_random(void *buf, size_t n)
 /* ChaCha20 stream                                                     */
 /* ------------------------------------------------------------------ */
 
-#define QR(a, b, c, d)                              \
-    do {                                            \
-        a += b; d ^= a; d = elpis_rotl32(d, 16);    \
-        c += d; b ^= c; b = elpis_rotl32(b, 12);    \
-        a += b; d ^= a; d = elpis_rotl32(d, 8);     \
-        c += d; b ^= c; b = elpis_rotl32(b, 7);     \
-    } while (0)
-
-static void chacha20_block(const uint32_t in[16], uint8_t out[64])
-{
-    uint32_t x[16];
-    int i;
-
-    memcpy(x, in, sizeof x);
-    for (i = 0; i < 10; i++) {
-        QR(x[0], x[4], x[ 8], x[12]);
-        QR(x[1], x[5], x[ 9], x[13]);
-        QR(x[2], x[6], x[10], x[14]);
-        QR(x[3], x[7], x[11], x[15]);
-        QR(x[0], x[5], x[10], x[15]);
-        QR(x[1], x[6], x[11], x[12]);
-        QR(x[2], x[7], x[ 8], x[13]);
-        QR(x[3], x[4], x[ 9], x[14]);
-    }
-    for (i = 0; i < 16; i++) {
-        uint32_t v = x[i] + in[i];
-        /* ChaCha serialises little-endian. */
-        out[i * 4 + 0] = (uint8_t)v;
-        out[i * 4 + 1] = (uint8_t)(v >> 8);
-        out[i * 4 + 2] = (uint8_t)(v >> 16);
-        out[i * 4 + 3] = (uint8_t)(v >> 24);
-    }
-}
-
 typedef struct {
     uint32_t state[16];
     uint8_t  buf[64];
@@ -163,7 +130,7 @@ static void rng_rekey(rng_t *r)
     r->state[12]++;
     if (r->state[12] == 0)
         r->state[13]++;
-    chacha20_block(r->state, out);
+    elpis_chacha20_block(r->state, out);
 
     for (i = 0; i < 8; i++)
         r->state[4 + i] = (uint32_t)out[i * 4] |
@@ -182,7 +149,7 @@ static void rng_refill(rng_t *r)
     r->state[12]++;
     if (r->state[12] == 0)
         r->state[13]++;
-    chacha20_block(r->state, r->buf);
+    elpis_chacha20_block(r->state, r->buf);
     r->pos = 0;
 }
 

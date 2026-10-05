@@ -125,9 +125,12 @@ int elpis_ctx_init(elpis_ctx_t *ctx, const char *conf_path)
         if (cpu->avx512f)  elpis_strlcat(feat, " avx512f", sizeof feat);
         if (cpu->neon)     elpis_strlcat(feat, " neon", sizeof feat);
         if (cpu->crc32)    elpis_strlcat(feat, " crc32", sizeof feat);
-        elpis_info("elpis %s starting: %s kernels (cpu:%s), %s, %s, %s %s, "
+        if (cpu->aes)      elpis_strlcat(feat, " aes", sizeof feat);
+        if (cpu->pclmul)   elpis_strlcat(feat, " pclmul", sizeof feat);
+        elpis_info("elpis %s%s%s%s starting: %s kernels (cpu:%s), %s, %s, %s %s, "
                    "%llu MiB RAM detected, cache budget %llu MiB",
-                   ELPIS_VERSION, elpis_simd_backend(),
+                   ELPIS_VERSION, ELPIS_CODENAME[0] ? " \"" : "", ELPIS_CODENAME,
+                   ELPIS_CODENAME[0] ? "\"" : "", elpis_simd_backend(),
                    feat[0] ? feat : " none", elpis_loop_backend(),
                    elpis_compiler(), elpis_build_arch(), elpis_build_target(),
                    (unsigned long long)(ctx->plan.ram_total / (1024 * 1024)),
@@ -1103,7 +1106,13 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-d"))                           foreground = 1;
         else if (!strcmp(a, "-t"))                           testonly = 1;
         else if (!strcmp(a, "-v"))                           verbose++;
-        else if (!strcmp(a, "-V")) { printf("elpis %s\n", ELPIS_VERSION); return 0; }
+        else if (!strcmp(a, "-V")) {
+            if (ELPIS_CODENAME[0])
+                printf("elpis %s \"%s\"\n", ELPIS_VERSION, ELPIS_CODENAME);
+            else
+                printf("elpis %s\n", ELPIS_VERSION);
+            return 0;
+        }
         else if (!strcmp(a, "--hash-password")) return hash_password(argv[i + 1]);
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option '%s'\n", a); usage(argv[0]); return 2; }

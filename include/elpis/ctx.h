@@ -50,6 +50,19 @@ typedef struct {
      * back tailored to it (SCOPE above 0).
      */
     uint64_t ecs_sent, ecs_tailored;
+    /*
+     * DNS over TLS to authoritative servers (authoritative-dot:): tests
+     * started and answered; failed connections by what went wrong; queries
+     * sent over DoT and answers read back; plain resends after a DoT query
+     * went unanswered; queries resent after a connection was lost;
+     * connections opened and closed, the difference being those open now;
+     * handshakes finished and their summed time.
+     */
+    uint64_t dot_tests, dot_tests_ok;
+    uint64_t dot_fail_refused, dot_fail_timeout, dot_fail_closed;
+    uint64_t dot_fail_nogroup, dot_fail_version, dot_fail_alpn, dot_fail_tls;
+    uint64_t dot_queries, dot_answers, dot_safety, dot_lost;
+    uint64_t dot_opened, dot_closed, dot_handshakes, dot_hs_ms;
 } elpis_stats_t;
 
 /*
@@ -98,6 +111,9 @@ typedef struct {
     elpis_selfinfo_t    self;
     elpis_licence_t     licence;    /* checked once, at startup */
     uint64_t            start_ms;
+    /* Where DoT connects: 853, or 0 for 853.  Only the self-test moves it,
+     * to a port it can listen on; it is not a setting. */
+    uint16_t            dot_port;
 
     volatile int        shutdown;
     volatile int        reload;

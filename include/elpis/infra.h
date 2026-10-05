@@ -99,7 +99,36 @@ typedef struct {
      * that starts tailoring answers should be noticed eventually.
      */
     uint32_t ecs_off_until;
+    /*
+     * Opportunistic DNS over TLS (authoritative-dot:).  dot_until is when an
+     * available server's DoT lapses unless another answer renews it, or when
+     * a failed one is next tested.  dot_tries counts failed tests since DoT
+     * last worked.  dot_claim keeps a test from being started twice at once.
+     * dot_keep holds the entry for its DoT state past the usual hour; the
+     * RTT and the rest still go stale after the hour, as before.
+     */
+    uint8_t  dot_state;
+    uint8_t  dot_tries;
+    uint32_t dot_until;
+    uint32_t dot_claim;
+    uint32_t dot_keep;
 } elpis_infra_info_t;
+
+/* DoT, per server.  UNKNOWN is untested, or an entry that started over. */
+#define ELPIS_DOT_UNKNOWN      0
+#define ELPIS_DOT_AVAILABLE    1
+#define ELPIS_DOT_FAILED       2
+#define ELPIS_DOT_UNAVAILABLE  3   /* retries used up: plain for good */
+
+/* What a query to a server does about DoT now. */
+#define ELPIS_DOTM_PLAIN  0
+#define ELPIS_DOTM_USE    1        /* over DoT only                     */
+#define ELPIS_DOTM_TEST   2        /* plain, with a DoT copy as the test */
+
+/* A test in flight keeps others off the server this long. */
+#define ELPIS_DOT_CLAIM_S      10u
+/* An unavailable server's entry is kept this long, for its "never again". */
+#define ELPIS_DOT_GIVE_UP_KEEP_S (30u * 86400u)
 
 /* How long a server that will not take ECS goes without it. */
 #define ELPIS_ECS_OFF_S      3600u
@@ -143,5 +172,21 @@ void elpis_infra_ecs_off(elpis_cache_t *c, const elpis_addr_t *a, uint32_t until
 
 /* Effective selection cost: srtt plus a penalty for recent timeouts. */
 uint32_t elpis_infra_cost(const elpis_infra_info_t *i);
+
+/* ---- DoT state (see the fields above) ---- */
+int  elpis_infra_dot_mode(const elpis_infra_info_t *i, uint32_t now);
+/* Take the test for this server: 1 when nobody else had it. */
+int  elpis_infra_dot_claim(elpis_cache_t *c, const elpis_addr_t *a,
+                           uint32_t now);
+/* A DoT answer came: available, for ttl_s from now. */
+void elpis_infra_dot_ok(elpis_cache_t *c, const elpis_addr_t *a, uint32_t now,
+                        uint32_t ttl_s);
+/*
+ * DoT failed, or a test did: failed until now + retry_s, or unavailable once
+ * more than max_try retries have failed (0 = no limit).  Returns the state
+ * it is left in.
+ */
+int  elpis_infra_dot_fail(elpis_cache_t *c, const elpis_addr_t *a,
+                          uint32_t now, uint32_t retry_s, uint32_t max_try);
 
 #endif /* ELPIS_INFRA_H */

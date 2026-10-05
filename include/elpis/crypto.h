@@ -9,6 +9,9 @@
  * for clarity and bounds safety rather than constant time -- with one
  * exception, the final signature comparisons, which use a constant-time
  * compare out of habit rather than necessity.
+ *
+ * The TLS client's primitives, which do hold secrets and are constant time,
+ * are in tlscrypto.h.
  */
 #ifndef ELPIS_CRYPTO_H
 #define ELPIS_CRYPTO_H

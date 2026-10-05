@@ -34,6 +34,7 @@ puts the defaults back.
 | **Top names** | most queried, those ending in SERVFAIL, those failing DNSSEC validation |
 | **Top clients** | busiest clients, clients being handed SERVFAIL, clients asking for bogus names, and upstream servers that stopped answering |
 | **Held servers** | servers held down by `server-hold-down`: the zone, the question types each is held for, a countdown to its next try, how long it has been silent, how many lookups in the zone were turned away, and the client and name whose query set the hold off (and the latest one, when different). A server that answers again stays listed for ten minutes, marked as answering. See [a zone whose servers never answer](troubleshooting.md#a-zone-whose-servers-never-answer) |
+| **DoT servers** | DNS over TLS to authoritative servers (`authoritative-dot`): how many servers take it now, how many failed or were given up, how many connections are open and what share of upstream queries were answered over it; tests started and answered, why tests failed (refused, no reply, closed, no X25519, no TLS 1.3, ALPN refused, other TLS errors), queries and answers over DoT, plain resends after no reply, and handshakes; then the servers that have answered over DoT, most answers first, each with its zone, where it stands now (available and for how long, or failed and when its next retry is due), its last handshake time, its cipher suite and when it was last used |
 | **Log** | the recent warnings and errors, newest first; it keeps the size you give it and holds your scroll position while new entries arrive |
 | **About** | edition and operator, version, the commit and compiler the binary was built with and the CPU it was built for, uptime, and which ML-DSA parameter sets are live |
 | **Layout** | the desktop as one line, to carry an arrangement to another browser |
@@ -132,10 +133,11 @@ than shown with the optimistic starting estimate, which is not a measurement.
 
 ## Reaching it safely
 
-The page speaks plain HTTP and binds loopback. There is no TLS in the resolver
-and there should not be: terminating TLS means a TLS stack, a certificate
-parser and a key in the address space of the process answering DNS, which is a
-great deal of attack surface to add for a status page. Three ways to reach it,
+The page speaks plain HTTP and binds loopback. Elpis carries a TLS client, for
+[DNS over TLS to authoritative servers](configuration.md#dns-over-tls-to-authoritative-servers),
+but no TLS server, and it should not have one: terminating TLS means a
+certificate parser and a private key in the address space of the process
+answering DNS, which is a great deal of attack surface to add for a status page. Three ways to reach it,
 in order of how little work they are:
 
 **SSH tunnel** — nothing to configure, and the encryption is already there.

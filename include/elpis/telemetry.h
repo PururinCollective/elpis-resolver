@@ -108,6 +108,26 @@ typedef struct {
     elpis_tmasker_t last;      /* ... and most recently                    */
 } elpis_tmheld_t;
 
+/*
+ * Servers that speak DoT (authoritative-dot:), for the status page's DoT
+ * window.  A row starts with a server's first finished handshake.  Rows are
+ * written under the lock, but only on rare events -- a handshake, a failure
+ * -- and with answers counted by the connection and handed over in batches,
+ * so a DoT answer takes no lock.  Whether DoT stands for a server now is
+ * read from the infra cache, as it is for held servers.
+ */
+#define ELPIS_TM_DOT      256u
+
+typedef struct {
+    elpis_addr_t server;
+    char         zone[ELPIS_TM_KEYLEN + 1];   /* last asked over DoT        */
+    uint64_t     answers;    /* DNS answers read over DoT                  */
+    uint32_t     hs_ms;      /* the last full handshake                    */
+    uint16_t     suite;
+    uint32_t     last;       /* last handshake or answer, monotonic seconds */
+    uint32_t     fails;      /* times DoT failed after it had worked       */
+} elpis_tmdot_t;
+
 /* What was waiting on the query whose timeout held a server. */
 typedef struct {
     const elpis_addr_t *server;
@@ -151,6 +171,13 @@ void elpis_tm_answer(elpis_wtm_t *w, const elpis_name_t *qname,
 void elpis_tm_timeout(elpis_wtm_t *w, const elpis_addr_t *server);
 /* A server was held, or held for longer.  Takes the lock; see above. */
 void elpis_tm_held(const elpis_tmhold_t *h);
+/* DoT to a server: a handshake finished, answers were read, or it failed
+ * (`state` being what the server was left in, ELPIS_DOT_*).  Lock taken. */
+void elpis_tm_dot_handshake(const elpis_addr_t *server, uint16_t suite,
+                            uint32_t ms, uint32_t now);
+void elpis_tm_dot_answers(const elpis_addr_t *server, const elpis_name_t *zone,
+                          uint32_t n, uint32_t now);
+void elpis_tm_dot_failed(const elpis_addr_t *server, int state, uint32_t now);
 /* A resolution in `zone` ended at once because its servers were held. */
 void elpis_tm_turned_away(elpis_wtm_t *w, const elpis_name_t *zone);
 /* Bytes on the wire, counted where they are already being measured. */
@@ -172,6 +199,9 @@ unsigned elpis_tm_top(elpis_top_t which, elpis_tmrow_t *out, unsigned max);
 
 /* Copy the held-server rows, most recently held first. */
 unsigned elpis_tm_held_rows(elpis_tmheld_t *out, unsigned max);
+
+/* Copy the DoT rows, most answers first. */
+unsigned elpis_tm_dot_rows(elpis_tmdot_t *out, unsigned max);
 
 /* A zone name as the tables write it: lowercase, truncated to fit. */
 void elpis_tm_name_text(const elpis_name_t *n, char *out, size_t outsz);

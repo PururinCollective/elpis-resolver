@@ -111,6 +111,10 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->do_ipv6          = 1;
     c->prefer_ipv6      = 0;
     c->tcp_upstream     = 1;
+    c->adot             = 0;
+    c->adot_ttl_s       = 86400;
+    c->adot_retry_s     = 3600;
+    c->adot_max_try     = 24;
 
     c->ecs              = 0;
     c->ecs_ip_type      = ELPIS_ECS_TYPE_CLIENT;
@@ -518,6 +522,37 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("do-ipv6"))       return want_bool(&p, key, val, &c->do_ipv6);
     if (KEY("prefer-ipv6"))   return want_bool(&p, key, val, &c->prefer_ipv6);
     if (KEY("tcp-upstream"))  return want_bool(&p, key, val, &c->tcp_upstream);
+    /*
+     * "yes" is refused, not taken as opportunistic: it is kept for a strict
+     * mode, one day, that would rather fail than send in the clear.
+     */
+    if (KEY("authoritative-dot")) {
+        int b;
+        if (!elpis_strcasecmp_ascii(val, "opportunistic"))
+            c->adot = 1;
+        else if (elpis_parse_bool(val, &b) == 0 && !b)
+            c->adot = 0;
+        else {
+            perr(&p, key, val);
+            return ELPIS_ERR;
+        }
+        return ELPIS_OK;
+    }
+    if (KEY("authoritative-dot-ttl")) {
+        if (want_dur(&p, key, val, &c->adot_ttl_s) != 0) return ELPIS_ERR;
+        c->adot_ttl_s = ELPIS_CLAMP(c->adot_ttl_s, 60u, 7u * 86400u);
+        return ELPIS_OK;
+    }
+    if (KEY("authoritative-dot-retry")) {
+        if (want_dur(&p, key, val, &c->adot_retry_s) != 0) return ELPIS_ERR;
+        c->adot_retry_s = ELPIS_CLAMP(c->adot_retry_s, 60u, 7u * 86400u);
+        return ELPIS_OK;
+    }
+    if (KEY("authoritative-dot-max-try")) {
+        if (want_u32(&p, key, val, &c->adot_max_try) != 0) return ELPIS_ERR;
+        c->adot_max_try = ELPIS_MIN(c->adot_max_try, 255u);
+        return ELPIS_OK;
+    }
     if (KEY("ecs") || KEY("edns-client-subnet"))
         return want_bool(&p, key, val, &c->ecs);
     if (KEY("ecs-ip-type")) {
@@ -894,6 +929,12 @@ void elpis_conf_dump(const elpis_conf_t *c)
         elpis_info("  caps-exempt %s",
                    elpis_name_str(&c->caps_exempt[i], zb, sizeof zb));
     }
+    if (c->adot)
+        elpis_info("  authoritative-dot=opportunistic ttl=%us retry=%us "
+                   "max-try=%u%s", (unsigned)c->adot_ttl_s,
+                   (unsigned)ELPIS_MIN(c->adot_retry_s, c->adot_ttl_s),
+                   (unsigned)c->adot_max_try,
+                   c->adot_max_try ? "" : " (no limit)");
     elpis_info("  max-pending=%u per worker%s", c->max_pending,
                c->max_pending_auto ? " (auto)" : "");
     if (c->edns_auto)

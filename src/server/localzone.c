@@ -305,6 +305,13 @@ int elpis_localzone_static(elpis_worker_t *w, const elpis_msg_t *m,
         snprintf(tmp, sizeof tmp, "elpis=%s", ELPIS_VERSION);
         txt_add(rd, sizeof rd, &rdlen, tmp);
 
+        /* The release's name, from 2.4.0 on: beside the version, never in
+         * place of it. */
+        if (ELPIS_CODENAME[0]) {
+            snprintf(tmp, sizeof tmp, "codename=%s", ELPIS_CODENAME);
+            txt_add(rd, sizeof rd, &rdlen, tmp);
+        }
+
         snprintf(tmp, sizeof tmp, "edition=%s",
                  c->edition[0] ? c->edition : "unspecified");
         txt_add(rd, sizeof rd, &rdlen, tmp);

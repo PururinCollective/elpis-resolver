@@ -17,6 +17,10 @@
 #ifndef ELPIS_VERSION
 #define ELPIS_VERSION "0.0.0"
 #endif
+/* The release's name (Makefile CODENAME), "" for a build without one. */
+#ifndef ELPIS_CODENAME
+#define ELPIS_CODENAME ""
+#endif
 #ifndef ELPIS_SYSCONFDIR
 #define ELPIS_SYSCONFDIR "/etc"
 #endif
@@ -101,6 +105,30 @@ ELPIS_INLINE void elpis_put64(uint8_t *p, uint64_t v)
     elpis_put32(p + 4, (uint32_t)v);
 }
 
+/* Little-endian, for the ciphers that are defined that way (ChaCha20,
+ * Poly1305, X25519). */
+ELPIS_INLINE uint32_t elpis_get32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+ELPIS_INLINE void elpis_put32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+ELPIS_INLINE uint64_t elpis_get64le(const uint8_t *p)
+{
+    return (uint64_t)elpis_get32le(p) | ((uint64_t)elpis_get32le(p + 4) << 32);
+}
+ELPIS_INLINE void elpis_put64le(uint8_t *p, uint64_t v)
+{
+    elpis_put32le(p, (uint32_t)v);
+    elpis_put32le(p + 4, (uint32_t)(v >> 32));
+}
+
 /* Load native 64-bit word from possibly-unaligned memory. */
 ELPIS_INLINE uint64_t elpis_load64(const void *p)
 {
@@ -134,6 +162,8 @@ ELPIS_INLINE uint64_t elpis_rotr64(uint64_t x, unsigned n)
 
 /* Branch-free constant-time byte compare; returns 0 on equal. */
 int elpis_ct_memcmp(const void *a, const void *b, size_t n);
+/* Zero a buffer holding a secret, in a way the compiler cannot elide. */
+void elpis_wipe(void *p, size_t n);
 
 /* ------------------------------------------------------------------ */
 /* Return codes                                                        */

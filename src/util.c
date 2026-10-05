@@ -696,6 +696,19 @@ int elpis_ct_memcmp(const void *a, const void *b, size_t n)
     return d != 0;
 }
 
+/*
+ * A plain memset of a buffer that is never read again is a dead store, and
+ * the compiler is entitled to drop it -- which is exactly the memset that
+ * clears a key on the way out of a function.  Writing through a volatile
+ * pointer is a side effect it has to keep.
+ */
+void elpis_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n-- > 0)
+        *v++ = 0;
+}
+
 /* ================================================================== */
 /* Address literals                                                    */
 /* ================================================================== */

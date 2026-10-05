@@ -19,6 +19,8 @@
 static void out_udp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
 static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm);
 static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events);
+static void dot_mark_failed(elpis_worker_t *w, const elpis_addr_t *server);
+static void dot_timeout(elpis_worker_t *w, elpis_outq_t *q);
 
 ELPIS_INLINE unsigned out_slot(uint16_t id, int sockidx)
 {
@@ -90,6 +92,7 @@ int elpis_out_init(elpis_worker_t *w)
 void elpis_out_fini(elpis_worker_t *w)
 {
     unsigned i;
+    elpis_dot_fini(w);
     for (i = 0; i < ELPIS_OUT_HASH; i++) {
         while (w->outhash[i] != NULL) {
             elpis_outq_t *q = w->outhash[i];
@@ -259,6 +262,10 @@ static size_t build_query(elpis_worker_t *w, elpis_outq_t *q,
             bufsize = ELPIS_MAX_UDP;
 
         elpis_edns_init(&e, bufsize, w->ctx->conf.dnssec ? 1 : 0);
+        /* Over DoT, padded to a multiple of 128 bytes (RFC 8467), so the
+         * length gives away less of the name. */
+        if (q->over_dot)
+            e.pad_to = 128;
         if (c->use_cookies) {
             elpis_cookie_client(&q->server, q->cookie);
             memcpy(e.cookie, q->cookie, 8);
@@ -328,6 +335,7 @@ void elpis_out_free(elpis_worker_t *w, elpis_outq_t *q)
         return;
     out_unregister(w, q);
     elpis_timer_del(w->loop, &q->timer);
+    elpis_dot_detach(q);
     if (q->tcpfd >= 0) {
         elpis_loop_del(w->loop, &q->tcpev);
         close(q->tcpfd);
@@ -382,27 +390,58 @@ void elpis_out_cancel(elpis_task_t *t)
 
 static int start_tcp(elpis_task_t *t, elpis_outq_t *q, const uint8_t *msg,
                      size_t msglen);
+static void dot_test(elpis_worker_t *w, const elpis_outq_t *orig,
+                     const uint8_t *msg, size_t len, const elpis_task_t *t);
+
+/* The query length-prefixed in q->txbuf, as DoT carries it. */
+static int dot_frame(elpis_outq_t *q, const uint8_t *msg, size_t len)
+{
+    q->txbuf = (uint8_t *)elpis_malloc(len + 2);
+    if (q->txbuf == NULL)
+        return -1;
+    elpis_put16(q->txbuf, (uint16_t)len);
+    memcpy(q->txbuf + 2, msg, len);
+    q->txlen = len + 2;
+    return 0;
+}
 
 /*
  * Build and send t's current question to one server, with its own ID, port,
  * 0x20 pattern and timer.  The caller decides what the query is to the task.
  * With udp_only set, a server that needs TCP is refused rather than dialled.
+ * With no_dot set, it goes plain even to a server that takes DoT.
+ *
+ * authoritative-dot: decides here between plain and DoT, from the server's
+ * infra entry (elpis_infra_dot_mode): a server known to take DoT gets the
+ * query over DoT only; one due a test gets it plain, as always, and a copy
+ * over DoT that nobody waits for, whose answer or failure is the test.
+ * Forwarders and stub zones are configuration and are left as they are, and
+ * so are races and probes, which are about measuring the plain path.
  */
 static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
-                               int force_tcp, int udp_only)
+                               int force_tcp, int udp_only, int no_dot)
 {
     elpis_worker_t *w = t->w;
     const elpis_conf_t *c = &w->ctx->conf;
     elpis_outq_t *q;
     elpis_infra_info_t inf;
     size_t len;
-    int sockidx;
+    int sockidx, mode = ELPIS_DOTM_PLAIN;
     ssize_t sent;
     uint32_t timeout;
 
     elpis_infra_get(w->ctx->infra, server, &inf);
     if (udp_only && (force_tcp || (inf.flags & ELPIS_INF_TCP_ONLY)))
         return NULL;
+
+again:
+    if (c->adot && !udp_only && !no_dot && !t->forwarding &&
+        !t->deleg_from_route) {
+        mode = elpis_infra_dot_mode(&inf, elpis_cached_now_s());
+        /* No room for another connection: plain this once, no failure. */
+        if (mode == ELPIS_DOTM_USE && !elpis_dot_can_send(w, server))
+            mode = ELPIS_DOTM_PLAIN;
+    }
 
     q = (elpis_outq_t *)elpis_calloc(1, sizeof *q);
     if (q == NULL)
@@ -418,11 +457,19 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
 
     if (force_tcp || (inf.flags & ELPIS_INF_TCP_ONLY))
         q->over_tcp = 1;
+    if (mode == ELPIS_DOTM_USE) {
+        q->over_dot = 1;
+        q->over_tcp = 1;
+    }
 
-    sockidx = pick_socket(w, elpis_addr_family(server));
-    if (sockidx < 0) {
-        elpis_free(q);
-        return NULL;
+    if (q->over_dot) {
+        sockidx = 0;                    /* not matched by socket */
+    } else {
+        sockidx = pick_socket(w, elpis_addr_family(server));
+        if (sockidx < 0) {
+            elpis_free(q);
+            return NULL;
+        }
     }
     q->sockidx = sockidx;
 
@@ -434,7 +481,17 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
 
     q->sent_ms = elpis_cached_now_ms();
 
-    if (q->over_tcp) {
+    if (q->over_dot) {
+        if (dot_frame(q, w->txbuf, len) != 0 ||
+            elpis_dot_send(w, q, t->have_deleg ? &t->deleg.zone : NULL) != 0) {
+            /* Could not get a connection after all: plain, built afresh. */
+            elpis_free(q->txbuf);
+            elpis_free(q);
+            no_dot = 1;
+            mode = ELPIS_DOTM_PLAIN;
+            goto again;
+        }
+    } else if (q->over_tcp) {
         if (start_tcp(t, q, w->txbuf, len) != ELPIS_OK) {
             elpis_free(q);
             return NULL;
@@ -453,15 +510,20 @@ static elpis_outq_t *out_start(elpis_task_t *t, const elpis_addr_t *server,
     }
 
     elpis_stat_inc(&w->stats.upstream_queries, 1);
+    if (mode == ELPIS_DOTM_TEST)
+        dot_test(w, q, w->txbuf, len, t);
 
     /*
      * Wait a little longer than this server's measured round trip -- and over
      * TCP, one round trip more, for the handshake that has to finish before
      * the query is even sent.  Without it a server more than about 100 ms
-     * away could not answer over TCP inside its own UDP allowance.
+     * away could not answer over TCP inside its own UDP allowance.  A DoT
+     * connection still in its handshake needs one more: TCP, then TLS.
      */
     timeout = inf.srtt + 4u * inf.rttvar;
     if (q->over_tcp)
+        timeout += inf.srtt;
+    if (q->over_dot && q->conn != NULL && !q->conn->open)
         timeout += inf.srtt;
     /*
      * A server that has never answered or timed out has no round trip to go
@@ -519,7 +581,7 @@ int elpis_out_send(elpis_task_t *t, const elpis_addr_t *server, int force_tcp)
     elpis_outq_t *q;
 
     elpis_out_cancel(t);
-    q = out_start(t, server, force_tcp, 0);
+    q = out_start(t, server, force_tcp, 0, 0);
     if (q == NULL)
         return ELPIS_ERR;
     t->out = q;
@@ -533,7 +595,7 @@ int elpis_out_race(elpis_task_t *t, const elpis_addr_t *server)
     /* Only beside a UDP query: TCP has its own handshake to wait for. */
     if (t->out == NULL || t->out->over_tcp || t->race != NULL)
         return ELPIS_ERR;
-    q = out_start(t, server, 0, 1);
+    q = out_start(t, server, 0, 1, 1);
     if (q == NULL)
         return ELPIS_ERR;
     t->race = q;
@@ -543,7 +605,7 @@ int elpis_out_race(elpis_task_t *t, const elpis_addr_t *server)
 
 int elpis_out_probe(elpis_task_t *t, const elpis_addr_t *server)
 {
-    elpis_outq_t *q = out_start(t, server, 0, 1);
+    elpis_outq_t *q = out_start(t, server, 0, 1, 1);
 
     if (q == NULL)
         return ELPIS_ERR;
@@ -699,6 +761,11 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         elpis_out_free(w, q);
         return;
     }
+
+    /* Sent plain because the same question over DoT went unanswered, and
+     * plain got through: DoT is what failed. */
+    if (q->dot_safety)
+        dot_mark_failed(w, &q->server);
 
     w->last_answer_ms = elpis_cached_now_ms();
     rtt = (uint32_t)(w->last_answer_ms - q->sent_ms);
@@ -936,6 +1003,10 @@ static void out_timeout(elpis_loop_t *lp, elpis_timer_t *tm)
     elpis_task_t *t = q->task;
     int others;
 
+    if (q->over_dot) {
+        dot_timeout(w, q);
+        return;
+    }
     if (t == NULL && !q->probe)
         return;
     if (q->late) {                      /* it really was not coming */
@@ -1162,4 +1233,169 @@ static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
             return;
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* DNS over TLS                                                        */
+/* ------------------------------------------------------------------ */
+
+static void dot_mark_failed(elpis_worker_t *w, const elpis_addr_t *server)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+    uint32_t now = elpis_cached_now_s();
+    int st = elpis_infra_dot_fail(w->ctx->infra, server, now,
+                                  ELPIS_MIN(c->adot_retry_s, c->adot_ttl_s),
+                                  c->adot_max_try);
+    elpis_stat_inc(&w->stats.dot_fail_timeout, 1);
+    elpis_tm_dot_failed(server, st, now);
+}
+
+/*
+ * The test: the plain query just sent, again over DoT, as a probe nobody
+ * waits for.  Its answer makes the server available; a connection that
+ * fails, or an answer that never comes, makes it failed.  One test per
+ * server at a time, across the workers (the claim), and none while this
+ * worker already has a connection there.
+ */
+static void dot_test(elpis_worker_t *w, const elpis_outq_t *orig,
+                     const uint8_t *msg, size_t len, const elpis_task_t *t)
+{
+    elpis_outq_t *p;
+
+    if (elpis_dot_find(w, &orig->server) != NULL ||
+        !elpis_dot_can_send(w, &orig->server) ||
+        !elpis_infra_dot_claim(w->ctx->infra, &orig->server,
+                               elpis_cached_now_s()))
+        return;
+
+    p = (elpis_outq_t *)elpis_calloc(1, sizeof *p);
+    if (p == NULL)
+        return;
+    p->tcpfd    = -1;
+    p->w        = w;
+    p->server   = orig->server;
+    p->id       = orig->id;
+    p->qtype    = orig->qtype;
+    p->qclass   = orig->qclass;
+    p->qnamelen = orig->qnamelen;
+    memcpy(p->qname_wire, orig->qname_wire, orig->qnamelen);
+    memcpy(p->cookie, orig->cookie, sizeof p->cookie);
+    p->used_edns   = orig->used_edns;
+    p->edns_size   = orig->edns_size;
+    p->used_cookie = orig->used_cookie;
+    p->sent_server_cookie = orig->sent_server_cookie;
+    p->used_ecs    = orig->used_ecs;
+    p->ecs_local   = orig->ecs_local;
+    p->ecs         = orig->ecs;
+    p->probe    = 1;
+    p->over_dot = 1;
+    p->over_tcp = 1;
+    p->dot_test = 1;
+    p->sent_ms  = elpis_cached_now_ms();
+
+    if (dot_frame(p, msg, len) != 0 ||
+        elpis_dot_send(w, p, t->have_deleg ? &t->deleg.zone : NULL) != 0) {
+        elpis_free(p->txbuf);
+        elpis_free(p);
+        return;
+    }
+    elpis_stat_inc(&w->stats.dot_tests, 1);
+    /* The connection has its own deadline; this one covers an open
+     * connection that never answers. */
+    p->timeout_ms = ELPIS_DOT_HANDSHAKE_MS + 2000u;
+    elpis_timer_add(w->loop, &p->timer, p->timeout_ms, out_timeout, p);
+}
+
+/*
+ * A DoT query's timer ran out.  A test that went unanswered is a failed
+ * test.  A query someone is waiting on is asked again, plain, of the same
+ * server -- the safety net -- and if that is answered, DoT is marked failed
+ * (handle_message).  The silence is not held against the server itself: that
+ * is for the plain query's own timer to judge.
+ */
+static void dot_timeout(elpis_worker_t *w, elpis_outq_t *q)
+{
+    elpis_task_t *t = q->task;
+    elpis_addr_t server = q->server;
+    elpis_outq_t *np;
+
+    if (t == NULL) {
+        if (q->dot_test)
+            dot_mark_failed(w, &server);
+        elpis_out_free(w, q);
+        return;
+    }
+    if (t->out != q) {                  /* not the task's query: drop it */
+        q->task = NULL;
+        elpis_out_free(w, q);
+        return;
+    }
+    elpis_stat_inc(&w->stats.dot_safety, 1);
+    np = out_start(t, &server, 0, 0, 1);
+    t->out = NULL;
+    q->task = NULL;
+    if (np == NULL) {
+        elpis_resolver_on_error(t, q, ELPIS_EDE_NETWORK_ERROR);
+        elpis_out_free(w, q);
+        return;
+    }
+    np->dot_safety = 1;
+    t->out = np;
+    elpis_out_free(w, q);
+}
+
+void elpis_out_dot_message(elpis_worker_t *w, elpis_outq_t *q,
+                           const elpis_msg_t *m)
+{
+    const elpis_conf_t *c = &w->ctx->conf;
+    uint32_t now = elpis_cached_now_s();
+    elpis_infra_info_t inf;
+
+    elpis_timer_del(w->loop, &q->timer);
+    elpis_stat_inc(&w->stats.dot_answers, 1);
+    if (q->dot_test)
+        elpis_stat_inc(&w->stats.dot_tests_ok, 1);
+    /*
+     * Any answer at all, even SERVFAIL, shows DoT works, and keeps it
+     * standing for another authoritative-dot-ttl.  Renewed at most once a
+     * minute, not written on every answer.
+     */
+    elpis_infra_get(w->ctx->infra, &q->server, &inf);
+    if (inf.dot_state != ELPIS_DOT_AVAILABLE ||
+        inf.dot_until < now + c->adot_ttl_s - 60u)
+        elpis_infra_dot_ok(w->ctx->infra, &q->server, now, c->adot_ttl_s);
+    handle_message(w, q, m);
+}
+
+/*
+ * q's connection is gone.  A test is over (dot.c has marked the server).  A
+ * query someone waits on goes plain -- or, when a connection that had worked
+ * was only lost, over DoT once more first.
+ */
+void elpis_out_dot_failed(elpis_worker_t *w, elpis_outq_t *q, int lost)
+{
+    elpis_task_t *t = q->task;
+    elpis_addr_t server = q->server;
+    elpis_outq_t *np;
+    int again = lost && !q->dot_resent;
+
+    if (t == NULL || t->out != q) {
+        q->task = NULL;
+        elpis_out_free(w, q);
+        return;
+    }
+    if (lost)
+        elpis_stat_inc(&w->stats.dot_lost, 1);
+    np = out_start(t, &server, 0, 0, !again);
+    t->out = NULL;
+    q->task = NULL;
+    if (np == NULL) {
+        elpis_resolver_on_error(t, q, ELPIS_EDE_NETWORK_ERROR);
+        elpis_out_free(w, q);
+        return;
+    }
+    if (np->over_dot)
+        np->dot_resent = 1;
+    t->out = np;
+    elpis_out_free(w, q);
 }
