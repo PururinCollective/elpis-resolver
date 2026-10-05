@@ -101,10 +101,67 @@ void elpis_sock_tune_tcp(int fd)
 #endif
 }
 
+/*
+ * Let a listener bind an address this host does not have yet.
+ *
+ * A listen line naming one address -- a LAN address from DHCP, a global IPv6
+ * address -- used to be fatal at boot.  Elpis can start before that address is
+ * up, an IPv6 address stays tentative for a second or two while duplicate
+ * address detection runs, and network-online.target in an LXC container or a
+ * VM promises neither.  bind() failed with "Cannot assign requested address",
+ * elpis exited, and unless a supervisor restarted it, it stayed down.  With
+ * this the bind succeeds, and queries arrive as soon as the address does.
+ * unbound's ip-freebind does the same.
+ *
+ * Listeners only.  An IPv6 socket with this set will send from an address the
+ * host does not have.  A listener only ever replies to a query that reached
+ * its address, so it never does; an outbound socket would.
+ *
+ * Linux needs no privilege for it, and IP_FREEBIND covers IPv6 sockets too.
+ * FreeBSD calls it IP_BINDANY and wants root, which elpis still is when it
+ * binds, if it was started as root.  Failure is not an error: bind() then
+ * behaves as it always did.
+ */
+void elpis_sock_freebind(int fd, int family)
+{
+#if defined(IP_FREEBIND)
+    int on = 1;
+    (void)family;
+    (void)setsockopt(fd, IPPROTO_IP, IP_FREEBIND, &on, sizeof on);
+#elif defined(IP_BINDANY) && defined(IPV6_BINDANY)
+    int on = 1;
+    if (family == AF_INET6)
+        (void)setsockopt(fd, IPPROTO_IPV6, IPV6_BINDANY, &on, sizeof on);
+    else
+        (void)setsockopt(fd, IPPROTO_IP, IP_BINDANY, &on, sizeof on);
+#else
+    (void)fd;
+    (void)family;
+#endif
+}
+
+int elpis_sock_addr_usable(const elpis_addr_t *a)
+{
+    elpis_addr_t b = *a;
+    int fd, ok;
+
+    if (elpis_addr_family(&b) == AF_INET)
+        b.u.v4.sin_port = 0;
+    else
+        b.u.v6.sin6_port = 0;
+    fd = socket(elpis_addr_family(&b), SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0)
+        return 1;                      /* cannot tell; do not cry wolf */
+    ok = bind(fd, &b.u.sa, b.len) == 0 || errno != EADDRNOTAVAIL;
+    close(fd);
+    return ok;
+}
+
 static int bind_common(int fd, const elpis_addr_t *a, int reuseport, int isudp)
 {
     int on = 1;
 
+    elpis_sock_freebind(fd, elpis_addr_family(a));
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
 #if defined(SO_REUSEPORT)
     if (reuseport &&

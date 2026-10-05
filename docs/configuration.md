@@ -164,6 +164,27 @@ INFO    bound tcp [::]:53
 INFO  listening with 8 workers
 ```
 
+### Listening on one address
+
+A specific address doesn't have to be up when Elpis starts. That's normal at
+boot in a container or a VM: DHCP can finish after the service starts, and a
+new IPv6 address is unusable for a second or two while duplicate address
+detection runs. Elpis binds it anyway and answers as soon as it arrives:
+
+```
+WARN  listen 192.168.1.5:53: this host does not have that address yet; bound
+      anyway, and it answers as soon as the address comes up (if it never
+      does, check the address)
+```
+
+If it never comes up, check the address for a typo. `webgui-listen` works the
+same way.
+
+<sub>This is `IP_FREEBIND` on Linux (`IP_BINDANY` on FreeBSD, which needs
+root), the same thing unbound's `ip-freebind` does. Earlier builds failed here
+with "Cannot assign requested address" and exited, and needed a restart once
+the machine was up.</sub>
+
 ## 🪪 Asking a resolver what it is
 
 Every Elpis answers one TXT name about itself, so you can identify it without

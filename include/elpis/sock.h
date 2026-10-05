@@ -15,10 +15,24 @@
 int elpis_sock_nonblock(int fd);
 int elpis_sock_cloexec(int fd);
 
-/* Server sockets. */
+/*
+ * Server sockets.  Both bind with elpis_sock_freebind(), so a specific
+ * address that is not up yet still binds.
+ */
 int elpis_sock_udp_listen(const elpis_addr_t *a, int reuseport, int *fd_out);
 int elpis_sock_tcp_listen(const elpis_addr_t *a, int reuseport, int backlog,
                           int *fd_out);
+
+/* Before bind(): allow an address this host does not have yet.  Listeners only. */
+void elpis_sock_freebind(int fd, int family);
+
+/*
+ * Can this host bind `a` right now, without elpis_sock_freebind()?  1 for a
+ * wildcard, an address some interface has, or when it cannot tell; 0 when the
+ * address is not here yet or is still tentative.  Binds a throwaway socket to
+ * port 0, so it works where the netlink socket getifaddrs() needs is refused.
+ */
+int elpis_sock_addr_usable(const elpis_addr_t *a);
 
 /* Outbound UDP socket bound to a random high port on `family`. */
 int elpis_sock_udp_client(int family, const elpis_addr_t *src_hint,

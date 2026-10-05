@@ -817,6 +817,31 @@ static void warn_redundant_listeners(const elpis_conf_t *c)
                    "to serve IPv6 clients");
 }
 
+/*
+ * A listen address the host does not have yet still binds (see
+ * elpis_sock_freebind), which is right at boot and wrong for a typo.  Both
+ * look the same from here, so say it once and let the operator tell which.
+ */
+static void warn_absent_listeners(const elpis_conf_t *c)
+{
+    char buf[80];
+    unsigned i;
+
+    for (i = 0; i < c->nlisten; i++) {
+        if (elpis_sock_addr_usable(&c->listen[i]))
+            continue;
+        elpis_warn("listen %s: this host does not have that address yet; "
+                   "bound anyway, and it answers as soon as the address "
+                   "comes up (if it never does, check the address)",
+                   elpis_addr_str(&c->listen[i], buf, sizeof buf));
+    }
+    if (c->web && !elpis_sock_addr_usable(&c->web_listen))
+        elpis_warn("webgui-listen %s: this host does not have that address "
+                   "yet; bound anyway, and the status page appears as soon "
+                   "as the address comes up",
+                   elpis_addr_str(&c->web_listen, buf, sizeof buf));
+}
+
 static int resolve_port_conflicts(elpis_conf_t *c)
 {
     unsigned i;
@@ -1163,6 +1188,7 @@ int main(int argc, char **argv)
     if (resolve_port_conflicts(&ctx.conf) != ELPIS_OK)
         return 1;
     warn_redundant_listeners(&ctx.conf);
+    warn_absent_listeners(&ctx.conf);
 
     /*
      * Running as root with nowhere to drop to is a choice, not a mistake, but

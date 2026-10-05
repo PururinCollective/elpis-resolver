@@ -10,6 +10,7 @@ have to guess.
 | SERVFAIL, and `bogus answer` in the log | [A name answered SERVFAIL as bogus](#-a-name-answered-servfail-as-bogus) |
 | DoT is on, but nothing goes over it | [DoT not being used](#-dot-not-being-used) |
 | Elpis won't start: something holds the port | [Something else on port 53](#-something-else-on-port-53) |
+| Silent after a reboot until restarted | [Listening on one address](configuration.md#listening-on-one-address) |
 | `dropped` counts climbing | [Malformed input](#-malformed-input) |
 
 > [!TIP]

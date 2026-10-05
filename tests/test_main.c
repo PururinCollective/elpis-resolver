@@ -1405,6 +1405,70 @@ static void test_dns64(void)
 }
 
 /* ================================================================== */
+
+/* net.ipv{4,6}.ip_nonlocal_bind: when set, every address binds anyway. */
+static int nonlocal_bind_allowed(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    int v = 0;
+    if (fp == NULL)
+        return 0;
+    if (fscanf(fp, "%d", &v) != 1)
+        v = 0;
+    fclose(fp);
+    return v != 0;
+}
+
+static void test_listen_absent(void)
+{
+    static const struct { const char *addr; const char *nonlocal; } tv[] = {
+        { "192.0.2.1@5397",     "/proc/sys/net/ipv4/ip_nonlocal_bind" },
+        { "[2001:db8::1]@5397", "/proc/sys/net/ipv6/ip_nonlocal_bind" },
+    };
+    elpis_addr_t a;
+    unsigned i;
+
+    section("listening on an address that is not up yet");
+
+    elpis_addr_parse(&a, "127.0.0.1@5397", 53);
+    CHECK(elpis_sock_addr_usable(&a), "127.0.0.1 is usable");
+    elpis_addr_parse(&a, "0.0.0.0@5397", 53);
+    CHECK(elpis_sock_addr_usable(&a), "the IPv4 wildcard is usable");
+
+    /*
+     * At boot a DHCP or IPv6 address can come up after elpis starts.  A plain
+     * bind() then failed with EADDRNOTAVAIL, and the resolver stayed down
+     * until a restart.  These are documentation addresses no test host has.
+     */
+    for (i = 0; i < sizeof tv / sizeof tv[0]; i++) {
+        int fd = -1, probe;
+
+        elpis_addr_parse(&a, tv[i].addr, 53);
+        probe = socket(elpis_addr_family(&a), SOCK_DGRAM, 0);
+        if (probe < 0)
+            continue;                  /* no IPv6 on this host */
+        close(probe);
+
+        if (!nonlocal_bind_allowed(tv[i].nonlocal))
+            CHECK(!elpis_sock_addr_usable(&a), "%s is reported as not here",
+                  tv[i].addr);
+#if defined(__linux__)
+        CHECK(elpis_sock_udp_listen(&a, 1, &fd) == ELPIS_OK,
+              "udp listener binds %s anyway", tv[i].addr);
+        if (fd >= 0)
+            close(fd);
+        fd = -1;
+        CHECK(elpis_sock_tcp_listen(&a, 1, 16, &fd) == ELPIS_OK,
+              "tcp listener binds %s anyway", tv[i].addr);
+        if (fd >= 0)
+            close(fd);
+#else
+        (void)fd;
+#endif
+    }
+}
+
+/* ================================================================== */
 static void test_conflict(void)
 {
     elpis_addr_t addr, want;
@@ -5334,6 +5398,7 @@ int main(void)
     test_dnssec();
     test_dns64();
     test_conflict();
+    test_listen_absent();
     test_conf();
     test_licence();
     test_insecure_delegation();

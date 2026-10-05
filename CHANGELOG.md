@@ -14,6 +14,23 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**A listen address that is not up yet no longer stops Elpis at boot.** In an
+LXC container or a VM, Elpis can start before its LAN or IPv6 address is
+there: DHCP finishes later, and a new IPv6 address stays tentative for a
+second or two while duplicate address detection runs. A `listen:` line on
+that address failed with "Cannot assign requested address", Elpis exited,
+and it needed a restart once the machine was up. A `webgui-listen:` address
+failed the same way, which left the resolver running and the status page
+missing. Listeners now bind with `IP_FREEBIND`, as unbound's `ip-freebind`
+does, and answer as soon as the address comes up. A warning at startup names
+any address that is not there yet, so a typo still shows. Outbound sockets
+are not changed: an IPv6 socket with that option would send from an address
+the host does not have.
+
 ## 2.4.0 "Intrinsic Future" — 2026-10-05
 
 DNS over TLS to authoritative servers. With `authoritative-dot:
