@@ -1535,6 +1535,50 @@ static void test_conflict(void)
     CHECK(elpis_conflict_parse_row("garbage", AF_INET, &addr, &inode) == 0,
           "a malformed row is rejected");
 
+    section("what resolv.conf leans on systemd-resolved for");
+    {
+        /*
+         * A link into /run/systemd/resolve points at nothing after a reboot
+         * with resolved masked; a file naming 127.0.0.53 is fine when elpis
+         * answers there.  The address in a comment is neither.
+         */
+        char dir[] = "/tmp/elpis-rc-XXXXXX";
+        char link[64], stub[64], own[64], gone[64];
+        FILE *fp;
+
+        if (mkdtemp(dir) == NULL) {
+            CHECK(0, "a scratch directory");
+        } else {
+            snprintf(link, sizeof link, "%s/link", dir);
+            snprintf(stub, sizeof stub, "%s/stub", dir);
+            snprintf(own,  sizeof own,  "%s/own",  dir);
+            snprintf(gone, sizeof gone, "%s/gone", dir);
+            CHECK(symlink("../run/systemd/resolve/stub-resolv.conf", link) == 0 &&
+                  elpis_resolvconf_kind(link) == ELPIS_RESOLVCONF_LINK,
+                  "a link into /run/systemd/resolve, dangling or not");
+            fp = fopen(stub, "w");
+            if (fp != NULL) {
+                fputs("nameserver 127.0.0.53\noptions edns0 trust-ad\n", fp);
+                fclose(fp);
+            }
+            CHECK(elpis_resolvconf_kind(stub) == ELPIS_RESOLVCONF_STUB,
+                  "a file naming 127.0.0.53");
+            fp = fopen(own, "w");
+            if (fp != NULL) {
+                fputs("# was 127.0.0.53\nnameserver 127.0.0.1\n", fp);
+                fclose(fp);
+            }
+            CHECK(elpis_resolvconf_kind(own) == ELPIS_RESOLVCONF_OWN,
+                  "127.0.0.53 only in a comment is not the stub");
+            CHECK(elpis_resolvconf_kind(gone) == ELPIS_RESOLVCONF_OWN,
+                  "no file at all");
+            unlink(link);
+            unlink(stub);
+            unlink(own);
+            rmdir(dir);
+        }
+    }
+
     section("port collision rules");
     {
         elpis_addr_t bound;

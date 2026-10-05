@@ -308,9 +308,38 @@ sudo make uninstall          # removes the binary, keeps your config
 - `make install PREFIX=/usr/local` for another place, `DESTDIR=` for a
   packaging root.
 
-<sub>A systemd unit is in [contrib/elpis.service](../contrib/elpis.service).
-It expects the `/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE`
-rather than running as root.</sub>
+For a git clone, built in place and run as a service, two scripts look after
+it. Both run from the clone and look after the clone they sit in, and nothing
+is copied out of it except the unit, which systemd needs in
+`/etc/systemd/system`. **Clone into `/opt/elpis-resolver`**: it keeps Elpis
+apart from the system and easy to find, and it's what the paths below assume.
+
+| script | does |
+|---|---|
+| [`contrib/elpis-update.sh`](../contrib/elpis-update.sh) | pull, build, check the config, restart. Says when the unit in `contrib/` has changed |
+| [`contrib/elpis-install.sh`](../contrib/elpis-install.sh) | everything around the binary: the `elpis` account, installing or updating the unit, enabling the service. `RESOLVED=replace` also takes systemd-resolved's place on `127.0.0.53` |
+
+```bash
+sudo /opt/elpis-resolver/contrib/elpis-install.sh    # the first time
+sudo /opt/elpis-resolver/contrib/elpis-update.sh     # from then on
+sudo /opt/elpis-resolver/contrib/elpis-install.sh    # when update says the unit changed
+```
+
+> [!NOTE]
+> Both refuse to run unless the folder above `contrib/` is a git clone. With a
+> precompiled binary there is nothing to pull: replace the binary, and keep a
+> unit of your own, for which [contrib/elpis.service](../contrib/elpis.service)
+> is a starting point.
+
+<sub>A clone somewhere else works too: both scripts say `/opt/elpis-resolver` is
+the recommended place and carry on, and `elpis-install.sh` writes the unit for
+the clone's own path. Not under `/home`: the unit's `ProtectHome=` hides it
+from the service. Nor a path with spaces or `% " ' \ | &`, which a unit can't
+name.</sub>
+
+<sub>The unit expects the `/opt` path and binds port 53 with
+`CAP_NET_BIND_SERVICE` rather than running as root. `elpis-install.sh` looks
+before it changes anything; `DRY_RUN=1` in front shows what it would do.</sub>
 
 ## 🔬 Working on Elpis
 

@@ -200,7 +200,15 @@ INFO  listening with 8 workers
 ### Under the shipped systemd unit
 
 Elpis runs as `elpis`, not root, so it can't stop resolved, and the unit
-doesn't either. Free port 53 once:
+doesn't either. One command frees port 53 for good and puts Elpis on
+`127.0.0.53` in resolved's place
+([details](configuration.md#taking-systemd-resolveds-place-on-127053)):
+
+```bash
+sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-install.sh
+```
+
+Or by hand:
 
 ```bash
 sudo systemctl disable --now systemd-resolved

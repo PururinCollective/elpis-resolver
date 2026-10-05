@@ -38,11 +38,25 @@ int elpis_conflict_find(const elpis_addr_t *a, elpis_conflict_t *out);
 /* Is systemd the init system on this host? */
 int elpis_systemd_present(void);
 
-/* Ask systemd to stop systemd-resolved and wait for the port to clear. */
-int elpis_stop_systemd_resolved(const elpis_addr_t *a);
+/*
+ * Ask systemd to stop systemd-resolved and wait for the port to clear.
+ * `stub_is_ours`: elpis itself will answer on 127.0.0.53, port 53, so a
+ * resolv.conf naming that address still works once resolved is gone.
+ */
+int elpis_stop_systemd_resolved(const elpis_addr_t *a, int stub_is_ours);
 
-/* 1 when /etc/resolv.conf points at the systemd-resolved stub. */
-int elpis_resolvconf_uses_stub(void);
+/* Is a systemd-resolved process running?  Reads /proc/<pid>/comm, which any
+ * user may, so it answers where naming a port's owner needs root. */
+int elpis_resolved_running(void);
+
+/* What a resolv.conf at `path` (normally /etc/resolv.conf) leans on
+ * systemd-resolved for. */
+#define ELPIS_RESOLVCONF_OWN   0   /* nothing                                  */
+#define ELPIS_RESOLVCONF_STUB  1   /* names 127.0.0.53                         */
+#define ELPIS_RESOLVCONF_LINK  2   /* links into /run/systemd/resolve, which
+                                    * only resolved writes: gone after a reboot
+                                    * without it                               */
+int elpis_resolvconf_kind(const char *path);
 
 /*
  * Exposed for testing.  Both of these got the fiddly detail wrong the first

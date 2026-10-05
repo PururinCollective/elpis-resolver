@@ -861,7 +861,9 @@ static void warn_absent_addresses(const elpis_conf_t *c)
  * running as root, elpis cannot read another user's /proc/<pid>/fd to name
  * the owner -- which is exactly the case under the shipped unit -- and
  * "something is already listening" told the operator nothing.  On these two
- * addresses it is resolved.
+ * addresses it is resolved, provided a resolved is running at all: with it
+ * masked, as elpis-reinstall leaves it, the holder of 127.0.0.53 is more
+ * likely an elpis that has not let go yet.
  */
 static int resolved_stub_addr(const elpis_addr_t *a)
 {
@@ -884,6 +886,23 @@ static void say_resolved_fix(void)
     elpis_fatal("  or keep resolved without its stub: DNSStubListener=no in "
                 "/etc/systemd/resolved.conf");
     elpis_fatal("  or listen on another port");
+}
+
+/* Will elpis answer on 127.0.0.53, port 53, resolved's stub address? */
+static int listens_on_stub(const elpis_conf_t *c)
+{
+    unsigned i;
+
+    for (i = 0; i < c->nlisten; i++) {
+        const uint8_t *ip = (const uint8_t *)&c->listen[i].u.v4.sin_addr;
+        if (elpis_addr_family(&c->listen[i]) != AF_INET ||
+            elpis_addr_port(&c->listen[i]) != 53)
+            continue;
+        if ((ip[0] | ip[1] | ip[2] | ip[3]) == 0 ||
+            (ip[0] == 127 && ip[1] == 0 && ip[2] == 0 && ip[3] == 53))
+            return 1;
+    }
+    return 0;
 }
 
 static int resolve_port_conflicts(elpis_conf_t *c)
@@ -912,7 +931,8 @@ static int resolve_port_conflicts(elpis_conf_t *c)
              * already holds -- the kernel then hands each arriving query to
              * one of the two at random.
              */
-            if (elpis_stop_systemd_resolved(&c->listen[i]) != ELPIS_OK) {
+            if (elpis_stop_systemd_resolved(&c->listen[i],
+                                            listens_on_stub(c)) != ELPIS_OK) {
                 elpis_fatal("could not free %s; refusing to start and share "
                             "the port with systemd-resolved", ab);
                 return ELPIS_ERR;
@@ -935,7 +955,8 @@ static int resolve_port_conflicts(elpis_conf_t *c)
             return ELPIS_ERR;
         }
 
-        if (!k.identified && resolved_stub_addr(&k.addr)) {
+        if (!k.identified && resolved_stub_addr(&k.addr) &&
+            elpis_resolved_running()) {
             elpis_fatal("systemd-resolved's stub is listening on %s, which "
                         "conflicts with 'listen: %s'", cb, ab);
             say_resolved_fix();

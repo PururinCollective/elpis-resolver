@@ -84,7 +84,7 @@ Where things live and how one query moves through them.
 | `tests/test_main.c` | every self-test; `vectors.h` (frozen crypto vectors), `rfc8448.h` (TLS trace) |
 | `tests/fuzz_*.c` | libFuzzer: DNS messages, TLS client |
 | `tools/` | `conf-merge.sh` (3-way config merge), `mkassets.py`, `licence.c` (licence tool), `tls-probe.c`, `cputarget.sh` |
-| `contrib/` | systemd unit, `elpis-update.sh` |
+| `contrib/` | systemd unit, `elpis-update.sh` (pull, build, restart), `elpis-install.sh` (account, unit, enable, systemd-resolved, resolv.conf). Both run in place and look after the git clone they sit in (`/opt/elpis-resolver` recommended, said with a notice otherwise); nothing is copied out of it but the unit, which elpis-install writes for the clone's path |
 
 ## 🧱 Key types
 

@@ -1,13 +1,19 @@
 #!/bin/bash
 #
 # Pull, rebuild, restart -- and stop at the first thing that goes wrong.
+# For a git clone of Elpis, built in place; run it from the clone, as root:
 #
-#   install -m0755 contrib/elpis-update.sh /usr/local/sbin/elpis-update
-#   elpis-update
+#   /opt/elpis-resolver/contrib/elpis-update.sh
+#
+# It updates the clone it sits in, wherever that is; /opt/elpis-resolver is
+# the recommended place.  Nothing is copied out of the clone.  The systemd
+# unit and the rest of the setup are contrib/elpis-install.sh's business;
+# this says when the unit in contrib/ has changed and that needs running.
+# With a precompiled binary there is nothing to pull: replace the binary.
 #
 # Set MARCH for a tuned build; leave it unset for a portable one:
 #
-#   MARCH=znver3 elpis-update
+#   MARCH=znver3 /opt/elpis-resolver/contrib/elpis-update.sh
 #
 # Or keep the build settings in local.mk at the top of the tree, which make
 # reads and git leaves alone -- they then apply here, where this runs as root
@@ -25,7 +31,9 @@ set -euo pipefail
 # and fails from cron is usually this.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-SRC=${SRC:-/opt/elpis-resolver}
+# The clone this script sits in: the directory above contrib/.
+SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+RECOMMENDED=/opt/elpis-resolver
 UNIT=${UNIT:-elpis}
 MARCH=${MARCH:-}
 
@@ -34,6 +42,9 @@ say() { echo "[*] $*"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root: $SRC is root-owned and systemctl needs it"
 cd "$SRC" || die "no $SRC"
+[ -e .git ] || die "$SRC is not a git clone, so there is nothing to pull; with a precompiled binary, replace the binary instead"
+[ "$SRC" = "$RECOMMENDED" ] ||
+    echo "[!] this clone is at $SRC; $RECOMMENDED is the recommended place -- apart from the system and easy to find"
 command -v systemctl >/dev/null || die "no systemctl on PATH"
 
 # OPT goes on the command line only for MARCH: otherwise it would override
@@ -46,6 +57,9 @@ was_running=0
 systemctl is-active --quiet "$UNIT" && was_running=1
 
 say "updating $SRC"
+# This pull may replace this very script while it runs.  Git writes a new
+# file rather than rewriting the old one in place, so bash goes on reading
+# the old.
 git pull --ff-only
 
 # Build before stopping anything.  The old binary keeps serving while this
@@ -65,6 +79,14 @@ fi
 ./bin/elpis -t >/dev/null 2>&1 || die "built binary rejects the config; not restarting"
 new=$(./bin/elpis -V)
 
+# The unit is a copy in /etc/systemd/system, which a pull does not reach,
+# written for this clone's path: compare it as elpis-install would write it.
+unit_file=/etc/systemd/system/$UNIT.service
+unit_stale=0
+[ ! -f "$unit_file" ] ||
+    sed "s|/opt/elpis-resolver|$SRC|g" contrib/elpis.service | cmp -s - "$unit_file" ||
+    unit_stale=1
+
 say "restarting $UNIT"
 systemctl restart "$UNIT"
 
@@ -80,6 +102,10 @@ fi
 say "running $new"
 say "$(dig +short +tries=1 +timeout=3 TXT elpis.sakurako.oomuro @127.0.0.1 2>/dev/null | head -1 || echo '(probe did not answer)')"
 [ "$was_running" -eq 1 ] || say "note: $UNIT was not running before this"
+if [ "$unit_stale" -eq 1 ]; then
+    echo "[!] $unit_file differs from contrib/elpis.service;"
+    echo "[!] run $SRC/contrib/elpis-install.sh to bring it up to date"
+fi
 if [ -f bin/elpis.conf.shipped.pending ]; then
     echo "[!] new defaults in elpis.conf clash with your edits in bin/elpis.conf;"
     echo "[!] it is unchanged -- see bin/elpis.conf.new to merge them by hand"

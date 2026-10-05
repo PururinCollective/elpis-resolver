@@ -26,7 +26,7 @@ int elpis_systemd_present(void)
 #endif
 }
 
-int elpis_resolvconf_uses_stub(void)
+int elpis_resolvconf_kind(const char *path)
 {
 #if defined(__linux__)
     char link[512];
@@ -34,25 +34,60 @@ int elpis_resolvconf_uses_stub(void)
     FILE *fp;
     char line[256];
 
-    n = readlink("/etc/resolv.conf", link, sizeof link - 1);
+    n = readlink(path, link, sizeof link - 1);
     if (n > 0) {
         link[n] = '\0';
         if (strstr(link, "systemd/resolve") != NULL)
-            return 1;
+            return ELPIS_RESOLVCONF_LINK;
     }
     /* Not a symlink, or pointing elsewhere: look for the stub address. */
-    fp = fopen("/etc/resolv.conf", "r");
+    fp = fopen(path, "r");
     if (fp == NULL)
-        return 0;
+        return ELPIS_RESOLVCONF_OWN;
     while (fgets(line, sizeof line, fp) != NULL) {
-        if (strstr(line, "127.0.0.53") != NULL) {
+        if (strncmp(line, "nameserver", 10) == 0 &&
+            strstr(line, "127.0.0.53") != NULL) {
             fclose(fp);
-            return 1;
+            return ELPIS_RESOLVCONF_STUB;
         }
     }
     fclose(fp);
+#else
+    (void)path;
 #endif
+    return ELPIS_RESOLVCONF_OWN;
+}
+
+int elpis_resolved_running(void)
+{
+#if defined(__linux__)
+    DIR *proc = opendir("/proc");
+    struct dirent *de;
+    int found = 0;
+
+    if (proc == NULL)
+        return 0;
+    while (!found && (de = readdir(proc)) != NULL) {
+        char path[64], comm[32];
+        FILE *fp;
+
+        if (!isdigit((unsigned char)de->d_name[0]))
+            continue;
+        snprintf(path, sizeof path, "/proc/%.20s/comm", de->d_name);
+        fp = fopen(path, "r");
+        if (fp == NULL)
+            continue;
+        /* "systemd-resolved" is cut to fifteen characters, as in find_owner(). */
+        if (fgets(comm, sizeof comm, fp) != NULL &&
+            strncmp(comm, "systemd-resolve", 15) == 0)
+            found = 1;
+        fclose(fp);
+    }
+    closedir(proc);
+    return found;
+#else
     return 0;
+#endif
 }
 
 /*
@@ -344,7 +379,7 @@ int elpis_conflict_find(const elpis_addr_t *a, elpis_conflict_t *out)
 
 /* ------------------------------------------------------------------ */
 
-int elpis_stop_systemd_resolved(const elpis_addr_t *a)
+int elpis_stop_systemd_resolved(const elpis_addr_t *a, int stub_is_ours)
 {
 #if defined(__linux__)
     pid_t pid;
@@ -404,12 +439,36 @@ int elpis_stop_systemd_resolved(const elpis_addr_t *a)
     }
 
     elpis_info("systemd-resolved stopped");
-    if (elpis_resolvconf_uses_stub()) {
+    /*
+     * When elpis answers on 127.0.0.53 itself -- 'listen: 127.0.0.53@53', or
+     * the wildcard on port 53 -- a resolv.conf naming that address keeps
+     * working, and saying it "is no longer listening" was wrong.  A link into
+     * /run/systemd/resolve is another matter: only resolved writes there, so
+     * after a reboot without it the link points at nothing.
+     */
+    switch (elpis_resolvconf_kind("/etc/resolv.conf")) {
+    case ELPIS_RESOLVCONF_LINK:
+        if (stub_is_ours) {
+            elpis_warn("/etc/resolv.conf links into /run/systemd/resolve, "
+                       "which only systemd-resolved writes: elpis answers on "
+                       "127.0.0.53 now, but after a reboot the link points "
+                       "at nothing");
+            elpis_warn("  replace it with a file holding "
+                       "'nameserver 127.0.0.53'");
+            break;
+        }
+        /* fall through */
+    case ELPIS_RESOLVCONF_STUB:
+        if (stub_is_ours)
+            break;
         elpis_warn("/etc/resolv.conf still points at the systemd-resolved "
                    "stub (127.0.0.53), which is no longer listening -- this "
                    "host cannot resolve names until you repoint it");
         elpis_warn("  e.g. 'nameserver 127.0.0.1' once elpis is listening, or "
                    "keep resolved's stub and run elpis on another port");
+        break;
+    default:
+        break;
     }
     elpis_warn("systemd-resolved will come back on reboot, or as soon as "
                "anything asks for it; make it permanent with 'systemctl "

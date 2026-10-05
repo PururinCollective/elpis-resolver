@@ -14,14 +14,50 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Added
+
+**`contrib/elpis-install.sh`, for everything around the binary.** For a git
+clone built in place, `elpis-update.sh` pulls, builds and restarts,
+but a pull never reached the installed systemd unit, so a host kept the unit
+it was first set up with: 2.4.2's fix to the unit did nothing there until
+someone copied it by hand. `elpis-install.sh` creates the `elpis` account,
+installs or updates the unit (keeping the old one as `elpis.service.bak`),
+and enables the service, which `make install` never did. With
+`RESOLVED=replace` it also takes systemd-resolved's place: it masks resolved
+and replaces `/etc/resolv.conf`, a link into `/run/systemd/resolve` that
+points at nothing once resolved is gone, with a file naming Elpis on
+`127.0.0.53`. It looks before each step, refuses before changing anything
+when the config and resolved cannot work together, and `DRY_RUN=1` shows
+what it would do. Both scripts run in place and look after the clone they sit
+in, copy nothing out of it but the unit, and refuse to run on anything but a
+git clone; with a precompiled binary, replace the binary and keep your own
+unit. `/opt/elpis-resolver` is the recommended place, and they say so
+elsewhere; the unit is written for the clone's own path.
+`elpis-update.sh` now says when the unit in `contrib/` has changed, and is
+run from `/opt` too, not copied to `/usr/local/sbin` as its old header said.
+
+### Fixed
+
+**Elpis can take over 127.0.0.53 cleanly.** `listen: 127.0.0.53@53`, or the
+wildcard on port 53, answers on systemd-resolved's stub address in its place,
+so a resolv.conf naming it keeps working. Two messages assumed only resolved
+ever listens there. Stopping resolved as root warned that 127.0.0.53 "is no
+longer listening" even when Elpis was about to answer on it; now it says
+nothing then, and warns instead when `/etc/resolv.conf` is a link into
+`/run/systemd/resolve`, which points at nothing after a reboot without
+resolved. And 2.4.2 named an unknown holder of 127.0.0.53 or 127.0.0.54
+"systemd-resolved's stub" even with resolved masked, when the holder is more
+likely an Elpis that has not let go yet; it now says so only while a
+systemd-resolved process is running.
+
 ## 2.4.2 "Lettersong" — 2026-10-05
 
-Elpis comes up after a reboot under the shipped systemd unit. The unit could
-lose a silent race with systemd-resolved at boot and leave Elpis not
-running, with nothing in its log; 2.4.1's fixes for addresses not up yet
-never got the chance to run. The unit no longer touches resolved, and Elpis
-says plainly when resolved is in the way. Same name as 2.4.1: it finishes
-what that release set out to fix.
+The shipped systemd unit could lose a silent race with systemd-resolved at
+boot and leave Elpis not running, with nothing in its log. It no longer
+touches resolved, and Elpis says plainly when resolved is in the way. Same
+name as 2.4.1: it finishes what that release set out to fix.
 
 No `elpis.conf` that worked stops working. If you install the new systemd
 unit on a host where systemd-resolved still holds port 53, Elpis will refuse
@@ -34,9 +70,12 @@ stopped systemd-resolved with `Conflicts=systemd-resolved.service`, and at
 boot that could lose without a word. Elpis's start waits for
 `network-online.target`; when anything asked for resolved in the meantime,
 systemd cancelled Elpis's start, left it inactive, and logged nothing, so
-`Restart=` never fired. Seen on a VM: after a reboot, `Result=success`,
-`NRestarts=0`, and not one Elpis line in the journal, while resolved ran. The
-unit no longer mentions resolved, and the hand-back of port 53 in
+`Restart=` never fired. This was found, and reproduced with test units, while
+chasing a VM where Elpis was not running after a reboot, with
+`Result=success`, `NRestarts=0` and nothing in the journal. That VM turned out
+to have a unit that was never enabled, which looks exactly the same, so the
+race is real but was not what that VM hit. The unit no longer mentions
+resolved, and the hand-back of port 53 in
 `ExecStopPost=` went with it. Elpis always starts now. If resolved still holds
 the port, Elpis names it and the fix, exits, and `Restart=` tries again. Not
 running as root, it could not see who held the port and said only
