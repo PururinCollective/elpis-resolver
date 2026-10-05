@@ -856,6 +856,36 @@ static void warn_absent_addresses(const elpis_conf_t *c)
     }
 }
 
+/*
+ * 127.0.0.53 and 127.0.0.54, port 53: systemd-resolved's stub listeners.  Not
+ * running as root, elpis cannot read another user's /proc/<pid>/fd to name
+ * the owner -- which is exactly the case under the shipped unit -- and
+ * "something is already listening" told the operator nothing.  On these two
+ * addresses it is resolved.
+ */
+static int resolved_stub_addr(const elpis_addr_t *a)
+{
+    const uint8_t *ip = (const uint8_t *)&a->u.v4.sin_addr;
+
+    return elpis_addr_family(a) == AF_INET && elpis_addr_port(a) == 53 &&
+           ip[0] == 127 && ip[1] == 0 && ip[2] == 0 &&
+           (ip[3] == 53 || ip[3] == 54);
+}
+
+/*
+ * The fix, said the same way wherever resolved is in the way.  Disabling is
+ * not enough on its own: it stops resolved starting at boot by itself, but
+ * any unit that wants it still starts it.
+ */
+static void say_resolved_fix(void)
+{
+    elpis_fatal("  free the port for good: sudo systemctl disable --now "
+                "systemd-resolved && sudo systemctl mask systemd-resolved");
+    elpis_fatal("  or keep resolved without its stub: DNSStubListener=no in "
+                "/etc/systemd/resolved.conf");
+    elpis_fatal("  or listen on another port");
+}
+
 static int resolve_port_conflicts(elpis_conf_t *c)
 {
     unsigned i;
@@ -895,14 +925,20 @@ static int resolve_port_conflicts(elpis_conf_t *c)
             elpis_fatal("systemd-resolved (pid %ld) is listening on %s, which "
                         "conflicts with 'listen: %s', and this process is not "
                         "root so it cannot stop it", k.pid, cb, ab);
-            elpis_fatal("  sudo systemctl disable --now systemd-resolved, "
-                        "or listen on another port");
+            say_resolved_fix();
             return ELPIS_ERR;
         }
         if (k.is_resolved) {
             elpis_fatal("systemd-resolved (pid %ld) holds %s and "
                         "stop-systemd-resolved is off; refusing to share "
                         "the port", k.pid, cb);
+            return ELPIS_ERR;
+        }
+
+        if (!k.identified && resolved_stub_addr(&k.addr)) {
+            elpis_fatal("systemd-resolved's stub is listening on %s, which "
+                        "conflicts with 'listen: %s'", cb, ab);
+            say_resolved_fix();
             return ELPIS_ERR;
         }
 

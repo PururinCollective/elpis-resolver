@@ -14,6 +14,28 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**Elpis comes up after a reboot under the shipped systemd unit.** The unit
+stopped systemd-resolved with `Conflicts=systemd-resolved.service`, and at
+boot that could lose without a word. Elpis's start waits for
+`network-online.target`; when anything asked for resolved in the meantime,
+systemd cancelled Elpis's start, left it inactive, and logged nothing, so
+`Restart=` never fired. Seen on a VM: after a reboot, `Result=success`,
+`NRestarts=0`, and not one Elpis line in the journal, while resolved ran. The
+unit no longer mentions resolved, and the hand-back of port 53 in
+`ExecStopPost=` went with it. Elpis always starts now. If resolved still holds
+the port, Elpis names it and the fix, exits, and `Restart=` tries again. Not
+running as root, it could not see who held the port and said only
+"something is already listening"; on 127.0.0.53 and 127.0.0.54 it now says
+it is systemd-resolved's stub. Free the port once with `systemctl disable
+--now systemd-resolved` and `systemctl mask systemd-resolved` (disabled
+alone, any unit that wants it still starts it), or turn off only the stub
+with `DNSStubListener=no`. An installed copy of the old unit still races:
+install it again from `contrib/`.
+
 ## 2.4.1 "Lettersong" — 2026-10-05
 
 Starting at boot in an LXC container or a VM, before the network has

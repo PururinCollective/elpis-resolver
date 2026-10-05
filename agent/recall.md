@@ -39,10 +39,12 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Suite order by hardware: AES-GCM first with AES-NI, ChaCha20 first otherwise | Fastest on each CPU. |
 | No DoQ | A QUIC stack is several times the rest of the crypto, and few servers offer it. |
 
-### Addresses not up yet at boot (2.4.1)
+### Starting at boot (2.4.1, 2.4.2)
 
 | decision | why |
 |---|---|
+| The shipped unit has no `Conflicts=systemd-resolved` (2.4.2) | Seen on the maintainer's VM running 2.4.1: Elpis was never started at boot, nothing logged. Modelled with user units on systemd 255: if resolved's start matters (a `Requires=` chain), or anything starts resolved while Elpis's start job waits for `network-online.target`, systemd drops or cancels Elpis's job silently, so `Restart=` never applies. Now Elpis always starts and fails loudly, and the operator masks resolved or sets `DNSStubListener=no`. The `ExecStopPost=` hand-back went with it. |
+| Port 53 on 127.0.0.53 / 127.0.0.54 named as resolved's stub without proof | Not root, Elpis can't read resolved's `/proc/<pid>/fd`, and "something is already listening" helped no one. Only the message uses this guess; nothing is stopped on it. |
 | `IP_FREEBIND` on listeners, **not** on outbound sockets | Tested: on Linux an IPv6 socket with it, bound to an address the host doesn't have, sends from it (IPv4 gets `ENETUNREACH`). A listener only replies to queries that reached its address. |
 | Outbound slots kept and retried (1, 2, 4, 8 s, then every 10 s); an absent IPv4 source no longer exits | The same "start, warn, catch up" as listeners. Before, IPv6 slots vanished silently until a restart. |
 | "Not here yet" is a throwaway `bind()` to port 0, not `getifaddrs()` | The shipped unit's `RestrictAddressFamilies=AF_INET AF_INET6` refuses the netlink socket `getifaddrs()` needs, so it always fails under systemd. |
@@ -82,6 +84,11 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   state needs keeping.
 - **The status API wants a session**: `POST /api/login` then `GET /api/status`.
 - **`webui_assets.h` is generated.** Edit `web/index.html` and run `make`.
+- **`Conflicts=` can cancel a unit with no trace.** A queued start job is
+  replaced by the stop that a conflicting unit's start brings: the unit is
+  inactive, not failed, and nothing is logged. Test transactions like this
+  with throwaway user units in `$XDG_RUNTIME_DIR/systemd/user`
+  (`systemctl --user`), no root needed.
 - **No sudo, but `unshare -rn sh script.sh` works**: root inside a private
   network namespace, so `ip addr add`, veth pairs and port 53 all work. That
   is how the boot race was reproduced: start Elpis, then add the address. Use
@@ -97,4 +104,3 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | DoT session resumption | not done; each handshake is full. |
 | P-256 key share | only if the "no X25519" counter shows real servers need it. |
 | README contact for commercial support | a TODO comment, waiting on the maintainer. |
-| The boot failure the maintainer saw | 2.4.1 fixes addresses not up yet, but under the shipped unit `Restart=on-failure` should already have recovered a failed DNS bind. Another suspect: something starting systemd-resolved after boot (D-Bus or varlink activation), which `Conflicts=` turns into a stop of elpis. Waiting on `journalctl -b -u elpis` from a bad boot. |
