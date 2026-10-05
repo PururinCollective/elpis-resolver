@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# Set up, or bring up to date, everything around a git clone of Elpis at
-# /opt/elpis-resolver that elpis-update does not touch: the account elpis
-# runs as, the systemd unit, enabling it, and -- when asked -- taking
+# Set up, or bring up to date, everything around a git clone of Elpis,
+# built in place, that elpis-update does not touch: the account elpis runs
+# as, the systemd unit, enabling it, and -- when asked -- taking
 # systemd-resolved's place.  Run it in place, as root, once after the first
 # build and again whenever elpis-update says the unit has changed:
 #
 #   /opt/elpis-resolver/contrib/elpis-install.sh
 #
-# Nothing is copied out of /opt except what systemd has to have: the unit,
-# in /etc/systemd/system.  This is for a clone built in place.  With a
-# precompiled binary, replace the binary and keep a unit of your own;
-# contrib/elpis.service is a starting point.
+# It looks after the clone it sits in, wherever that is, and writes the unit
+# for that path.  /opt/elpis-resolver is the recommended place: it keeps
+# Elpis apart from the system and easy to find.  Nothing is copied out of
+# the clone except what systemd has to have: the unit, in
+# /etc/systemd/system.  With a precompiled binary, replace the binary and
+# keep a unit of your own; contrib/elpis.service is a starting point.
 #
 # Every step looks before it acts, so running it again changes nothing that
 # is already right.  DRY_RUN=1 shows what it would do, changes nothing, and
@@ -43,7 +45,10 @@ set -euo pipefail
 # not on every non-login shell's PATH.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-SRC=/opt/elpis-resolver         # where the unit's ExecStart= looks
+# The clone this script sits in: the directory above contrib/.
+SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+RECOMMENDED=/opt/elpis-resolver
+unit_new=                       # the unit as written for this clone; a temp file
 UNIT=${UNIT:-elpis}
 RESOLVED=${RESOLVED:-keep}
 DRY_RUN=${DRY_RUN:-}
@@ -62,16 +67,6 @@ run() {
     else
         "$@"
     fi
-}
-
-# Copy $1 to $2 with mode $3 when they differ.  Succeeds only when it copied.
-install_if_changed() {
-    if [ -f "$2" ] && cmp -s "$1" "$2"; then
-        say "$2: up to date"
-        return 1
-    fi
-    say "$2: $([ -f "$2" ] && echo updating || echo installing) from $1"
-    run install -m "$3" "$1" "$2"
 }
 
 # The addresses elpis will listen on, "addr:port" one per line, as elpis
@@ -100,6 +95,27 @@ loopback_ns() {
     done
 }
 
+# Is a resolv.conf nameserver $1 answered by elpis, listening on "${@:2}"?
+# The wildcard on port 53 answers this host's own addresses, so loopback --
+# not 1.1.1.1 or anyone else's.
+answers_ns() {
+    local ns=$1 a
+    shift
+    for a in "$@"; do
+        [ "$a" != "$ns:53" ] && [ "$a" != "[$ns]:53" ] || return 0
+        case "$ns:$a" in
+        127.*:0.0.0.0:53|::1:\[::\]:53) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# contrib/elpis.service is written for /opt/elpis-resolver; the unit that is
+# installed is the same with this clone's path in its place.
+render_unit() {
+    sed "s|/opt/elpis-resolver|$SRC|g" contrib/elpis.service
+}
+
 # Does resolved's stub hold an address elpis wants?  Its stub is 127.0.0.53
 # and 127.0.0.54, port 53; the wildcard collides with both.
 stub_in_the_way() {
@@ -112,19 +128,26 @@ stub_in_the_way() {
     ss -Hlnu 2>/dev/null | grep -qE '127\.0\.0\.5[34](%[a-z0-9]+)?:53[[:space:]]'
 }
 
-# Replace a resolv.conf that leans on systemd-resolved with one naming elpis.
+# Replace a resolv.conf that leans on systemd-resolved with one naming elpis
+# on $1; the rest of the arguments are where elpis listens.
 fix_resolv_conf() {
-    local ns=$1 target search tmp
+    local ns=$1 target search tmp line
+    shift
+    local where=("$@")
     target=$(readlink "$RESOLV" 2>/dev/null || true)
     case "$target" in
     *systemd/resolve/*)
         ;;                          # resolved's own file: it goes with resolved
     "")
         if [ -e "$RESOLV" ]; then
-            if grep -qE "^nameserver[[:space:]]+$ns([[:space:]]|\$)" "$RESOLV"; then
-                say "$RESOLV: already names elpis ($ns)"
-                return 0
-            fi
+            # Any nameserver line elpis answers will do: 127.0.0.1 is elpis
+            # too when it listens on the wildcard.
+            while read -r line; do
+                if answers_ns "$line" "${where[@]}"; then
+                    say "$RESOLV: already names elpis ($line)"
+                    return 0
+                fi
+            done < <(sed -n 's/^nameserver[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$RESOLV")
             if ! grep -qE '^nameserver[[:space:]]+127\.0\.0\.53([[:space:]]|$)' "$RESOLV"; then
                 note "$RESOLV is a file of its own and does not name elpis; left as it is:"
                 grep '^nameserver' "$RESOLV" | sed 's/^/    /' || true
@@ -177,8 +200,18 @@ main() {
     esac
     [ -n "$DRY_RUN" ] || [ "$(id -u)" -eq 0 ] || die "run as root, or with DRY_RUN=1 to look"
     [ -z "$DRY_RUN" ] || say "dry run: nothing will be changed"
-    cd "$SRC" 2>/dev/null || die "no $SRC: this looks after a git clone of Elpis there"
+    cd "$SRC" || die "no $SRC"
     [ -e .git ] || die "$SRC is not a git clone; this looks after a clone built in place.  With a precompiled binary, replace the binary yourself and keep a unit of your own -- contrib/elpis.service is a starting point"
+    # The unit names this path, so it has to be one a unit can name and the
+    # service can reach.
+    local bad='[[:space:]%"'\''\\|&]'
+    [[ ! $SRC =~ $bad ]] || die "$SRC: a systemd unit cannot name a path with spaces or any of % \" ' \\ | &; clone it somewhere else, $RECOMMENDED for choice"
+    case "$SRC/" in
+    /home/*|/root/*|/run/user/*)
+        die "$SRC: the unit's ProtectHome= hides home directories from the service, and the elpis account cannot reach into one anyway; clone it outside, $RECOMMENDED for choice" ;;
+    esac
+    [ "$SRC" = "$RECOMMENDED" ] ||
+        note "this clone is at $SRC; $RECOMMENDED is the recommended place -- apart from the system and easy to find -- but the unit will be written for $SRC"
     command -v systemctl >/dev/null || die "no systemctl on PATH"
     [ -x bin/elpis ] || die "no $SRC/bin/elpis: build it first, with make static"
     [ -f contrib/elpis.service ] || die "no contrib/elpis.service in $SRC"
@@ -221,13 +254,22 @@ main() {
         note "left in /usr/local/sbin by earlier instructions, and not needed now: ${leftover[*]}; the scripts run from $SRC/contrib.  Remove with: rm ${leftover[*]}"
     fi
 
-    # The unit.
-    if [ -f "$UNIT_FILE" ] && ! cmp -s contrib/elpis.service "$UNIT_FILE"; then
-        note "$UNIT_FILE differs from contrib/elpis.service:"
-        diff -u "$UNIT_FILE" contrib/elpis.service | sed -n '3,60p' | sed 's/^/    /' || true
-        run cp -p "$UNIT_FILE" "$UNIT_FILE.bak"
-    fi
-    if install_if_changed contrib/elpis.service "$UNIT_FILE" 0644; then
+    # The unit, written for this clone.
+    unit_new=$(mktemp)
+    trap 'rm -f "${unit_new:-}"' EXIT
+    render_unit >"$unit_new"
+    if [ -f "$UNIT_FILE" ] && cmp -s "$unit_new" "$UNIT_FILE"; then
+        say "$UNIT_FILE: up to date"
+    else
+        if [ -f "$UNIT_FILE" ]; then
+            note "$UNIT_FILE differs from contrib/elpis.service (for $SRC):"
+            diff -u "$UNIT_FILE" "$unit_new" | sed -n '3,60p' | sed 's/^/    /' || true
+            say "$UNIT_FILE: updating; the old one is kept as $UNIT_FILE.bak"
+            run cp -p "$UNIT_FILE" "$UNIT_FILE.bak"
+        else
+            say "$UNIT_FILE: installing, for $SRC"
+        fi
+        run install -m 0644 "$unit_new" "$UNIT_FILE"
         run systemctl daemon-reload
         unit_changed=1
     fi
@@ -251,7 +293,7 @@ main() {
             resolved_changed=1
             ;;
         esac
-        fix_resolv_conf "$ns"
+        fix_resolv_conf "$ns" "${listen[@]}"
         ;;
     esac
 

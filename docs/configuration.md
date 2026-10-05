@@ -220,8 +220,8 @@ options edns0 trust-ad
 leave from `127.0.0.53` whether Elpis listens there or on the wildcard, as glibc
 expects. `trust-ad` lets programs that ask see Elpis's DNSSEC verdict, as
 resolved's own file did. `DRY_RUN=1` shows what the script would do first. The
-script is for a git clone at `/opt/elpis-resolver`; with a precompiled binary,
-do the same steps by hand.</sub>
+script is for a git clone, `/opt/elpis-resolver` by recommendation; with a
+precompiled binary, do the same steps by hand.</sub>
 
 ## 🪪 Asking a resolver what it is
 

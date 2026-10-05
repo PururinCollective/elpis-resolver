@@ -308,9 +308,11 @@ sudo make uninstall          # removes the binary, keeps your config
 - `make install PREFIX=/usr/local` for another place, `DESTDIR=` for a
   packaging root.
 
-For a git clone at `/opt/elpis-resolver`, built in place and run as a service,
-two scripts look after it. Both run from the clone, and nothing is copied out
-of `/opt` except the unit, which systemd needs in `/etc/systemd/system`:
+For a git clone, built in place and run as a service, two scripts look after
+it. Both run from the clone and look after the clone they sit in, and nothing
+is copied out of it except the unit, which systemd needs in
+`/etc/systemd/system`. **Clone into `/opt/elpis-resolver`**: it keeps Elpis
+apart from the system and easy to find, and it's what the paths below assume.
 
 | script | does |
 |---|---|
@@ -324,10 +326,16 @@ sudo /opt/elpis-resolver/contrib/elpis-install.sh    # when update says the unit
 ```
 
 > [!NOTE]
-> Both refuse to run unless `/opt/elpis-resolver` is a git clone. With a
+> Both refuse to run unless the folder above `contrib/` is a git clone. With a
 > precompiled binary there is nothing to pull: replace the binary, and keep a
 > unit of your own, for which [contrib/elpis.service](../contrib/elpis.service)
 > is a starting point.
+
+<sub>A clone somewhere else works too: both scripts say `/opt/elpis-resolver` is
+the recommended place and carry on, and `elpis-install.sh` writes the unit for
+the clone's own path. Not under `/home`: the unit's `ProtectHome=` hides it
+from the service. Nor a path with spaces or `% " ' \ | &`, which a unit can't
+name.</sub>
 
 <sub>The unit expects the `/opt` path and binds port 53 with
 `CAP_NET_BIND_SERVICE` rather than running as root. `elpis-install.sh` looks

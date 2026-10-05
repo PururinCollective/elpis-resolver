@@ -35,7 +35,8 @@
 #
 # For a git clone at /opt/elpis-resolver, contrib/elpis-install.sh does all
 # of this, and keeps the unit current: run it again whenever elpis-update
-# says the unit has changed.
+# says the unit has changed.  A clone elsewhere works too: the script writes
+# this unit with the clone's own path in place of the one above.
 
 [Unit]
 Description=ELPIS recursive DNS resolver
