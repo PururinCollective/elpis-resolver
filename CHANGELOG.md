@@ -14,6 +14,22 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**Elpis can take over 127.0.0.53 cleanly.** `listen: 127.0.0.53@53`, or the
+wildcard on port 53, answers on systemd-resolved's stub address in its place,
+so a resolv.conf naming it keeps working. Two messages assumed only resolved
+ever listens there. Stopping resolved as root warned that 127.0.0.53 "is no
+longer listening" even when Elpis was about to answer on it; now it says
+nothing then, and warns instead when `/etc/resolv.conf` is a link into
+`/run/systemd/resolve`, which points at nothing after a reboot without
+resolved. And 2.4.2 named an unknown holder of 127.0.0.53 or 127.0.0.54
+"systemd-resolved's stub" even with resolved masked, when the holder is more
+likely an Elpis that has not let go yet; it now says so only while a
+systemd-resolved process is running.
+
 ## 2.4.2 "Lettersong" — 2026-10-05
 
 Elpis comes up after a reboot under the shipped systemd unit. The unit could
