@@ -1,13 +1,17 @@
 #!/bin/bash
 #
-# Put in place everything around the binary that elpis-update does not
-# touch: the account elpis runs as, the systemd unit, the elpis-update and
-# elpis-reinstall commands themselves, and -- when asked -- systemd-resolved
-# and /etc/resolv.conf.  Run it once after the first build, and again when
-# elpis-update says contrib/ has changed.
+# Set up, or bring up to date, everything around a git clone of Elpis at
+# /opt/elpis-resolver that elpis-update does not touch: the account elpis
+# runs as, the systemd unit, enabling it, and -- when asked -- taking
+# systemd-resolved's place.  Run it in place, as root, once after the first
+# build and again whenever elpis-update says the unit has changed:
 #
-#   install -m0755 contrib/elpis-reinstall.sh /usr/local/sbin/elpis-reinstall
-#   elpis-reinstall
+#   /opt/elpis-resolver/contrib/elpis-install.sh
+#
+# Nothing is copied out of /opt except what systemd has to have: the unit,
+# in /etc/systemd/system.  This is for a clone built in place.  With a
+# precompiled binary, replace the binary and keep a unit of your own;
+# contrib/elpis.service is a starting point.
 #
 # Every step looks before it acts, so running it again changes nothing that
 # is already right.  DRY_RUN=1 shows what it would do, changes nothing, and
@@ -17,7 +21,7 @@
 # ask.  To have elpis answer in its place on 127.0.0.53 -- 'listen:
 # 127.0.0.53@53', or 'listen: 0.0.0.0@53', in bin/elpis.conf:
 #
-#   RESOLVED=replace elpis-reinstall
+#   RESOLVED=replace /opt/elpis-resolver/contrib/elpis-install.sh
 #
 # That disables and masks resolved, so nothing starts it again, and replaces
 # /etc/resolv.conf -- a link into /run/systemd/resolve, which nothing writes
@@ -39,11 +43,10 @@ set -euo pipefail
 # not on every non-login shell's PATH.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-SRC=${SRC:-/opt/elpis-resolver}
+SRC=/opt/elpis-resolver         # where the unit's ExecStart= looks
 UNIT=${UNIT:-elpis}
 RESOLVED=${RESOLVED:-keep}
 DRY_RUN=${DRY_RUN:-}
-SBIN=${SBIN:-/usr/local/sbin}
 RESOLV=${RESOLV:-/etc/resolv.conf}
 UNIT_FILE=/etc/systemd/system/$UNIT.service
 ACCOUNT=elpis                   # the unit's User=
@@ -151,7 +154,7 @@ fix_resolv_conf() {
     # write into resolved's file under /run instead of replacing the link.
     tmp=$RESOLV.elpis-new
     {
-        echo "# Written by elpis-reinstall on $(date +%F): elpis answers here, in"
+        echo "# Written by elpis-install on $(date +%F): elpis answers here, in"
         echo "# place of systemd-resolved.  The file this replaced is $RESOLV.elpis-bak."
         echo "nameserver $ns"
         # elpis validates DNSSEC and is on this host, so its AD bit can be
@@ -165,6 +168,7 @@ fix_resolv_conf() {
 
 main() {
     local listen listen_text ns unit_changed=0 resolved_changed=0 r_state
+    local leftover f
     local first host port
 
     case "$RESOLVED" in
@@ -173,9 +177,10 @@ main() {
     esac
     [ -n "$DRY_RUN" ] || [ "$(id -u)" -eq 0 ] || die "run as root, or with DRY_RUN=1 to look"
     [ -z "$DRY_RUN" ] || say "dry run: nothing will be changed"
-    cd "$SRC" || die "no $SRC"
+    cd "$SRC" 2>/dev/null || die "no $SRC: this looks after a git clone of Elpis there"
+    [ -e .git ] || die "$SRC is not a git clone; this looks after a clone built in place.  With a precompiled binary, replace the binary yourself and keep a unit of your own -- contrib/elpis.service is a starting point"
     command -v systemctl >/dev/null || die "no systemctl on PATH"
-    [ -x bin/elpis ] || die "no $SRC/bin/elpis: build it first, with make static or elpis-update"
+    [ -x bin/elpis ] || die "no $SRC/bin/elpis: build it first, with make static"
     [ -f contrib/elpis.service ] || die "no contrib/elpis.service in $SRC"
 
     listen_text=$(listen_addresses)
@@ -205,9 +210,16 @@ main() {
             --shell "$(command -v nologin || echo /usr/sbin/nologin)" "$ACCOUNT"
     fi
 
-    # These commands, so the next run is the new one.
-    install_if_changed contrib/elpis-update.sh "$SBIN/elpis-update" 0755 || true
-    install_if_changed contrib/elpis-reinstall.sh "$SBIN/elpis-reinstall" 0755 || true
+    # Earlier instructions put copies of the scripts in /usr/local/sbin.
+    # Everything runs from /opt now; point them out rather than delete
+    # anything outside it.
+    leftover=()
+    for f in /usr/local/sbin/elpis-update /usr/local/sbin/elpis-reinstall; do
+        [ ! -e "$f" ] || leftover+=("$f")
+    done
+    if [ "${#leftover[@]}" -gt 0 ]; then
+        note "left in /usr/local/sbin by earlier instructions, and not needed now: ${leftover[*]}; the scripts run from $SRC/contrib.  Remove with: rm ${leftover[*]}"
+    fi
 
     # The unit.
     if [ -f "$UNIT_FILE" ] && ! cmp -s contrib/elpis.service "$UNIT_FILE"; then

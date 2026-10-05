@@ -308,23 +308,30 @@ sudo make uninstall          # removes the binary, keeps your config
 - `make install PREFIX=/usr/local` for another place, `DESTDIR=` for a
   packaging root.
 
-For a checkout at `/opt/elpis-resolver` that runs as a service:
+For a git clone at `/opt/elpis-resolver`, built in place and run as a service,
+two scripts look after it. Both run from the clone, and nothing is copied out
+of `/opt` except the unit, which systemd needs in `/etc/systemd/system`:
 
 | script | does |
 |---|---|
-| [`contrib/elpis-update.sh`](../contrib/elpis-update.sh) | pull, build, check the config, restart. Says when `contrib/` has changed since it was installed |
-| [`contrib/elpis-reinstall.sh`](../contrib/elpis-reinstall.sh) | everything around the binary: the `elpis` account, the systemd unit, both commands in `/usr/local/sbin`, enabling the service. `RESOLVED=replace` also takes systemd-resolved's place on `127.0.0.53` |
+| [`contrib/elpis-update.sh`](../contrib/elpis-update.sh) | pull, build, check the config, restart. Says when the unit in `contrib/` has changed |
+| [`contrib/elpis-install.sh`](../contrib/elpis-install.sh) | everything around the binary: the `elpis` account, installing or updating the unit, enabling the service. `RESOLVED=replace` also takes systemd-resolved's place on `127.0.0.53` |
 
 ```bash
-sudo bash /opt/elpis-resolver/contrib/elpis-reinstall.sh    # the first time
-sudo elpis-update                                           # from then on
-sudo elpis-reinstall                                        # when it says so
+sudo /opt/elpis-resolver/contrib/elpis-install.sh    # the first time
+sudo /opt/elpis-resolver/contrib/elpis-update.sh     # from then on
+sudo /opt/elpis-resolver/contrib/elpis-install.sh    # when update says the unit changed
 ```
 
-<sub>The unit, [contrib/elpis.service](../contrib/elpis.service), expects the
-`/opt` path and binds port 53 with `CAP_NET_BIND_SERVICE` rather than running as
-root. Both scripts look before they change anything; `DRY_RUN=1 elpis-reinstall`
-shows what it would do.</sub>
+> [!NOTE]
+> Both refuse to run unless `/opt/elpis-resolver` is a git clone. With a
+> precompiled binary there is nothing to pull: replace the binary, and keep a
+> unit of your own, for which [contrib/elpis.service](../contrib/elpis.service)
+> is a starting point.
+
+<sub>The unit expects the `/opt` path and binds port 53 with
+`CAP_NET_BIND_SERVICE` rather than running as root. `elpis-install.sh` looks
+before it changes anything; `DRY_RUN=1` in front shows what it would do.</sub>
 
 ## 🔬 Working on Elpis
 

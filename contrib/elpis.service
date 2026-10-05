@@ -33,8 +33,9 @@
 #   install -m0644 contrib/elpis.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now elpis
 #
-# contrib/elpis-reinstall.sh does all of this, and keeps it current: run it
-# again whenever elpis-update says contrib/ has changed.
+# For a git clone at /opt/elpis-resolver, contrib/elpis-install.sh does all
+# of this, and keeps the unit current: run it again whenever elpis-update
+# says the unit has changed.
 
 [Unit]
 Description=ELPIS recursive DNS resolver
@@ -53,7 +54,7 @@ Wants=network-online.target
 # wildcard on port 53 -- and "nameserver 127.0.0.53" then works as before.
 # All three steps at once:
 #
-#   RESOLVED=replace elpis-reinstall
+#   RESOLVED=replace /opt/elpis-resolver/contrib/elpis-install.sh
 #
 # Or keep resolved for this host's own lookups with DNSStubListener=no in
 # /etc/systemd/resolved.conf.  On another port, behind AdGuard Home or

@@ -205,7 +205,7 @@ Resolved has to be out of the way first, and `/etc/resolv.conf`, a link into
 there once resolved is gone. One command does both, and installs the unit:
 
 ```bash
-sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-reinstall.sh
+sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-install.sh
 ```
 
 It masks resolved, keeps the old `resolv.conf` as `/etc/resolv.conf.elpis-bak`,
@@ -219,7 +219,9 @@ options edns0 trust-ad
 <sub>All of `127.0.0.0/8` is local on Linux, so no address needs adding. Replies
 leave from `127.0.0.53` whether Elpis listens there or on the wildcard, as glibc
 expects. `trust-ad` lets programs that ask see Elpis's DNSSEC verdict, as
-resolved's own file did. `DRY_RUN=1` shows what the script would do first.</sub>
+resolved's own file did. `DRY_RUN=1` shows what the script would do first. The
+script is for a git clone at `/opt/elpis-resolver`; with a precompiled binary,
+do the same steps by hand.</sub>
 
 ## 🪪 Asking a resolver what it is
 

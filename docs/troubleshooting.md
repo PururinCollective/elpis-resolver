@@ -205,7 +205,7 @@ doesn't either. One command frees port 53 for good and puts Elpis on
 ([details](configuration.md#taking-systemd-resolveds-place-on-127053)):
 
 ```bash
-sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-reinstall.sh
+sudo RESOLVED=replace /opt/elpis-resolver/contrib/elpis-install.sh
 ```
 
 Or by hand:

@@ -18,20 +18,23 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ### Added
 
-**`contrib/elpis-reinstall.sh`, for everything around the binary.**
-`elpis-update` pulls, builds and restarts, but a pull never reached the
-installed systemd unit, so a host kept the unit it was first set up with:
-2.4.2's fix to the unit did nothing there until someone copied it by hand.
-`elpis-reinstall` creates the `elpis` account, installs the unit (keeping
-the old one as `elpis.service.bak`), puts itself and `elpis-update` in
-`/usr/local/sbin`, and enables the service, which `make install` never did.
-With `RESOLVED=replace` it also takes systemd-resolved's place: it masks
-resolved and replaces `/etc/resolv.conf`, a link into `/run/systemd/resolve`
-that points at nothing once resolved is gone, with a file naming Elpis on
+**`contrib/elpis-install.sh`, for everything around the binary.** For a git
+clone at `/opt/elpis-resolver`, `elpis-update.sh` pulls, builds and restarts,
+but a pull never reached the installed systemd unit, so a host kept the unit
+it was first set up with: 2.4.2's fix to the unit did nothing there until
+someone copied it by hand. `elpis-install.sh` creates the `elpis` account,
+installs or updates the unit (keeping the old one as `elpis.service.bak`),
+and enables the service, which `make install` never did. With
+`RESOLVED=replace` it also takes systemd-resolved's place: it masks resolved
+and replaces `/etc/resolv.conf`, a link into `/run/systemd/resolve` that
+points at nothing once resolved is gone, with a file naming Elpis on
 `127.0.0.53`. It looks before each step, refuses before changing anything
 when the config and resolved cannot work together, and `DRY_RUN=1` shows
-what it would do. `elpis-update` now says when `contrib/` has changed since
-it was installed.
+what it would do. Both scripts run in place from the clone, copy nothing out
+of `/opt` but the unit, and refuse to run on anything but a git clone; with a
+precompiled binary, replace the binary and keep your own unit.
+`elpis-update.sh` now says when the unit in `contrib/` has changed, and is
+run from `/opt` too, not copied to `/usr/local/sbin` as its old header said.
 
 ### Fixed
 
