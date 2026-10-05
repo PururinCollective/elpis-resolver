@@ -44,7 +44,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 
 | decision | why |
 |---|---|
-| The shipped unit has no `Conflicts=systemd-resolved` (2.4.2) | Seen on the maintainer's VM running 2.4.1: Elpis was never started at boot, nothing logged. Modelled with user units on systemd 255: if resolved's start matters (a `Requires=` chain), or anything starts resolved while Elpis's start job waits for `network-online.target`, systemd drops or cancels Elpis's job silently, so `Restart=` never applies. Now Elpis always starts and fails loudly, and the operator masks resolved or sets `DNSStubListener=no`. The `ExecStopPost=` hand-back went with it. |
+| The shipped unit has no `Conflicts=systemd-resolved` (2.4.2) | Found while chasing a VM where Elpis never started at boot, nothing logged; that VM's unit had never been enabled (see the gotcha below), so the race was not what it hit. The race is real all the same, modelled with user units on systemd 255: if resolved's start matters (a `Requires=` chain), or anything starts resolved while Elpis's start job waits for `network-online.target`, systemd drops or cancels Elpis's job silently, so `Restart=` never applies. Now Elpis always starts and fails loudly, and the operator masks resolved or sets `DNSStubListener=no`. The `ExecStopPost=` hand-back went with it. |
 | Port 53 on 127.0.0.53 / 127.0.0.54 named as resolved's stub without proof | Not root, Elpis can't read resolved's `/proc/<pid>/fd`, and "something is already listening" helped no one. Only the message uses this guess; nothing is stopped on it. |
 | `IP_FREEBIND` on listeners, **not** on outbound sockets | Tested: on Linux an IPv6 socket with it, bound to an address the host doesn't have, sends from it (IPv4 gets `ENETUNREACH`). A listener only replies to queries that reached its address. |
 | Outbound slots kept and retried (1, 2, 4, 8 s, then every 10 s); an absent IPv4 source no longer exits | The same "start, warn, catch up" as listeners. Before, IPv6 slots vanished silently until a restart. |
@@ -85,6 +85,11 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   state needs keeping.
 - **The status API wants a session**: `POST /api/login` then `GET /api/status`.
 - **`webui_assets.h` is generated.** Edit `web/index.html` and run `make`.
+- **A disabled unit looks exactly like a cancelled one**: inactive,
+  `Result=success`, `NRestarts=0`, not a line in the journal. Ask for
+  `systemctl is-enabled` before theorising about transactions. 2.4.2 was
+  first written up as fixing a race on the maintainer's VM; the unit there
+  had simply never been enabled.
 - **`Conflicts=` can cancel a unit with no trace.** A queued start job is
   replaced by the stop that a conflicting unit's start brings: the unit is
   inactive, not failed, and nothing is logged. Test transactions like this

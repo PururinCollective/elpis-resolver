@@ -49,12 +49,10 @@ systemd-resolved process is running.
 
 ## 2.4.2 "Lettersong" — 2026-10-05
 
-Elpis comes up after a reboot under the shipped systemd unit. The unit could
-lose a silent race with systemd-resolved at boot and leave Elpis not
-running, with nothing in its log; 2.4.1's fixes for addresses not up yet
-never got the chance to run. The unit no longer touches resolved, and Elpis
-says plainly when resolved is in the way. Same name as 2.4.1: it finishes
-what that release set out to fix.
+The shipped systemd unit could lose a silent race with systemd-resolved at
+boot and leave Elpis not running, with nothing in its log. It no longer
+touches resolved, and Elpis says plainly when resolved is in the way. Same
+name as 2.4.1: it finishes what that release set out to fix.
 
 No `elpis.conf` that worked stops working. If you install the new systemd
 unit on a host where systemd-resolved still holds port 53, Elpis will refuse
@@ -67,9 +65,12 @@ stopped systemd-resolved with `Conflicts=systemd-resolved.service`, and at
 boot that could lose without a word. Elpis's start waits for
 `network-online.target`; when anything asked for resolved in the meantime,
 systemd cancelled Elpis's start, left it inactive, and logged nothing, so
-`Restart=` never fired. Seen on a VM: after a reboot, `Result=success`,
-`NRestarts=0`, and not one Elpis line in the journal, while resolved ran. The
-unit no longer mentions resolved, and the hand-back of port 53 in
+`Restart=` never fired. This was found, and reproduced with test units, while
+chasing a VM where Elpis was not running after a reboot, with
+`Result=success`, `NRestarts=0` and nothing in the journal. That VM turned out
+to have a unit that was never enabled, which looks exactly the same, so the
+race is real but was not what that VM hit. The unit no longer mentions
+resolved, and the hand-back of port 53 in
 `ExecStopPost=` went with it. Elpis always starts now. If resolved still holds
 the port, Elpis names it and the fix, exits, and `Restart=` tries again. Not
 running as root, it could not see who held the port and said only
