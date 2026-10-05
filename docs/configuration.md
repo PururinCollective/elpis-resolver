@@ -1,76 +1,40 @@
-# Configuration
+# 🔧 Configuration
 
-Where the config file lives, what the settings do, and how to run it.
+Where the config lives, what the settings do, and how to run it.
 
-## The config file
+**On this page:**
+[The config file](#-the-config-file) ·
+[Asking a resolver what it is](#-asking-a-resolver-what-it-is) ·
+[Outbound source addresses](#-outbound-source-addresses) ·
+[EDNS Client Subnet](#-edns-client-subnet) ·
+[Case randomisation](#-names-asked-without-case-randomisation) ·
+[DNS over TLS to authoritative servers](#-dns-over-tls-to-authoritative-servers) ·
+[Quirks](#-zones-whose-servers-misbehave) ·
+[Status page password](#-hashing-a-status-page-password) ·
+[Running it](#-running-it)
 
-`elpis.conf` is looked for next to the binary; then one directory up if the
-binary sits in a `bin/` directory; then in `/etc/elpis/`, then in `/etc/`. The
-first that exists wins.
+## 📄 The config file
 
-In practice the first one is what you get: `make` seeds `bin/elpis.conf` from
-the copy shipped in the source tree, so the shipped file stays a reference and
-`bin/elpis.conf` is the one you edit. It survives rebuilds and `make clean`;
-`make distclean` is what removes it.
-
-### When the shipped defaults change
-
-A pull that changes `elpis.conf` — a new setting, a new default, better
-comments — is merged into `bin/elpis.conf` by the next `make`, the way git
-merges a branch. What changed in the shipped file is applied, and what you
-changed in yours is kept:
+The first `elpis.conf` found wins:
 
 ```
-  merged the new shipped defaults into bin/elpis.conf (+16 -0 lines);
-  your edits are kept, and the previous copy is bin/elpis.conf.bak
+ 1. beside the binary                 bin/elpis.conf
+ 2. one level up, if that is bin/     elpis.conf
+ 3. /etc/elpis/elpis.conf
+ 4. /etc/elpis.conf
 ```
 
-The merge needs to know which shipped defaults your copy came from, and keeps
-them in `bin/elpis.conf.shipped`. A tree built before that file existed finds
-them in git history the first time: the committed `elpis.conf` closest to
-yours. Outside a git checkout it cannot, so that first time nothing is merged,
-and later changes are.
+In practice it's the first: `make` seeds `bin/elpis.conf` from the copy in the
+source tree, so the shipped file stays a reference and `bin/elpis.conf` is the
+one you edit. It survives rebuilds and `make clean`; `make distclean` removes it.
 
-Where the shipped file and yours changed the same lines, nothing is guessed.
-`bin/elpis.conf` is left exactly as it is, and still in use. The merge with the
-conflicts marked goes to `bin/elpis.conf.new`, and every `make` says so until
-you have dealt with it:
+**No config at all** is a working recursive resolver on `127.0.0.1:5335`.
+Every setting is in the file at its default, so a config that is all comments
+behaves exactly like no config.
 
-```
-  WARNING: the new shipped defaults in elpis.conf conflict with
-  WARNING: your edits in bin/elpis.conf, in 1 place(s).
-  WARNING: bin/elpis.conf is unchanged and still in use.
-  WARNING: The merge, with the conflicts marked, is bin/elpis.conf.new
-  WARNING: -- see line(s) 251
-```
-
-Each conflict shows your lines, the defaults you started from, and the new
-ones:
-
-```
-<<<<<<< bin/elpis.conf (yours)
-query-timeout: 800                     # per upstream attempt, milliseconds
-||||||| bin/elpis.conf.shipped (defaults you started from)
-query-timeout: 1200                    # per upstream attempt, milliseconds
-=======
-query-timeout: 1500                    # per upstream attempt, milliseconds
->>>>>>> elpis.conf (new defaults)
-```
-
-Keep what you want, remove the marker lines, and copy the result over
-`bin/elpis.conf`. Or edit `bin/elpis.conf` by hand. Saving it is what tells the
-next `make` you are done, so keeping your own side of every conflict works too.
-A config with markers left in it is refused by `contrib/elpis-update.sh`
-rather than restarted with: Elpis would skip those lines as bad settings.
-
-The merge is `diff3` from GNU diffutils, or `git merge-file` where there is no
-`diff3`; see `tools/conf-merge.sh`.
-
-Without any config at all the defaults are a working recursive resolver on
-`127.0.0.1:5335`. (Not 5353 — that is mDNS, and avahi-daemon holds it on most
-Linux hosts; because both sides set `SO_REUSEADDR` the clash is silent rather
-than an error.) Every setting is documented in the file at its default value,
-so a config that is entirely comments behaves exactly like no config.
+<sub>Not 5353: that's mDNS, and avahi-daemon holds it on most Linux hosts.
+Both sides set `SO_REUSEADDR`, so the clash would be silent rather than an
+error.</sub>
 
 ```
 listen: 127.0.0.1@5335
@@ -95,12 +59,67 @@ stub-zone: corp.example 10.1.0.53               # iterative, treated as authorit
 Behind AdGuard Home, point its upstream at `127.0.0.1:5335` and leave Elpis on
 loopback.
 
+### When the shipped defaults change
+
+A pull that changes `elpis.conf` (a new setting, a new default, better
+comments) is merged into `bin/elpis.conf` by the next `make`, the way git
+merges a branch:
+
+```
+ elpis.conf (new shipped)  ─┐
+ elpis.conf.shipped (old)  ─┼──►  3-way merge  ──►  bin/elpis.conf  (your edits kept)
+ bin/elpis.conf (yours)    ─┘                  └─►  bin/elpis.conf.new  (only on a conflict)
+```
+
+```
+  merged the new shipped defaults into bin/elpis.conf (+16 -0 lines);
+  your edits are kept, and the previous copy is bin/elpis.conf.bak
+```
+
+<sub>The merge needs the shipped defaults your copy came from, kept in
+`bin/elpis.conf.shipped`. A tree built before that file existed finds them in
+git history the first time: the committed `elpis.conf` closest to yours.
+Outside a git checkout it can't, so that first time nothing is merged, and
+later changes are. The merge is `diff3` from GNU diffutils, or
+`git merge-file` where there is no `diff3`; see `tools/conf-merge.sh`.</sub>
+
+**Where both changed the same lines, nothing is guessed.** `bin/elpis.conf` is
+left exactly as it is, and still in use. The merge with the conflicts marked
+goes to `bin/elpis.conf.new`, and every `make` says so until you deal with it:
+
+```
+  WARNING: the new shipped defaults in elpis.conf conflict with
+  WARNING: your edits in bin/elpis.conf, in 1 place(s).
+  WARNING: bin/elpis.conf is unchanged and still in use.
+  WARNING: The merge, with the conflicts marked, is bin/elpis.conf.new
+  WARNING: -- see line(s) 251
+```
+
+Each conflict shows your lines, the defaults you started from, and the new ones:
+
+```
+<<<<<<< bin/elpis.conf (yours)
+query-timeout: 800                     # per upstream attempt, milliseconds
+||||||| bin/elpis.conf.shipped (defaults you started from)
+query-timeout: 1200                    # per upstream attempt, milliseconds
+=======
+query-timeout: 1500                    # per upstream attempt, milliseconds
+>>>>>>> elpis.conf (new defaults)
+```
+
+Keep what you want, remove the marker lines, and copy the result over
+`bin/elpis.conf`, or edit `bin/elpis.conf` by hand. Saving it tells the next
+`make` you're done, so keeping your own side of every conflict works too.
+
+> [!WARNING]
+> A config with markers left in it is refused by `contrib/elpis-update.sh`
+> rather than restarted with: Elpis would skip those lines as bad settings.
+
 ### Privileged ports
 
-If a `listen` line asks for a port below the system's privileged threshold
-(1024, or whatever `net.ipv4.ip_unprivileged_port_start` says), Elpis checks
-for the right to bind it *before* opening any socket and, if it is missing,
-says so with the port named and the ways to fix it:
+A `listen` port below the system's privileged threshold (1024, or whatever
+`net.ipv4.ip_unprivileged_port_start` says) is checked *before* any socket is
+opened. If the right to bind it is missing, Elpis says so and how to fix it:
 
 ```
 FATAL cannot listen on 0.0.0.0:53: port 53 is privileged on this system
@@ -113,29 +132,29 @@ FATAL     - listen on an unprivileged port instead, e.g. 'listen: 127.0.0.1@5335
 FATAL     - or lower the range system-wide: sysctl net.ipv4.ip_unprivileged_port_start=53
 ```
 
-Sockets are bound before privileges are dropped, so `user:` works with either
-of the first two. Running as root with no `user:` configured is allowed but
-warned about once.
+<sub>Sockets are bound before privileges are dropped, so `user:` works with
+either of the first two. Running as root with no `user:` is allowed, and warned
+about once.</sub>
 
 ### Listening on everything
 
-Two lines, and that is the whole of it:
+Two lines, and both are needed:
 
 ```
 listen: 0.0.0.0@53
 listen: [::]@53
 ```
 
-Both are needed. Every IPv6 listener sets `IPV6_V6ONLY`, so `[::]` carries
-IPv6 only — it will not pick up IPv4 the way a dual-stack socket does. That is
-deliberate: a dual-stack socket reports IPv4 peers as v4-mapped addresses,
-which would make `access-control` rules quietly ambiguous about which family
-they matched.
+Every IPv6 listener sets `IPV6_V6ONLY`, so `[::]` carries IPv6 only.
 
-Listing a specific address *as well as* the wildcard is redundant — the kernel
-prefers the specific socket, so it works, but it costs descriptors for nothing
-and Elpis says so. Startup names every socket it actually bound, which is the
-first thing to check when a client cannot reach it:
+<sub>That's deliberate: a dual-stack socket reports IPv4 peers as v4-mapped
+addresses, which would make `access-control` rules quietly ambiguous about
+which family they matched. Listing a specific address *as well as* the wildcard
+works (the kernel prefers the specific socket), but costs descriptors for
+nothing, and Elpis says so.</sub>
+
+Startup names every socket it actually bound. Check that first when a client
+can't reach it:
 
 ```
 INFO    bound udp 0.0.0.0:53
@@ -145,13 +164,14 @@ INFO    bound tcp [::]:53
 INFO  listening with 8 workers
 ```
 
-## Asking a resolver what it is
+## 🪪 Asking a resolver what it is
 
-Every Elpis answers one TXT name about itself, so identifying a running
-resolver does not require logging into it:
+Every Elpis answers one TXT name about itself, so you can identify it without
+logging in:
 
 ```bash
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
+dig +short TXT elpis.sakurako.oomuro @127.0.0.1     # the same
 ```
 
 ```
@@ -161,51 +181,51 @@ elpis.sakurako.oomuro   text = "elpis=2.4.0" "codename=Intrinsic Future"
                                "dnssec=validating"
 ```
 
-`dig +short TXT elpis.sakurako.oomuro @127.0.0.1` does the same thing.
-`codename=` is the release's name, from 2.4.0 on, beside its version.
+<sub>`codename=` is the release's name, from 2.4.0 on, beside its version.</sub>
 
-Only clients the access-control list already admits get an answer. The default
-name sits in an undelegated TLD on purpose: nothing on the public internet can
-ever own it, so the probe answers only someone querying this resolver
-**directly**, and no scan of the DNS will turn it up.
+- Only clients the access-control list already admits get an answer.
+- The default name sits in an undelegated TLD on purpose: nothing on the public
+  internet can ever own it, so the probe answers only someone asking **this
+  resolver directly**, and no scan of the DNS turns it up.
 
 ### Telling deployments apart
 
-`edition:` is how a community install is distinguished from a commercial one:
+`edition:` labels a community install versus a commercial one:
 
 ```
 edition: commercial
 operator: Example ISP, AS64500
 ```
 
-Both are free text and **self-declared — nothing verifies them**. Anyone can
-write `edition: commercial` in their own config file. That is fine for what
-this is for: labelling your own fleet, and letting support see what it is
-looking at without a screen-share. It is not a licence check, and should not be
-relied on as one. If you need a claim that cannot be forged, the field has to
-carry a signature from whoever issues it, which this does not do.
+> [!IMPORTANT]
+> Both are free text and **self-declared: nothing verifies them.** Anyone can
+> write `edition: commercial` in their own config. That's fine for labelling
+> your own fleet, and for support to see what it's looking at without a
+> screen-share. It is not a licence check.
 
 `community`, `commercial`, `homelab` and `evaluation` are the values worth
 being consistent about; anything else is accepted.
 
-For a claim somebody else should believe, add a signed licence — see
-[Signed licences](licensing.md). When one verifies it sets the edition and
-`edition:` is ignored, and the probe reports `licence=verified` alongside the
-organisation, serial and expiry. Without one, the absence of `licence=verified`
-is what tells you the edition is only self-declared.
+For a claim somebody else should believe, add a [signed licence](licensing.md).
+When one verifies, it sets the edition (`edition:` is then ignored), and the
+probe reports `licence=verified` with the organisation, serial and expiry.
+
+<sub>Without one, the absence of `licence=verified` is what tells you the
+edition is only self-declared.</sub>
 
 ### What it will not tell you
 
-No IP address is ever in the answer, whatever the configuration says. Elpis
-knows its own public IPv4, IPv6 and AS — the status page shows them — and an
-unauthenticated UDP probe is the wrong way to hand them out. Behind a
-forwarder it would disclose an address the querier could not otherwise see,
-and on a public resolver it would let anyone who can reach the port map the
-operator's upstream. Ask the status page, which is behind a login.
+**No IP address is ever in the answer**, whatever the config says.
 
-The OS, kernel release and hostname are off by default for the same reason
-version banners usually are — a kernel release is a CVE lookup key, and a
-hostname tends to describe somebody's network:
+<sub>Elpis knows its own public IPv4, IPv6 and AS (the status page shows them),
+and an unauthenticated UDP probe is the wrong way to hand them out. Behind a
+forwarder it would disclose an address the asker couldn't otherwise see; on a
+public resolver it would let anyone who can reach the port map the operator's
+upstream. Ask the status page, which is behind a login.</sub>
+
+**The OS, kernel and hostname are off by default**, like version banners
+usually are: a kernel release is a CVE lookup key, and a hostname tends to
+describe somebody's network.
 
 ```
 identity-system: yes
@@ -222,62 +242,65 @@ identity-name: whoami.internal.example    # a name only you know
 identity: no                              # no probe at all
 ```
 
-`identity-name:` is a licensed setting — see [Signed licences](licensing.md).
-Without a valid licence the line is ignored with a warning and the default
-name is used. `identity: no` is not gated.
+| setting | licence needed? |
+|---|---|
+| `identity-name:` | yes, see [Signed licences](licensing.md). Without a valid one the line is ignored with a warning and the default name is used. |
+| `identity: no` | no |
 
-With `identity: no` the name answers NXDOMAIN exactly like any name that does
-not exist, so nothing reveals that the feature was ever there.
+<sub>With `identity: no` the name answers NXDOMAIN exactly like any name that
+doesn't exist, so nothing reveals the feature was ever there.</sub>
 
-## Outbound source addresses
+## 🛫 Outbound source addresses
 
-The kernel picks one source address per family, so every query leaves from it
-and that is the only address the outside world sees. To use more than one,
-repeat the setting — up to eight per family:
+The kernel picks one source address per family, so every query leaves from it.
+To use more, repeat the setting, up to eight per family:
 
 ```
 outgoing-interface: 2402:4e20:bab1::1001
 outgoing-interface: 2402:4e20:bab1::1111
 ```
 
-They are used round-robin across the outbound socket pool. An off-path
-attacker forging a reply then has to guess the source address as well as the
-port and the message ID.
+They're used round-robin across the outbound socket pool.
 
-## EDNS Client Subnet
+<sub>An off-path attacker forging a reply then has to guess the source address
+as well as the port and the message ID.</sub>
+
+## 📍 EDNS Client Subnet
 
 ```
 ecs: yes
 ecs-ip-type: client
 ```
 
-A content network picks a server near whoever asks, and without ECS the one
-asking is Elpis. That is right when Elpis sits beside its clients, and wrong
-when it does not. If AdGuard Home in Malaysia lists an Elpis in Singapore as
-one of its upstreams, every question it sends there gets Singapore's servers.
-With ECS on, part of an address goes with each query, so the network can answer
-for where the client really is. That part is a /24 for IPv4 or a /56 for IPv6,
-never a whole address.
+A content network picks a server near whoever asks. Without ECS, the one
+asking is Elpis.
 
-`ecs-ip-type` says whose address is sent:
+```
+ client in Malaysia ──► AdGuard (MY) ──► Elpis (SG) ──► CDN
+                                                         │
+          without ECS:  "the asker is in Singapore"  ────┤──► Singapore servers
+          with ECS:     "for 175.139.1.0/24"         ────┘──► Malaysian servers
+```
 
-| value | what the authority is sent |
+With ECS on, part of an address goes with each query: a /24 for IPv4 or a /56
+for IPv6, never a whole address.
+
+| `ecs-ip-type` | what the authority is sent |
 |---|---|
 | `client` | the client's subnet (the default) |
 | `this` | this resolver's own public subnet, the same for every client |
 | `none` | a /0, which asks for an answer tailored to nobody |
 
-With `client`, the subnet comes from the client's own ECS option when it sends
-one. Otherwise it comes from the address the query arrived from. A private,
-CGNAT or loopback address says nothing about where a client is, so a client
-with one gets this resolver's own subnet instead. So does a client that sends a
-/0 to opt out. This resolver's own address is the one the status page shows. It
-is looked up a few seconds after startup, and until then those clients are
-sent no subnet at all.
-
-`this` suits Elpis behind a forwarder or a NAT whose egress is somewhere else.
-`none` suits `forward-zone` to a public resolver that would otherwise add a
-subnet of its own from Elpis's address.
+- **`client`** takes the subnet from the client's own ECS option when it sends
+  one, otherwise from the address the query came from.
+  <br><sub>A private, CGNAT or loopback address says nothing about where a
+  client is, so such a client gets this resolver's own subnet instead. So does a
+  client that sends a /0 to opt out. That address is the one the status page
+  shows; it's looked up a few seconds after startup, and until then those
+  clients are sent no subnet at all.</sub>
+- **`this`** suits Elpis behind a forwarder or a NAT whose egress is somewhere else.
+- **`none`** suits `forward-zone` to a public resolver that would otherwise add
+  a subnet of its own from Elpis's address.
 
 ```
 ecs-ipv4-prefix: 24      # 0 to 32; 0 sends no IPv4 subnet
@@ -285,35 +308,35 @@ ecs-ipv6-prefix: 56      # 0 to 128
 ecs-zone: tbcache.com    # repeatable; only names under these zones
 ```
 
-A client that sends a longer prefix than these is cut down to them. With no
-`ecs-zone:` lines, a subnet can go to the servers of any zone below the TLDs.
+<sub>A client that sends a longer prefix is cut down to these. With no
+`ecs-zone:` lines, a subnet can go to the servers of any zone below the
+TLDs.</sub>
 
 ### Behind AdGuard Home
 
-If AdGuard Home reaches Elpis across the internet, nothing is needed on its
-side: the address Elpis sees is AdGuard's public one, which is where its
-clients are. If it reaches Elpis over a VPN or a private network, the address
-Elpis sees is a private one. Then turn on **Use EDNS Client Subnet** in
-AdGuard's DNS settings, with **Use custom IP for EDNS** set to the site's
-public address, so the subnet arrives in the query itself.
+| AdGuard reaches Elpis | what to do |
+|---|---|
+| across the internet | nothing: Elpis sees AdGuard's public address, which is where its clients are |
+| over a VPN or private network | in AdGuard's DNS settings, turn on **Use EDNS Client Subnet** with **Use custom IP for EDNS** set to the site's public address |
 
-Firefox's own DNS over HTTPS puts `0.0.0.0/0` on every query, asking not to
-have its subnet used. AdGuard Home ignores that and adds the client's subnet
-after it, so the query reaches Elpis with two ECS options. Elpis uses the last
-one: the subnet AdGuard added.
+> [!NOTE]
+> Firefox's own DNS over HTTPS puts `0.0.0.0/0` on every query, asking not to
+> have its subnet used. AdGuard Home ignores that and adds the client's subnet
+> after it, so the query reaches Elpis with two ECS options. Elpis uses the
+> last one: the subnet AdGuard added.
 
 ### What it costs
 
 - **Privacy.** A prefix of each client's address goes to every authority that
   takes one. The root and the TLDs are never sent one. A server that answers
-  without saying how it used the subnet, as a server that ignores ECS does, is
-  sent none for the next hour. `ecs-zone` narrows it further. (With `none`
-  the /0 keeps going regardless, since its job is to stop a forwarder adding a
-  subnet of its own.)
-- **Cache.** An answer an authority tailored to one subnet (a SCOPE above 0 in
-  its reply) is cached for that subnet alone, and each subnet asks for its own.
-  Most authorities give every subnet the same answer, and those answers stay
-  shared. The statistics count both: `ecs sent=` and `tailored=`.
+  without saying how it used the subnet (as one that ignores ECS does) is sent
+  none for the next hour. `ecs-zone` narrows it further.
+  <br><sub>With `none` the /0 keeps going regardless: its job is to stop a
+  forwarder adding a subnet of its own.</sub>
+- **Cache.** An answer tailored to one subnet (SCOPE above 0) is cached for
+  that subnet alone, and each subnet asks for its own. Most authorities give
+  every subnet the same answer, and those stay shared. The statistics count
+  both: `ecs sent=` and `tailored=`.
 
 ### Checking it
 
@@ -323,38 +346,45 @@ Google's `o-o.myaddr.l.google.com` answers with the subnet it was sent:
 dig @127.0.0.1 -p 5335 o-o.myaddr.l.google.com TXT +subnet=175.139.1.0/24
 ```
 
-The reply should carry `"edns0-client-subnet 175.139.1.0/24"`. With `this`, it
-shows this resolver's own subnet; with `none`, `"edns0-client-subnet was not
-used"`.
+| `ecs-ip-type` | the reply carries |
+|---|---|
+| `client` | `"edns0-client-subnet 175.139.1.0/24"` |
+| `this` | this resolver's own subnet |
+| `none` | `"edns0-client-subnet was not used"` |
 
-## Names asked without case randomisation
+## 🔠 Names asked without case randomisation
 
 ```
 use-0x20: yes
 caps-exempt: dnsprobe.online    # repeatable
 ```
 
-With `use-0x20` on, Elpis randomises the case of every name it sends upstream
-over UDP (`wWw.ExAmPlE.cOm`). The authority answers with the name exactly as
-it was sent, so an attacker forging a reply has to guess the case pattern as
-well. DNS names are case-insensitive, so the answer is the same.
+With `use-0x20` on, every name Elpis sends upstream over UDP has its case
+randomised: `wWw.ExAmPlE.cOm`. The server answers with the name exactly as
+sent, so someone forging a reply has to guess the case pattern too. DNS names
+are case-insensitive, so the answer is the same.
 
-A server that drops randomised names is caught automatically: it is asked once
-in lowercase, and if that is answered, it is remembered and the log says so.
-That does not work for a server that answers a randomised name correctly but
-does something else with it. `dnsprobe.online`, which runs the DNS leak test at
-publicdns.info, records which resolver asked for each test name, but only if
-the name arrives in lowercase. Through Elpis the test never sees a resolver at
-all. The same happens with Google Public DNS, which randomises too. Nothing in
-the answers shows this, so the zone has to be named.
+| a server that | what happens |
+|---|---|
+| drops randomised names | caught automatically: asked once in lowercase, remembered if that's answered, and logged |
+| answers randomised names, but misuses them | has to be named in `caps-exempt` |
 
-`caps-exempt` names a zone whose names always go out as asked. It is matched
+> [!NOTE]
+> `dnsprobe.online`, behind the DNS leak test at publicdns.info, records which
+> resolver asked for each test name, but only when the name arrives in
+> lowercase. Through Elpis the test never saw a resolver at all, and the same
+> happens with Google Public DNS, which randomises too. Nothing in the answers
+> shows this, so the zone has to be named.
+
+`caps-exempt` names a zone whose names always go out as asked. It's matched
 against the name being sent, so it covers the zone and every name below it,
-whichever server is asked. Up to 32 entries. The shipped config lists `dnsprobe.online`. The
-name is Unbound's, and Elpis also accepts Unbound's `use-caps-for-id` for
-`use-0x20`.
+whichever server is asked. Up to 32 entries; the shipped config lists
+`dnsprobe.online`.
 
-## DNS over TLS to authoritative servers
+<sub>The name is Unbound's. Elpis also accepts Unbound's `use-caps-for-id` for
+`use-0x20`.</sub>
+
+## 🔒 DNS over TLS to authoritative servers
 
 ```
 authoritative-dot: opportunistic     # default: no
@@ -363,119 +393,148 @@ authoritative-dot-retry: 1h
 authoritative-dot-max-try: 24        # 0 = never give up
 ```
 
-Everything Elpis asks the root, the TLDs and the authoritative servers goes
-over plain DNS on port 53, readable by anyone on the path. With
-`authoritative-dot: opportunistic`, Elpis tries DNS over TLS on port 853 with
-each server it uses, as RFC 9539 describes, and keeps using it with the
-servers that answer there.
+Plain DNS to the root, the TLDs and the authoritative servers is readable by
+anyone on the path. With `authoritative-dot: opportunistic`, Elpis tries DNS
+over TLS on port 853 with each server it uses (RFC 9539), and keeps using it
+with the servers that answer there.
+
+```
+        first query
+             │
+             ▼
+     ┌───────────────┐     DoT answers     ┌───────────────┐
+     │    testing    │ ──────────────────► │   available   │◄─┐ each DoT answer
+     │  plain + DoT  │                     │   DoT only    │──┘ renews the ttl
+     └───────────────┘                     └───────┬───────┘
+         ▲       │ refused, no reply,              │ DoT fails
+   retry │       │ TLS error                       ▼
+   due   │       │                         ┌───────────────┐
+         │       └───────────────────────► │    failed     │
+         └──────────────────────────────── │  plain only   │
+                                           └───────┬───────┘
+                                                   │ max-try retries failed
+                                                   ▼
+                                           ┌───────────────┐
+                                           │   given up    │
+                                           │ never retried │
+                                           └───────────────┘
+```
 
 | a server that | is asked |
 |---|---|
 | has not been tried | plain, as always, with a copy over DoT that nobody waits for: that is the test |
-| answered over DoT | over DoT only, on one connection per worker that is kept open, for `authoritative-dot-ttl` after its last DoT answer |
+| answered over DoT | over DoT only, on one kept-open connection per worker, for `authoritative-dot-ttl` after its last DoT answer |
 | failed over DoT, or never answered there | plain, and tested again every `authoritative-dot-retry` |
 | failed `authoritative-dot-max-try` retries | plain, for good |
 
-So the first query to a server is no slower than before, and a server that
-takes DoT never sees a name in the clear again. A server that answers over DoT
-is chosen ahead of one that does not, however much faster the other is: most
-answers come from the cache, so a slower server costs little, and the name
-stays out of sight. A server that is failing or held down is not chosen for
-that, and no plain copy of a question asked over DoT goes to anyone else.
+**The first query to a server is no slower than before**, and a server that
+takes DoT never sees a name in the clear again.
 
-If a DoT query goes unanswered for as long as the server usually takes, the
-same question goes plain to the same server. If that is answered, DoT is
-marked failed for the server. A connection that is refused, fails its
-handshake, or ends with a TLS alert is marked failed at once, and its queries
-go plain straight away. A connection that had worked and is merely closed
-under its queries has only lost them: they go again over a fresh one.
+- **DoT servers come first.** A server that answers over DoT is chosen ahead of
+  one that doesn't, however much faster the other is.
+  <br><sub>Most answers come from the cache, so a slower server costs little,
+  and the name stays out of sight. A server that is failing or held down isn't
+  chosen for that, and no plain copy of a question asked over DoT goes to
+  anyone else.</sub>
+- **No reply over DoT?** The same question goes plain to the same server once
+  the usual timeout passes. If plain answers, DoT is marked failed.
+- **Refused, a failed handshake, or a TLS alert** marks DoT failed at once, and
+  the queries go plain straight away.
+- **A working connection closed under its queries** has only lost them: they
+  go again over a fresh one.
 
-`yes` is not accepted: it is kept for a strict mode, one day, that would rather
-fail than ask in the clear. Durations take `s`, `m`, `h` and `d`. The ttl and
-the retry run from a minute to a week, the retry is at most the ttl, and
-`authoritative-dot-max-try` is at most 255. Forwarders and stub zones are left
-alone: they are configuration, and asked the way it says.
+<sub>`yes` is not accepted: it's kept for a strict mode, one day, that would
+rather fail than ask in the clear. Durations take `s`, `m`, `h` and `d`. The
+ttl and the retry run from a minute to a week, the retry is at most the ttl,
+and `authoritative-dot-max-try` is at most 255. Forwarders and stub zones are
+left alone: they're configuration, and asked the way it says.</sub>
 
 ### What it protects, and what it does not
 
-The connection is encrypted but not authenticated. An NS record gives a name
-and an address, not an identity a certificate could be checked against, so the
-certificate is not checked; the server's Finished message is, which proves the
-two ends derived the same keys. That stops someone watching the path from
-reading what is asked. It does nothing against someone who can sit on the path,
-who could read it or simply block port 853 -- and blocking only pushes Elpis
-back to plain DNS, which is where it was without this.
+> [!IMPORTANT]
+> **Encrypted, not authenticated.** It stops someone *watching* the path from
+> reading what is asked. It does nothing against someone *sitting on* the path,
+> who could read it or simply block port 853, and blocking only pushes Elpis
+> back to plain DNS, which is where it was without this.
 
-The authoritative server itself still sees every question, and an ECS subnet
-if one is sent. DNSSEC is unchanged: an answer over DoT is trusted no more than
-a plain one. Queries over DoT are padded to a multiple of 128 bytes (RFC
-8467), so their length gives less away.
+<sub>An NS record gives a name and an address, not an identity a certificate
+could be checked against, so the certificate isn't checked. The server's
+Finished message is, which proves the two ends derived the same keys.</sub>
+
+- The authoritative server itself still sees every question, and an ECS subnet
+  if one is sent.
+- DNSSEC is unchanged: an answer over DoT is trusted no more than a plain one.
+- Queries over DoT are padded to a multiple of 128 bytes (RFC 8467), so their
+  length gives less away.
 
 ### What it costs
 
-- **Few servers offer it yet.** Most authorities drop connections to port 853
-  without a reply, so most tests end in a 3-second timeout. That is a socket
-  and a timer, not a wait: nobody is waiting on a test. At most 16 handshakes
-  are in progress per worker.
-- **Connections.** One per server per worker, closed after 15 s unused, at most
-  256 per worker. About 1.2 KB of TLS state each, plus buffers that are freed
-  while it idles.
-- **CPU.** An X25519 key exchange per handshake, about 0.3 ms. Records are
-  ChaCha20-Poly1305, or AES-128-GCM where the CPU has AES-NI.
+| | |
+|---|---|
+| **Few servers offer it yet** | Most authorities drop connections to port 853 without a reply, so most tests end in a 3-second timeout. That's a socket and a timer, not a wait: nobody is waiting on a test. At most 16 handshakes are in progress per worker. |
+| **Connections** | One per server per worker, closed after 15 s unused, at most 256 per worker. About 1.2 KB of TLS state each, plus buffers freed while it idles. |
+| **CPU** | An X25519 key exchange per handshake, about 0.3 ms. Records are ChaCha20-Poly1305, or AES-128-GCM where the CPU has AES-NI. |
 
 ### Checking it
 
 The status page's **DoT servers** window lists every server that has answered
 over DoT, where each stands now, and why tests failed. `b.root-servers.net`
-and Facebook's authoritative servers take DoT, so asking for a few of
-Facebook's names shows it working:
+and Facebook's authoritative servers take DoT, so a few of Facebook's names
+show it working:
 
 ```bash
 dig @127.0.0.1 -p 5335 www.facebook.com A
 dig @127.0.0.1 -p 5335 www.whatsapp.com A
 ```
 
-The first query to each server goes plain; once the test is answered, the
+<sub>The first query to each server goes plain. Once the test is answered, the
 window lists the server as available, and later queries to it go over DoT.
+dnscheck.tools shows **ADoX** when it works.</sub>
 
-## Zones whose servers misbehave
+## 🧩 Zones whose servers misbehave
 
 ```
 quirk: example.net drops-svcb
 quirk: cimb.com.my none
 ```
 
-Some zones drop HTTPS queries at a firewall, or sit behind a load balancer
-that answers only the types it balances. A quirk says how a zone misbehaves, so
-Elpis answers "no data" instead of timing out into SERVFAIL. A built-in list
-covers the zones known to need one. These lines add to it, and `none` switches
-a built-in entry off. See [quirks](quirks.md) for the flags, the built-in list,
-and how to find a zone that needs one.
+Some zones drop HTTPS queries at a firewall, or sit behind a load balancer that
+answers only the types it balances. A quirk says how a zone misbehaves, so
+Elpis answers "no data" instead of timing out into SERVFAIL.
 
-## Hashing a status page password
+<sub>A built-in list covers the zones known to need one. These lines add to it,
+and `none` switches a built-in entry off. See [quirks](quirks.md) for the
+flags, the built-in list, and how to find a zone that needs one.</sub>
+
+## 🔑 Hashing a status page password
 
 ```bash
 elpis --hash-password            # reads one line from stdin
 elpis --hash-password 'secret'   # or takes it as an argument
 ```
 
-Prints a `webgui-password:` line to paste into the config. The resolver does
-this for itself when it can write the config file, but a properly sandboxed
-deployment does not let it — see
-[when the config cannot be rewritten](status-page.md#when-the-config-cannot-be-rewritten).
+Prints a `webgui-password:` line to paste into the config.
 
-## Running it
+<sub>The resolver does this for itself when it can write the config file, but
+a properly sandboxed deployment doesn't let it. See
+[when the config cannot be rewritten](status-page.md#when-the-config-cannot-be-rewritten).</sub>
 
-```
-SIGHUP    reopen the log, rotate the DNS cookie secret
-SIGUSR1   print statistics
-SIGUSR2   flush the caches (root hints are kept)
-SIGTERM   shut down
-```
+## 🏃 Running it
 
-`-t` checks the configuration and exits. `-d` stays in the foreground. `-v`
-raises verbosity, repeatable.
+| Signal | Does |
+|---|---|
+| `SIGHUP` | reopen the log, rotate the DNS cookie secret |
+| `SIGUSR1` | print statistics |
+| `SIGUSR2` | flush the caches (root hints are kept) |
+| `SIGTERM` | shut down |
+
+| Flag | Does |
+|---|---|
+| `-t` | check the configuration and exit |
+| `-d` | stay in the foreground |
+| `-v` | more verbose; repeatable |
+| `-V` | print the version and the release name |
 
 ---
 
-[Caching](caching.md) · [DNSSEC](dnssec.md) · [Internals](internals.md) · [Troubleshooting](troubleshooting.md)
+<sub>[README](../README.md) · [Compiling](COMPILING.md) · [Caching](caching.md) · [DNSSEC](dnssec.md) · [Status page](status-page.md) · [Troubleshooting](troubleshooting.md) · [Quirks](quirks.md) · [Internals](internals.md) · [Licensing](licensing.md)</sub>
