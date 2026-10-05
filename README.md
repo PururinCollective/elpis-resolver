@@ -38,10 +38,10 @@ Elpis is the back half of a private DNS setup. Something friendly sits in
 front for your devices; Elpis does the real work behind it.
 
 ```
-       📱 💻 📺   your devices
-            │
-            │   DoH · DoT · DoQ · plain DNS
-            ▼
+          📱 💻 📺   your devices
+              │
+              │   DoH · DoT · DoQ · plain DNS
+              ▼
  ┌──────────────────────────┐
  │  AdGuard Home / Pi-hole  │   blocklists · per-client rules
  └────────────┬─────────────┘
@@ -52,8 +52,8 @@ front for your devices; Elpis does the real work behind it.
  └────────────┬─────────────┘
               │   DoT where the server offers it, plain DNS where not
               ▼
-      .   ──►   com.   ──►   example.com.
-    root        TLD          authoritative
+       .   ──►   com.   ──►   example.com.
+     root        TLD          authoritative
 ```
 
 There is no upstream resolver in this picture. Nobody but the servers that
