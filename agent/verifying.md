@@ -77,6 +77,7 @@ answer-presence with 1.1.1.1:
 | Epic Games Launcher hosts | dozens of names behind Route 53, unsigned CNAMEs into signed `cdn.cloudflare.net` |
 | Taobao (`taobao.com`, `alicdn.com`, `mmstat.com`) | many hosts, far-away authorities |
 | Shopee MY / SG / ID | many hosts, SEA authorities |
+| `mail.protection.outlook.com`, `microsoft-com.mail.protection.outlook.com` | servers that FORMERR any EDNS query, with no question in the reply; the first is NODATA |
 
 <sub>Shopee shows an anti-bot captcha to automated browsers: that's not a DNS
 failure. CDNs answering with different addresses than 1.1.1.1 is expected;

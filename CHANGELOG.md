@@ -14,6 +14,27 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**Exchange Online mail hosts resolve again.** Every Microsoft 365 domain
+receives mail at a name under `mail.protection.outlook.com`, such as
+`contoso-com.mail.protection.outlook.com`, and every one of them was a
+SERVFAIL (EDE 22, No Reachable Authority), as was the zone's own name. A mail
+server using Elpis could not deliver to any of those domains. The zone's
+servers do not speak EDNS: they answer any query that carries it with
+FORMERR, and leave the question section out of that reply. Elpis checks each
+reply against the question it asked, so this one matched nothing, was dropped
+as a possible spoof, and the query timed out. A FORMERR with no question, to
+a query that carried EDNS, is now read as the server refusing EDNS, and the
+same server is asked again without it, as RFC 6891 asks. It used to go on to
+the next server instead, even when the question matched, and get the same
+FORMERR there. Such a reply can only be matched on ID, port and address, so
+it is not believed from a server that has already answered EDNS: a spoofer
+cannot use it to turn EDNS, and with it DNSSEC, off for a server that speaks
+both. The log says once in a while which servers refuse EDNS.
+
 ## 2.4.3 "Resilient Journey" — 2026-10-06
 
 Looking after the host, not just the binary. `contrib/elpis-install.sh` sets

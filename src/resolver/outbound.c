@@ -703,6 +703,50 @@ int elpis_out_probe(elpis_task_t *t, const elpis_addr_t *server)
 /* Response matching                                                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * A refusal of EDNS that leaves out what it refuses.  A server that does not
+ * speak EDNS answers a query with an OPT in it FORMERR (RFC 6891 section 7),
+ * and some send that back with no question section at all.  The servers for
+ * mail.protection.outlook.com do, and every Exchange Online mail host is a
+ * name in that zone: matched on its question, the reply matched nothing, was
+ * dropped as a spoof, and each of those names timed out into a SERVFAIL.
+ *
+ * Without a question there is only the ID, port and address to match on, so
+ * such a reply is taken for one thing: ask that server again without EDNS.
+ * And not from a server that has answered EDNS before -- a spoofer who
+ * guessed the ID and port could otherwise switch EDNS, and with it DNSSEC,
+ * off for a server that speaks both.
+ */
+static int bare_edns_refusal(elpis_worker_t *w, const elpis_outq_t *q,
+                             const elpis_msg_t *m)
+{
+    elpis_infra_info_t inf;
+    unsigned rcode = elpis_msg_rcode(m);
+
+    if (m->hdr.qdcount != 0 || !q->used_edns || m->have_opt)
+        return 0;
+    if (rcode != ELPIS_RC_FORMERR && rcode != ELPIS_RC_NOTIMP)
+        return 0;
+    elpis_infra_get(w->ctx->infra, &q->server, &inf);
+    return inf.edns_state != ELPIS_EDNS_YES;
+}
+
+static int same_question(elpis_worker_t *w, const elpis_outq_t *q,
+                         const elpis_msg_t *m)
+{
+    if (m->hdr.qdcount == 0)
+        return bare_edns_refusal(w, q, m);
+    if (m->qtype != q->qtype || m->qclass != q->qclass)
+        return 0;
+    /*
+     * Byte-exact question name comparison, which is what makes the 0x20
+     * encoding worth anything.  A case-insensitive compare here would
+     * throw away the entropy we just spent.
+     */
+    return m->qname.len == q->qnamelen &&
+           memcmp(m->qname.d, q->qname_wire, q->qnamelen) == 0;
+}
+
 static elpis_outq_t *out_find(elpis_worker_t *w, uint16_t id, int sockidx,
                               const elpis_addr_t *from, const elpis_msg_t *m)
 {
@@ -714,16 +758,7 @@ static elpis_outq_t *out_find(elpis_worker_t *w, uint16_t id, int sockidx,
             continue;
         if (!elpis_addr_eq(&q->server, from))
             continue;
-        if (m->qtype != q->qtype || m->qclass != q->qclass)
-            continue;
-        /*
-         * Byte-exact question name comparison, which is what makes the 0x20
-         * encoding worth anything.  A case-insensitive compare here would
-         * throw away the entropy we just spent.
-         */
-        if (m->qname.len != q->qnamelen)
-            continue;
-        if (memcmp(m->qname.d, q->qname_wire, q->qnamelen) != 0)
+        if (!same_question(w, q, m))
             continue;
         return q;
     }
@@ -840,7 +875,7 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     elpis_outq_t *other;
     unsigned rcode = elpis_msg_rcode(m);
     uint32_t rtt;
-    int ecs_retry = 0;
+    int ecs_retry = 0, edns_retry = 0;
 
     if (t == NULL && !q->probe) {
         elpis_out_free(w, q);
@@ -856,7 +891,8 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
     rtt = (uint32_t)(w->last_answer_ms - q->sent_ms);
     elpis_infra_rtt_ok(w->ctx->infra, &q->server, rtt);
     absorb_cookie(w, q, m);
-    if (q->used_0x20 || q->caps_test)
+    /* A reply without a question says nothing about how the name was sent. */
+    if ((q->used_0x20 || q->caps_test) && m->hdr.qdcount != 0)
         learn_0x20(w, q);
 
     if (q->used_edns) {
@@ -871,7 +907,12 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
              * thing to have upset it, and ecs_answer() tries without it
              * first, rather than give up on EDNS -- and DNSSEC -- for good.
              */
+            char ab[80];
             elpis_infra_set_edns(w->ctx->infra, &q->server, ELPIS_EDNS_NO, 0);
+            elpis_logf_rl(ELPIS_LOG_INFO, ELPIS_DROP__MAX + 3, __FILE__,
+                          __LINE__, "%s refuses EDNS; asking it without",
+                          elpis_addr_str(&q->server, ab, sizeof ab));
+            edns_retry = 1;
         }
     }
     if (q->used_ecs)
@@ -905,8 +946,13 @@ static void handle_message(elpis_worker_t *w, elpis_outq_t *q,
         t->out = NULL;
     }
 
-    /* The subnet was refused or garbled: the same question, without it. */
-    if (ecs_retry) {
+    /*
+     * The subnet was refused or garbled: the same question, without it.  Or
+     * EDNS itself was: the same question to the same server, without that
+     * (RFC 6891 section 7).  This used to go on to the next server, which
+     * an EDNS query only got the same FORMERR from.
+     */
+    if (ecs_retry || edns_retry) {
         elpis_addr_t server = q->server;
         int tcp = q->over_tcp;
         elpis_out_free(w, q);
@@ -1306,9 +1352,7 @@ static void out_tcp_event(elpis_loop_t *lp, elpis_ev_t *ev, unsigned events)
                 tcp_fail(w, q, ELPIS_EDE_INVALID_DATA);
                 return;
             }
-            if (m.hdr.id != q->id || m.qtype != q->qtype ||
-                m.qclass != q->qclass || m.qname.len != q->qnamelen ||
-                memcmp(m.qname.d, q->qname_wire, q->qnamelen) != 0) {
+            if (m.hdr.id != q->id || !same_question(w, q, &m)) {
                 elpis_drop_log(ELPIS_DROP_SPOOF, &q->server, q->rxbuf + 2,
                                q->rxwant, "tcp response does not match query");
                 tcp_fail(w, q, ELPIS_EDE_INVALID_DATA);
