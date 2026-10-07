@@ -6,7 +6,7 @@ What "done" means here. Run what applies; say what you ran and what you didn't.
 
 ```bash
 make                       # no warnings
-make test                  # all pass (697 at 2.4.3)
+make test                  # all pass (704 at 2.4.4)
 ```
 
 ## 🔬 For anything in C

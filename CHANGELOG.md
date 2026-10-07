@@ -14,7 +14,15 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.4 "Celestial Equations" — 2026-10-07
+
+Mail to Microsoft 365. Every Exchange Online mail host, the names under
+`mail.protection.outlook.com`, was a SERVFAIL, because their servers refuse
+EDNS in a way Elpis took for a spoof. Elpis now asks such a server again
+without EDNS, as Cloudflare's and Google's resolvers do, and gets the same
+answers they do.
+
+No config that worked stops working.
 
 ### Fixed
 
