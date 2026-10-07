@@ -4047,6 +4047,150 @@ out:
 }
 
 /* ================================================================== */
+/*
+ * A server that refuses EDNS with a FORMERR and no question section, as the
+ * servers for mail.protection.outlook.com do.  The reply matched no query and
+ * was dropped, so every Exchange Online mail host timed out into a SERVFAIL.
+ * The fake server is a socket on 127.0.0.1; the reply goes back through the
+ * real outbound path and the worker's loop.
+ */
+static ssize_t edns_refusal_round(elpis_worker_t *w, int lfd, uint8_t *pkt,
+                                  size_t cap, int answer)
+{
+    struct sockaddr_storage from;
+    socklen_t flen = sizeof from;
+    struct pollfd pfd;
+    uint8_t hdr[ELPIS_HDR_LEN];
+    ssize_t got;
+
+    pfd.fd = lfd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) != 1)
+        return -1;
+    got = recvfrom(lfd, pkt, cap, 0, (struct sockaddr *)&from, &flen);
+    if (got < ELPIS_HDR_LEN || !answer)
+        return got;
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = pkt[0];
+    hdr[1] = pkt[1];
+    hdr[2] = 0x80;                      /* QR, QUERY, nothing else */
+    hdr[3] = ELPIS_RC_FORMERR;          /* and no sections at all  */
+    if (sendto(lfd, hdr, sizeof hdr, 0, (struct sockaddr *)&from, flen) !=
+        (ssize_t)sizeof hdr)
+        return -1;
+    elpis_loop_once(w->loop, 1000);
+    return got;
+}
+
+static void test_edns_refusal(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_task_t *t = NULL;
+    elpis_addr_t srv;
+    elpis_infra_info_t inf;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    uint8_t pkt[512];
+    ssize_t got;
+    int lfd = -1;
+
+    section("a FORMERR to EDNS with no question in it");
+
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 16;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    ctx->infra = elpis_infra_new(1u << 20, 2);
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);
+    w->rxbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    if (ctx->infra == NULL || w->loop == NULL || w->rxbuf == NULL ||
+        w->txbuf == NULL ||
+        elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "a socket on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+    elpis_addr_parse(&srv, "127.0.0.1", ntohs(sin.sin_port));
+
+    t = elpis_task_new(w);
+    if (t == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    elpis_name_from_text(&t->qname, "mail.protection.outlook.com.");
+    t->qtype = ELPIS_T_A;
+    got = -1;
+    elpis_clock_tick();                 /* or the query's timer is due already */
+    if (elpis_out_send(t, &srv, 0) == ELPIS_OK)
+        got = edns_refusal_round(w, lfd, pkt, sizeof pkt, 1);
+    CHECK(got >= ELPIS_HDR_LEN && elpis_get16(pkt + 10) == 1,
+          "the first query carries an OPT");
+    got = edns_refusal_round(w, lfd, pkt, sizeof pkt, 0);
+    CHECK(got >= (ssize_t)(ELPIS_HDR_LEN + t->qname.len + 4u) &&
+          elpis_get16(pkt + 4) == 1 && elpis_get16(pkt + 10) == 0 &&
+          elpis_get16(pkt + ELPIS_HDR_LEN + t->qname.len) == ELPIS_T_A,
+          "the same server is asked again, without EDNS");
+    elpis_infra_get(ctx->infra, &srv, &inf);
+    CHECK(inf.edns_state == ELPIS_EDNS_NO, "and it is remembered (state %u)",
+          (unsigned)inf.edns_state);
+    elpis_task_free(t);
+
+    /*
+     * Matched on ID, port and address only, it must not turn EDNS -- and
+     * DNSSEC -- off for a server that has already answered it.
+     */
+    elpis_infra_set_edns(ctx->infra, &srv, ELPIS_EDNS_YES, 1232);
+    t = elpis_task_new(w);
+    if (t == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    elpis_name_from_text(&t->qname, "example.com.");
+    t->qtype = ELPIS_T_A;
+    got = -1;
+    elpis_clock_tick();
+    if (elpis_out_send(t, &srv, 0) == ELPIS_OK)
+        got = edns_refusal_round(w, lfd, pkt, sizeof pkt, 1);
+    CHECK(got >= ELPIS_HDR_LEN, "a server known to speak EDNS is asked");
+    {
+        struct pollfd pfd;
+        pfd.fd = lfd;
+        pfd.events = POLLIN;
+        CHECK(poll(&pfd, 1, 300) == 0,
+              "and a bare FORMERR from it is not taken for a refusal");
+    }
+    elpis_infra_get(ctx->infra, &srv, &inf);
+    CHECK(inf.edns_state == ELPIS_EDNS_YES, "it keeps EDNS (state %u)",
+          (unsigned)inf.edns_state);
+    elpis_task_free(t);
+
+out:
+    if (lfd >= 0)
+        close(lfd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->rxbuf);
+        elpis_free(w->txbuf);
+    }
+    if (ctx != NULL)
+        elpis_cache_free(ctx->infra);
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 static unsigned pool_count(const elpis_worker_t *w, int family)
 {
     unsigned i, n = 0;
@@ -5559,6 +5703,7 @@ int main(void)
     test_localzone();
     test_ecs();
     test_caps_exempt();
+    test_edns_refusal();
     test_pool_refill();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

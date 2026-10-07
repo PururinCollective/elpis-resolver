@@ -20,6 +20,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.1 "Lettersong" | 2026-10-05 | starting at boot (LXC, VM) before the addresses are up: listeners bind anyway, `outgoing-interface` sockets wait and retry |
 | 2.4.2 "Lettersong" | 2026-10-05 | the shipped unit drops `Conflicts=systemd-resolved`, which silently cancelled Elpis at boot; Elpis names resolved's stub when it holds the port |
 | 2.4.3 "Resilient Journey" | 2026-10-06 | `contrib/elpis-install.sh`: account, unit, enable, and `RESOLVED=replace` to take systemd-resolved's place on 127.0.0.53; scripts run in place from the clone (`/opt` recommended); 127.0.0.53 messages fixed |
+| 2.4.4 "Celestial Equations" | 2026-10-07 | A FORMERR with no question, to an EDNS query, is read as an EDNS refusal and the same server asked again plain: every Exchange Online mail host (`*.mail.protection.outlook.com`) had been a SERVFAIL |
 
 ## 🧭 Decisions, and why
 
@@ -50,6 +51,16 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | `IP_FREEBIND` on listeners, **not** on outbound sockets | Tested: on Linux an IPv6 socket with it, bound to an address the host doesn't have, sends from it (IPv4 gets `ENETUNREACH`). A listener only replies to queries that reached its address. |
 | Outbound slots kept and retried (1, 2, 4, 8 s, then every 10 s); an absent IPv4 source no longer exits | The same "start, warn, catch up" as listeners. Before, IPv6 slots vanished silently until a restart. |
 | "Not here yet" is a throwaway `bind()` to port 0, not `getifaddrs()` | The shipped unit's `RestrictAddressFamilies=AF_INET AF_INET6` refuses the netlink socket `getifaddrs()` needs, so it always fails under systemd. |
+
+### Servers that refuse EDNS (2.4.4)
+
+| decision | why |
+|---|---|
+| A FORMERR or NOTIMP with **no question section**, no OPT, to a query that carried one, is matched on ID, port and address alone | The servers for `mail.protection.outlook.com` (`ns1`/`ns2-proddns.glbdns.o365filtering.com`) send exactly that to any EDNS query. Matched on the question, it was dropped as a spoof, and every Exchange Online mail host timed out into a SERVFAIL. |
+| Not believed from a server whose infra entry already says `ELPIS_EDNS_YES` | With no question there is no 0x20 to check, so a spoofer who guessed the ID and port could switch EDNS, and DNSSEC with it, off for a server that speaks both. What is left is the window before a server's first EDNS answer, or after an hour unused, when `freshen()` starts its entry over. |
+| The same server is asked again, plain; not the next one | RFC 6891 section 7. A zone's servers usually run the same software, so the next one only returned the same FORMERR. |
+| A reply with no question teaches nothing about 0x20 | It says nothing about how the name was sent. |
+| DoT unchanged | No DoT server without EDNS has been seen. |
 
 ### Older ones
 

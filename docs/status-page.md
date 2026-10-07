@@ -67,14 +67,14 @@ The About window carries the version, the release name, and the commit `make`
 built from:
 
 ```
-version   2.4.3
-release   Resilient Journey
-build     v2.4.3
+version   2.4.4
+release   Celestial Equations
+build     v2.4.4
 ```
 
 | Built from | build reads |
 |---|---|
-| a release tag | `v2.4.3` |
+| a release tag | `v2.4.4` |
 | any other commit | branch and commit, `main@bcc97d252fac` |
 | a tarball, no git | *not a git checkout* |
 
