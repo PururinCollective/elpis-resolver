@@ -234,8 +234,8 @@ dig +short TXT elpis.sakurako.oomuro @127.0.0.1     # the same
 ```
 
 ```
-elpis.sakurako.oomuro   text = "elpis=2.4.4" "codename=Celestial Equations"
-                               "edition=community" "build=v2.4.4"
+elpis.sakurako.oomuro   text = "elpis=2.4.5" "codename=Celestial Cascade"
+                               "edition=community" "build=v2.4.5"
                                "uptime=3601" "workers=8" "simd=avx2"
                                "dnssec=validating"
 ```

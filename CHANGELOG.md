@@ -14,7 +14,15 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.4.5 "Celestial Cascade" — 2026-10-08
+
+Stale, but not past its signatures. Zones that sign each answer as they
+serve it, Route 53 among them, could have a name go SERVFAIL about an hour
+after it was first looked up, because Elpis kept using a cached copy whose
+signature had expired. Such a copy now counts as missing, and Elpis fetches
+a fresh one.
+
+No config that worked stops working.
 
 ### Fixed
 
