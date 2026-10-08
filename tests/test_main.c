@@ -2589,6 +2589,87 @@ static void test_rrset_why(void)
           strlen(why));
 }
 
+/*
+ * Whether every signature on a cached set has run out.  Route 53 signs
+ * accounts.pandasecurity.com for 65 minutes under a TTL of 300, and serve-
+ * stale kept the CNAME for a day: once its signature expired, the stale copy
+ * went into answers and the name was SERVFAIL until a fresh one was fetched
+ * by chance.  A stale set this says yes to is now a cache miss.
+ */
+static void denial_item(elpis_rrset_buf_t *set, const elpis_name_t *owner,
+                        uint16_t type, const uint8_t *rd, size_t rdlen)
+{
+    uint8_t item[3 + ELPIS_MAX_NAME + 128];
+    elpis_put16(item, type);
+    item[2] = (uint8_t)owner->len;
+    memcpy(item + 3, owner->d, owner->len);
+    memcpy(item + 3 + owner->len, rd, rdlen);
+    elpis_rrset_buf_add(set, item, (uint16_t)(3u + owner->len + rdlen));
+}
+
+static void test_sigs_lapsed(void)
+{
+    static elpis_rrset_buf_t set, sig;
+    elpis_conf_t c;
+    elpis_name_t zone, hashed;
+    uint8_t a[4] = { 192, 0, 2, 1 };
+    uint8_t soa = 0, nsec3[8] = { 1, 0, 0, 0, 0, 0, 0, 0 };
+    int64_t now = elpis_wall_s();
+
+    section("signatures that have run out");
+    elpis_conf_defaults(&c);
+    elpis_name_from_text(&zone, "lapsed.test.");
+    elpis_name_from_text(&hashed, "abcdef.lapsed.test.");
+
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_CNAME, ELPIS_CLASS_IN, 300);
+    elpis_rrset_buf_add(&set, zone.d, zone.len);
+    CHECK(!elpis_rrset_sigs_lapsed(&c, &set, now),
+          "an unsigned set has no signature to run out");
+
+    why_sig(&set, &zone, 1, now - 7200, now - 60, 0x51);
+    CHECK(elpis_rrset_sigs_lapsed(&c, &set, now),
+          "its one signature expired a minute ago");
+    why_sig(&set, &zone, 2, now - 3600, now + 3600, 0x52);
+    CHECK(!elpis_rrset_sigs_lapsed(&c, &set, now),
+          "but a second one is still good");
+
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 300);
+    elpis_rrset_buf_add(&set, a, sizeof a);
+    why_sig(&set, &zone, 1, now + 600, now + 7200, 0x53);
+    CHECK(elpis_rrset_sigs_lapsed(&c, &set, now),
+          "a signature not valid yet proves nothing now either");
+
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 300);
+    elpis_rrset_buf_add(&set, a, sizeof a);
+    why_sig(&set, &zone, 1, now - 7200, now - 60, 0x54);
+    c.sig_skew = 300;
+    CHECK(!elpis_rrset_sigs_lapsed(&c, &set, now),
+          "signature-clock-skew counts, as it does in validation");
+    c.sig_skew = 0;
+
+    /* A denial as cache_negative() files it: the SOA, then its proof. */
+    elpis_rrset_buf_init(&set, &zone, ELPIS_T_DS, ELPIS_CLASS_IN, 300);
+    set.flags = ELPIS_RRF_NODATA;
+    elpis_rrset_buf_add(&set, &soa, 1);
+    denial_item(&set, &hashed, ELPIS_T_NSEC3, nsec3, sizeof nsec3);
+    CHECK(!elpis_rrset_sigs_lapsed(&c, &set, now),
+          "a denial with no signature kept");
+
+    elpis_rrset_buf_init(&sig, &hashed, ELPIS_T_NSEC3, ELPIS_CLASS_IN, 300);
+    why_sig(&sig, &zone, 1, now - 7200, now - 60, 0x55);
+    denial_item(&set, &hashed, ELPIS_T_RRSIG, sig.data + sig.off[0],
+                sig.len[0]);
+    CHECK(elpis_rrset_sigs_lapsed(&c, &set, now),
+          "a denial whose proof's signature expired");
+
+    elpis_rrset_buf_init(&sig, &hashed, ELPIS_T_NSEC3, ELPIS_CLASS_IN, 300);
+    why_sig(&sig, &zone, 2, now - 3600, now + 3600, 0x56);
+    denial_item(&set, &hashed, ELPIS_T_RRSIG, sig.data + sig.off[0],
+                sig.len[0]);
+    CHECK(!elpis_rrset_sigs_lapsed(&c, &set, now),
+          "and one with a signature still good");
+}
+
 /* ================================================================== */
 /*
  * Keys and DS records that come with TTL 0.  The RRset cache keeps nothing
@@ -5683,6 +5764,7 @@ int main(void)
     test_bignum();
     test_keytrap();
     test_rrset_why();
+    test_sigs_lapsed();
     test_ttl0_material();
     test_reply_fit();
     test_pq_downgrade();

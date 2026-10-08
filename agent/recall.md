@@ -112,6 +112,13 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   is how the boot race was reproduced: start Elpis, then add the address. Use
   a **veth pair** for IPv6: a dummy link is NOARP and skips duplicate address
   detection, so its addresses are never `tentative`.
+- **Ageing the cache needs a clock shift.** Stale-data bugs only show once a
+  record is past its TTL *and* its signature, and the test binary can't move
+  the cache clock. A scratch `LD_PRELOAD` that adds a file's seconds to
+  `CLOCK_REALTIME` and `CLOCK_MONOTONIC` works (`clock_gettime` and `time`;
+  re-read the file every 200 ms). Real upstreams sign live: pick the shift so
+  the cached signature has expired but a fresh one has not (Route 53: cache,
+  wait 3 min, shift +63 min).
 
 ## 📌 Open items
 
@@ -122,3 +129,4 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | DoT session resumption | not done; each handshake is full. |
 | P-256 key share | only if the "no X25519" counter shows real servers need it. |
 | README contact for commercial support | a TODO comment, waiting on the maintainer. |
+| `accounts.pandasecurity.com` on the maintainer's box | 2026-10-08: SERVFAIL EDE 6 on every query for minutes, healed after a fresh DNSKEY/CNAME fetch. Reproduced locally only as EDE 7 (stale CNAME past its signature), which heals after one failure; the fix covers stale answers and stale DNSKEY/DS/denials past their signatures. The box's own log line was not seen, so its exact EDE 6 path is unconfirmed. |
