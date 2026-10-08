@@ -1751,6 +1751,55 @@ static void test_conf(void)
     }
 }
 
+/* Load `text` as a config file, the way -c FILE does. */
+static int conf_from_text(elpis_conf_t *c, const char *text)
+{
+    char path[] = "/tmp/elpis-conf-XXXXXX";
+    FILE *fp;
+    int fd, rc;
+
+    fd = mkstemp(path);
+    if (fd < 0)
+        return ELPIS_ERR;
+    fp = fdopen(fd, "w");
+    if (fp == NULL) {
+        close(fd);
+        unlink(path);
+        return ELPIS_ERR;
+    }
+    fputs(text, fp);
+    fclose(fp);
+    rc = elpis_conf_load(c, path);
+    unlink(path);
+    return rc;
+}
+
+/*
+ * elpis -t.  It used to say "configuration OK" and exit 0 for a file it had
+ * just refused a line of, so nothing that gated a restart on it was gated.
+ */
+static void test_conf_check(void)
+{
+    elpis_conf_t c;
+
+    section("configuration check");
+
+    elpis_log_set_level(ELPIS_LOG_FATAL);     /* the refusal is the point */
+    CHECK(conf_from_text(&c, "listen: 127.0.0.1@5399\n"
+                             "access-control: 10.0.0.0/8 bogus\n") == ELPIS_OK,
+          "a file with a bad value still loads, for a normal start");
+    CHECK(c.errors == 1 && c.nacl == 2,
+          "the bad line is counted and the default ACL stands (%u error(s), "
+          "%u entries)", c.errors, c.nacl);
+    CHECK(elpis_conf_check(&c) == 1, "-t fails it: exit 1");
+    elpis_log_set_level(ELPIS_LOG_ERROR);
+
+    CHECK(conf_from_text(&c, "listen: 127.0.0.1@5399\n"
+                             "access-control: 10.0.0.0/8 allow\n") == ELPIS_OK &&
+          c.errors == 0 && c.nacl == 3, "a clean file loads with no errors");
+    CHECK(elpis_conf_check(&c) == 0, "-t passes it: exit 0");
+}
+
 /* ================================================================== */
 static void hexbytes(const char *h, uint8_t *out, size_t want)
 {
@@ -5774,6 +5823,7 @@ int main(void)
     test_conflict();
     test_listen_absent();
     test_conf();
+    test_conf_check();
     test_licence();
     test_insecure_delegation();
     test_sec_link();

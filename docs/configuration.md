@@ -606,10 +606,33 @@ a properly sandboxed deployment doesn't let it. See
 
 | Flag | Does |
 |---|---|
-| `-t` | check the configuration and exit |
+| `-t` | check the configuration and exit: `0` when it is clean, `1` when any setting has a bad value |
 | `-d` | stay in the foreground |
 | `-v` | more verbose; repeatable |
 | `-V` | print the version and the release name |
+
+### Checking the config
+
+`elpis -t` names each line it refuses, and the check fails:
+
+```
+ERROR elpis.conf:2: bad value for 'access-control': 'bogus'
+WARN  elpis.conf: 1 configuration error(s); defaults kept for those settings
+...
+ERROR configuration check failed: 1 error(s) in elpis.conf
+```
+
+A normal start logs the same lines and keeps going, with the default for each
+setting it refused, so one typo doesn't take DNS away. For `access-control`,
+the default means refusing the clients that line was meant to let in. Run
+`elpis -t` before a restart; `contrib/elpis-update.sh` does, and won't restart
+on a config that fails it.
+
+> [!NOTE]
+> Up to 2.4.5, `-t` printed `configuration OK` and exited `0` even after
+> refusing a line, so a check before a restart let a bad value through. An
+> unknown setting is still only a warning (`unknown setting '...' (ignored)`)
+> and doesn't fail the check, so a misspelt name passes: read the warnings too.
 
 ---
 

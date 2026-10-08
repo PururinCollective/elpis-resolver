@@ -756,7 +756,6 @@ static int load_file(elpis_conf_t *c, const char *path)
     FILE *fp = fopen(path, "r");
     char line[2048];
     unsigned lineno = 0;
-    int errors = 0;
     int listen_seen = 0;
 
     if (fp == NULL)
@@ -789,15 +788,34 @@ static int load_file(elpis_conf_t *c, const char *path)
     while (fgets(line, sizeof line, fp) != NULL) {
         lineno++;
         if (elpis_conf_parse_line(c, line, path, lineno) != ELPIS_OK)
-            errors++;
+            c->errors++;
     }
     fclose(fp);
 
     elpis_strlcpy(c->path, path, sizeof c->path);
-    if (errors)
-        elpis_warn("%s: %d configuration error(s); defaults kept for those "
-                   "settings", path, errors);
+    if (c->errors)
+        elpis_warn("%s: %u configuration error(s); defaults kept for those "
+                   "settings", path, c->errors);
     return ELPIS_OK;
+}
+
+/*
+ * A bad value costs a normal start only that one setting: the line is logged
+ * and the default stands, so a typo in one setting doesn't take DNS away.  A
+ * check answers a different question.  It used to print "configuration OK"
+ * and exit 0 straight after refusing lines of the file, so a script that
+ * gated a restart on -t restarted onto the defaults anyway: for a bad
+ * access-control line, that meant refusing the clients it was meant to allow.
+ */
+int elpis_conf_check(const elpis_conf_t *c)
+{
+    if (c->errors) {
+        elpis_error("configuration check failed: %u error(s) in %s",
+                    c->errors, c->path);
+        return 1;
+    }
+    elpis_info("configuration OK");
+    return 0;
 }
 
 int elpis_conf_load(elpis_conf_t *c, const char *explicit_path)

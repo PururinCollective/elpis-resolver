@@ -14,6 +14,22 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**`elpis -t` fails a config with a bad value in it.** It logged the bad line
+and the error count, then printed `configuration OK` and exited 0, so a check
+before a restart passed a config that would run on defaults. With
+`access-control: 10.0.0.0/8 bogus`, that was a resolver refusing the clients
+the line was meant to let in. The check now ends with `configuration check
+failed: 1 error(s) in elpis.conf` and exits 1. A clean config still prints
+`configuration OK` and exits 0. A normal start is unchanged: it logs the line,
+keeps the default for that setting, and runs. `contrib/elpis-update.sh`
+therefore no longer restarts onto such a config, and both it and
+`contrib/elpis-install.sh` show the error lines when the check fails. An
+unknown setting is still only a warning, and doesn't fail the check.
+
 ## 2.4.5 "Celestial Cascade" — 2026-10-08
 
 Stale, but not past its signatures. Zones that sign each answer as they
