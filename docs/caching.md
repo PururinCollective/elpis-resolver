@@ -100,6 +100,18 @@ window, a day by default. The attempts are backed off, so the count is really
 a length of time. Below it the glitch is absorbed and no client ever sees it;
 above it the records are dropped and the next query resolves for real.</sub>
 
+### Stale, but not past its signatures
+
+A stale record is only worth serving while it can still be validated. Once
+it's past its TTL **and** past the end of every signature on it, Elpis treats
+it as missing and asks again, for answers and for the DNSKEY, DS and denials
+the validator uses.
+
+<sub>Zones that sign on the fly, Route 53 among them, sign each answer for
+about an hour under a TTL of a few minutes. Serve-stale keeps records for a
+day, so without this the stale copy was refused as bogus, and the name was
+SERVFAIL while its zone served it fine.</sub>
+
 ## 🌳 Every level of the delegation chain
 
 Every level is cached, so a lookup restarts as deep as anything already known

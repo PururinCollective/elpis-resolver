@@ -42,7 +42,7 @@ are all in this tree. The binary links nothing but libc.</sub>
 
 > [!NOTE]
 > Tested for each release on Linux with gcc and clang: gcc 13.3 and clang 18.1
-> for 2.4.4. The BSDs and macOS (kqueue) are supported by the code, but no
+> for 2.4.5. The BSDs and macOS (kqueue) are supported by the code, but no
 > build on them was tested for this release.
 
 ## 🧱 Building
@@ -80,7 +80,7 @@ bin/
 |---|---|
 | `make` | Ordinary build: `bin/elpis`, and `bin/elpis.conf` seeded or brought up to date |
 | `make static` | One statically linked binary, no shared libraries (runs `make clean` first) |
-| `make test` | The self-tests: 704 at 2.4.4, no network needed |
+| `make test` | The self-tests: 712 at 2.4.5, no network needed |
 | `make debug` | `-O0 -g3` with debug assertions |
 | `make asan` | AddressSanitizer and UndefinedBehaviorSanitizer build |
 | `make fuzz` | libFuzzer harnesses `bin/fuzz-msg` (DNS messages) and `bin/fuzz-tls` (the TLS client). Needs clang |
@@ -273,7 +273,7 @@ The startup line names the release, the compiler, the architecture, the CPU the
 build was tuned for, and the kernels in use:
 
 ```
-elpis 2.4.4 "Celestial Equations" starting: avx2 kernels (cpu: sse2 ssse3 sse4.1
+elpis 2.4.5 "Celestial Cascade" starting: avx2 kernels (cpu: sse2 ssse3 sse4.1
       avx2 bmi2 aes pclmul), epoll, gcc 13.3.0, x86_64 znver3 (native), ...
 ```
 
@@ -284,7 +284,7 @@ The **build** string says where the binary came from:
 
 | Built from | Build string |
 |---|---|
-| a release tag | `v2.4.4` |
+| a release tag | `v2.4.5` |
 | any other commit | `main@bcc97d252fac` (branch and commit) |
 | a tarball, no git | empty, and the status page says `no git checkout` |
 

@@ -459,6 +459,26 @@ static int ecs_usable(elpis_task_t *t, const elpis_rrset_buf_t *b)
 }
 
 /*
+ * Past its TTL, and past the end of every signature it carries: no use to
+ * anyone, so the cache counts it as gone and the resolution asks again.
+ *
+ * Serve-stale keeps an RRset a day past its TTL, but a signature lasts as
+ * long as its zone signed it for, and Route 53 signs on the fly for barely an
+ * hour: accounts.pandasecurity.com is a CNAME with TTL 300 under an RRSIG
+ * that expires 65 minutes after it was made.  Once a client asked only for
+ * the A record -- no message-cache entry, so the answer was built here --
+ * the stale CNAME went into it, the validator found its signature expired,
+ * and the name was SERVFAIL with EDE 7 for a record its zone was serving
+ * perfectly well.  Data inside its signatures is untouched: that is still
+ * served stale, as RFC 8767 means it to be.
+ */
+static int stale_lapsed(const elpis_conf_t *c, const elpis_rrset_buf_t *b)
+{
+    return c->dnssec && b->ttl == 0 &&
+           elpis_rrset_sigs_lapsed(c, b, elpis_wall_s());
+}
+
+/*
  * Returns 1 when the caches could answer outright.  CNAME chains are followed
  * here too, so a fully cached chain costs no network traffic at all.
  */
@@ -478,7 +498,8 @@ static int cache_try(elpis_task_t *t)
          * SOA to answer with. */
         if (elpis_rcache_get(w->ctx->rcache, &t->qname, t->qtype, t->qclass,
                              now, c->serve_stale, b) == ELPIS_OK &&
-            !(b->flags & ELPIS_RRF_REFERRAL) && ecs_usable(t, b)) {
+            !(b->flags & ELPIS_RRF_REFERRAL) && !stale_lapsed(c, b) &&
+            ecs_usable(t, b)) {
             /*
              * A negative entry is never anything but unchecked -- its proof is
              * kept for the validator's own use, not replayed into answers --
@@ -519,7 +540,7 @@ static int cache_try(elpis_task_t *t)
             elpis_rcache_get(w->ctx->rcache, &t->qname, ELPIS_T_CNAME,
                              t->qclass, now, c->serve_stale, b) == ELPIS_OK &&
             b->count > 0 && !(b->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) &&
-            ecs_usable(t, b)) {
+            !stale_lapsed(c, b) && ecs_usable(t, b)) {
             elpis_name_t target;
             if (elpis_rdata_target(ELPIS_T_CNAME, b->data + b->off[0],
                                    b->len[0], &target) != ELPIS_OK)

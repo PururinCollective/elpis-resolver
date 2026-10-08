@@ -81,6 +81,16 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
                          const elpis_rrset_buf_t *keys,
                          int64_t now, elpis_name_t *wildcard_out, int *ede);
 
+/*
+ * 1 when `set` carries signatures and not one of them is inside its validity
+ * window at `now`, signature-clock-skew allowed: nothing in it can validate
+ * any more.  For a denial as the RRset cache keeps it (NXDOMAIN or NODATA),
+ * the signatures kept with its proof.  Dates only, nothing is verified; 0
+ * for a set with no signatures at all.
+ */
+int elpis_rrset_sigs_lapsed(const elpis_conf_t *conf,
+                            const elpis_rrset_buf_t *set, int64_t now);
+
 /* Validate a DNSKEY RRset against a DS RRset (or trust anchors). */
 int elpis_dnskey_validate_ds(const elpis_conf_t *conf,
                              const elpis_rrset_buf_t *keys,

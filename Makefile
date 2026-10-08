@@ -27,11 +27,11 @@ BIN       := $(BINDIR)/$(PROG)
 TESTBIN   := $(BINDIR)/$(PROG)-test
 BINCONF   := $(BINDIR)/$(PROG).conf
 BINCONF_BASE := $(BINDIR)/$(PROG).conf.shipped
-VERSION   := 2.4.4
+VERSION   := 2.4.5
 # Each release has a name as well, from 2.4.0 on: shown beside the version by
 # `elpis -V`, at startup, in the status page's About window and in the
 # identity probe (codename=).  Spaces are fine; they are escaped below.
-CODENAME  := Celestial Equations
+CODENAME  := Celestial Cascade
 # This is a self-contained program: one binary and one config file beside it.
 # /opt keeps it out of the way of anything the distribution manages, and the
 # shipped systemd unit expects it here.

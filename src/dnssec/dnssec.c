@@ -647,6 +647,50 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
     return ELPIS_EBOGUS;
 }
 
+/* Is `now` inside this RRSIG's inception and expiration, with the skew? */
+static int sig_in_window(const elpis_conf_t *conf, const uint8_t *sig,
+                         int64_t now)
+{
+    int32_t d_exp = (int32_t)(elpis_get32(sig + 8) - (uint32_t)now);
+    int32_t d_inc = (int32_t)((uint32_t)now - elpis_get32(sig + 12));
+    int32_t skew  = (int32_t)conf->sig_skew;
+    return d_exp + skew >= 0 && d_inc + skew >= 0;
+}
+
+int elpis_rrset_sigs_lapsed(const elpis_conf_t *conf,
+                            const elpis_rrset_buf_t *set, int64_t now)
+{
+    unsigned i, seen = 0;
+
+    if (set->flags & (ELPIS_RRF_NXDOMAIN | ELPIS_RRF_NODATA)) {
+        /* Slot 0 is the SOA; the rest are type, owner length, owner,
+         * rdata, as cache_negative() and cache_referral_ds() file them. */
+        for (i = 1; i < set->count; i++) {
+            const uint8_t *p = set->data + set->off[i];
+            unsigned olen;
+
+            if (set->len[i] < 3u || elpis_get16(p) != ELPIS_T_RRSIG)
+                continue;
+            olen = p[2];
+            if (3u + olen + 19u > set->len[i])
+                continue;
+            seen++;
+            if (sig_in_window(conf, p + 3 + olen, now))
+                return 0;
+        }
+        return seen > 0;
+    }
+
+    for (i = 0; i < set->sigcount; i++) {
+        if (set->len[set->count + i] < 19u)
+            continue;
+        seen++;
+        if (sig_in_window(conf, set->data + set->off[set->count + i], now))
+            return 0;
+    }
+    return seen > 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Saying why                                                          */
 /* ------------------------------------------------------------------ */
@@ -1232,16 +1276,26 @@ static val_fail_t *fail_slot(val_t *v, const elpis_name_t *n, uint16_t type)
  * Then what this validation was handed because the cache would not keep it:
  * a set that came with TTL 0 (val_kept_t).  This used to be the cache alone,
  * so the walk could never see such a set, however often it was fetched.
+ *
+ * But not a stale record whose signatures have all run out: that proves
+ * nothing, and nothing ever replaced it.  A DNSKEY or DS read this way failed
+ * every validation under its zone, and a denial's proof failed to show an
+ * unsigned cut, until serve-stale finally let it go -- a day, by default --
+ * while a fresh copy was one query away.  Missing, it is fetched again.  A
+ * fresh copy whose signatures have run out is still used, and judged bogus
+ * as it should be.
  */
 static int val_cached(elpis_task_t *t, const elpis_name_t *n, uint16_t type,
                       elpis_rrset_buf_t *out)
 {
     const val_t *v = (const val_t *)t->val;
+    const elpis_conf_t *c = &t->w->ctx->conf;
     unsigned i;
 
     if (elpis_rcache_get(t->w->ctx->rcache, n, type, ELPIS_CLASS_IN,
-                         elpis_cached_now_s(),
-                         t->w->ctx->conf.serve_stale, out) == ELPIS_OK)
+                         elpis_cached_now_s(), c->serve_stale,
+                         out) == ELPIS_OK &&
+        !(out->ttl == 0 && elpis_rrset_sigs_lapsed(c, out, elpis_wall_s())))
         return 1;
     for (i = 0; v != NULL && i < v->nkept; i++) {
         const elpis_rrset_buf_t *s = v->kept[i]->set;

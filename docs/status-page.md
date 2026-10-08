@@ -67,14 +67,14 @@ The About window carries the version, the release name, and the commit `make`
 built from:
 
 ```
-version   2.4.4
-release   Celestial Equations
-build     v2.4.4
+version   2.4.5
+release   Celestial Cascade
+build     v2.4.5
 ```
 
 | Built from | build reads |
 |---|---|
-| a release tag | `v2.4.4` |
+| a release tag | `v2.4.5` |
 | any other commit | branch and commit, `main@bcc97d252fac` |
 | a tarball, no git | *not a git checkout* |
 

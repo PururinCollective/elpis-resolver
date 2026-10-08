@@ -21,6 +21,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.2 "Lettersong" | 2026-10-05 | the shipped unit drops `Conflicts=systemd-resolved`, which silently cancelled Elpis at boot; Elpis names resolved's stub when it holds the port |
 | 2.4.3 "Resilient Journey" | 2026-10-06 | `contrib/elpis-install.sh`: account, unit, enable, and `RESOLVED=replace` to take systemd-resolved's place on 127.0.0.53; scripts run in place from the clone (`/opt` recommended); 127.0.0.53 messages fixed |
 | 2.4.4 "Celestial Equations" | 2026-10-07 | A FORMERR with no question, to an EDNS query, is read as an EDNS refusal and the same server asked again plain: every Exchange Online mail host (`*.mail.protection.outlook.com`) had been a SERVFAIL |
+| 2.4.5 "Celestial Cascade" | 2026-10-08 | A cached record past its TTL and past every signature on it is a cache miss, for answers and for the validator's DNSKEY/DS/denials: `accounts.pandasecurity.com` (Route 53, signed on the fly for ~65 min, TTL 300) had been a SERVFAIL once stale |
 
 ## 🧭 Decisions, and why
 
@@ -61,6 +62,16 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | The same server is asked again, plain; not the next one | RFC 6891 section 7. A zone's servers usually run the same software, so the next one only returned the same FORMERR. |
 | A reply with no question teaches nothing about 0x20 | It says nothing about how the name was sent. |
 | DoT unchanged | No DoT server without EDNS has been seen. |
+
+### Stale records past their signatures (2.4.5)
+
+| decision | why |
+|---|---|
+| Stale **and** every signature outside its window → a miss, asked again | It can never validate. Built into an answer it was refused as bogus; read as DNSKEY or DS it failed every validation under the zone, with nothing to replace it for the whole serve-stale day. |
+| Only stale records; a fresh one with an expired signature is still used | That is a zone that really is broken: it must stay bogus (EDE 7), not turn into a fetch loop and "no DNSKEY after 2 attempts". |
+| Stale records inside their signatures still served | RFC 8767 is the point of serve-stale; those still validate. |
+| Denials checked through the signatures kept with their proof | A NODATA/NXDOMAIN marker keeps its NSEC/NSEC3 and RRSIGs as items after the SOA, not in `sigcount`. A stale proof that lapsed can't show an unsigned cut. |
+| The message cache left alone | Its stale replies go out with EDE 3 and a short TTL while a refresh runs, which already worked. |
 
 ### Older ones
 
@@ -112,6 +123,13 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   is how the boot race was reproduced: start Elpis, then add the address. Use
   a **veth pair** for IPv6: a dummy link is NOARP and skips duplicate address
   detection, so its addresses are never `tentative`.
+- **Ageing the cache needs a clock shift.** Stale-data bugs only show once a
+  record is past its TTL *and* its signature, and the test binary can't move
+  the cache clock. A scratch `LD_PRELOAD` that adds a file's seconds to
+  `CLOCK_REALTIME` and `CLOCK_MONOTONIC` works (`clock_gettime` and `time`;
+  re-read the file every 200 ms). Real upstreams sign live: pick the shift so
+  the cached signature has expired but a fresh one has not (Route 53: cache,
+  wait 3 min, shift +63 min).
 
 ## 📌 Open items
 
@@ -122,3 +140,4 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | DoT session resumption | not done; each handshake is full. |
 | P-256 key share | only if the "no X25519" counter shows real servers need it. |
 | README contact for commercial support | a TODO comment, waiting on the maintainer. |
+| `accounts.pandasecurity.com` on the maintainer's box | 2026-10-08: SERVFAIL EDE 6 on every query for minutes, healed after a fresh DNSKEY/CNAME fetch. Reproduced locally only as EDE 7 (stale CNAME past its signature), which heals after one failure; the fix covers stale answers and stale DNSKEY/DS/denials past their signatures. The box's own log line was not seen, so its exact EDE 6 path is unconfirmed. |

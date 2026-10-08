@@ -14,6 +14,35 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 2.4.5 "Celestial Cascade" — 2026-10-08
+
+Stale, but not past its signatures. Zones that sign each answer as they
+serve it, Route 53 among them, could have a name go SERVFAIL about an hour
+after it was first looked up, because Elpis kept using a cached copy whose
+signature had expired. Such a copy now counts as missing, and Elpis fetches
+a fresh one.
+
+No config that worked stops working.
+
+### Fixed
+
+**Names on zones that sign on the fly stop going SERVFAIL after an hour.**
+`accounts.pandasecurity.com` was a SERVFAIL (EDE 6 or 7, DNSSEC Bogus or
+Signature Expired) while 1.1.1.1 answered it. It is a CNAME with a TTL of
+300 in a zone hosted on Route 53, which signs each answer as it serves it,
+with a signature that expires about an hour later. Serve-stale keeps a
+record for a day past its TTL, and when a client asked for a type the
+message cache had no answer for, Elpis built the answer from those stale
+records, signature and all. The validator then found the signature expired
+and refused the whole answer, though the zone was serving a good one. A
+cached record that is past both its TTL and the end of every signature on
+it can never validate, so Elpis now treats it as missing and asks again. The
+same goes for the DNSKEY, DS and denial records the validator reads from
+the cache: a stale one whose signatures have run out used to fail every
+validation under its zone until serve-stale let it go, and is now fetched
+again. Records still inside their signatures are served stale as before, and
+a fresh record whose signature has expired is still refused.
+
 ## 2.4.4 "Celestial Equations" — 2026-10-07
 
 Mail to Microsoft 365. Every Exchange Online mail host, the names under
