@@ -1083,7 +1083,8 @@ static void usage(const char *argv0)
         "  -c FILE   configuration file (default: elpis.conf beside the\n"
         "            binary, then %s/elpis/elpis.conf, then %s/elpis.conf)\n"
         "  -d        stay in the foreground and log to stderr\n"
-        "  -t        check the configuration and exit\n"
+        "  -t        check the configuration and exit: 0 when it is clean,\n"
+        "            1 when any setting has a bad value\n"
         "  -v        increase log verbosity (repeatable)\n"
         "  -V        print the version and exit\n"
         "  -h        this message\n"
@@ -1238,9 +1239,9 @@ int main(int argc, char **argv)
     }
 
     if (testonly) {
-        elpis_info("configuration OK");
+        int rc = elpis_conf_check(&ctx.conf);
         elpis_ctx_fini(&ctx);
-        return 0;
+        return rc;
     }
 
     nthreads = ctx.conf.threads ? ctx.conf.threads : elpis_cpu_count();

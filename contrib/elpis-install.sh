@@ -73,8 +73,10 @@ run() {
 # itself reads them from the config the service uses: bin/elpis.conf.
 listen_addresses() {
     local out
+    # A bad value fails the check, and its line is logged near the top, above
+    # the settings elpis prints: show the errors rather than the tail.
     out=$(./bin/elpis -t 2>&1) || {
-        echo "$out" | tail -5 >&2
+        grep -E ' (ERROR|FATAL) ' <<<"$out" >&2 || echo "$out" | tail -5 >&2
         die "bin/elpis rejects its config; fix that first"
     }
     sed -n 's/.* listen \([^ ]*\)$/\1/p' <<<"$out"
