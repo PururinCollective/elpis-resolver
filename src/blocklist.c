@@ -7,7 +7,7 @@
  * every name it is asked was chosen by whoever is scanning, flooding or
  * tunnelling through open resolvers.  The published copy is
  *
- *   https://raw.githubusercontent.com/Anime4000/ElpisDNS/refs/heads/main/bogus.txt
+ *   https://github.com/PururinCollective/ElpisDNS/blob/main/bogus.txt
  *
  * in filter syntax, "||name^": the name and everything below it, which is
  * what an entry here means too.  These are the names it held on 2026-10-09.
