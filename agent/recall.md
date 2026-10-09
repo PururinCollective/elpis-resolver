@@ -22,6 +22,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.3 "Resilient Journey" | 2026-10-06 | `contrib/elpis-install.sh`: account, unit, enable, and `RESOLVED=replace` to take systemd-resolved's place on 127.0.0.53; scripts run in place from the clone (`/opt` recommended); 127.0.0.53 messages fixed |
 | 2.4.4 "Celestial Equations" | 2026-10-07 | A FORMERR with no question, to an EDNS query, is read as an EDNS refusal and the same server asked again plain: every Exchange Online mail host (`*.mail.protection.outlook.com`) had been a SERVFAIL |
 | 2.4.5 "Celestial Cascade" | 2026-10-08 | A cached record past its TTL and past every signature on it is a cache miss, for answers and for the validator's DNSKEY/DS/denials: `accounts.pandasecurity.com` (Route 53, signed on the fly for ~65 min, TTL 300) had been a SERVFAIL once stale |
+| 2.5.0 "Erdentempel" | 2026-10-10 | A built-in blocklist (`src/blocklist.c`, 11 names from the ElpisDNS honeypot) answers REFUSED + EDE 15 before the cache; `blocklist: no` turns it off. `elpis -t` exits 1 on a bad value. Ran on the maintainer's resolver for ~5 h as `main@d97dea6f9183` before the bump |
 
 ## 🧭 Decisions, and why
 
@@ -73,7 +74,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Denials checked through the signatures kept with their proof | A NODATA/NXDOMAIN marker keeps its NSEC/NSEC3 and RRSIGs as items after the SOA, not in `sigcount`. A stale proof that lapsed can't show an unsigned cut. |
 | The message cache left alone | Its stale replies go out with EDE 3 and a short TTL while a refresh runs, which already worked. |
 
-### The built-in blocklist (unreleased)
+### The built-in blocklist (2.5.0)
 
 | decision | why |
 |---|---|

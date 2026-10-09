@@ -14,7 +14,14 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.5.0 "Erdentempel" — 2026-10-10
+
+Refused at the door. A resolver open to an ISP's customers is also asked for
+names whose only purpose is to make it work: random labels under a flooded
+domain, and big signed answers aimed at a spoofed address. Elpis now carries
+a list of them, gathered by the ElpisDNS honeypot, and answers them REFUSED
+before the cache is looked at. And `elpis -t` now fails a config with a bad
+value in it, rather than calling it OK.
 
 No config that worked stops working.
 
