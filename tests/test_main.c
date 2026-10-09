@@ -26,6 +26,7 @@
 #include "elpis/infra.h"
 #include "elpis/conflict.h"
 #include "elpis/quirks.h"
+#include "elpis/blocklist.h"
 #include "simd/simd_internal.h"
 #include "crypto/bn.h"
 #include "crypto/aes.h"
@@ -3552,6 +3553,150 @@ static void test_quirks(void)
 }
 
 /* ================================================================== */
+/*
+ * One query through the real UDP handler, answered off a socket on
+ * 127.0.0.1.  Returns the reply's length, or -1 when none came back.
+ */
+static ssize_t udp_round(elpis_worker_t *w, int lfd, int cfd,
+                         const elpis_addr_t *srv, const char *name,
+                         uint8_t *out, size_t cap)
+{
+    uint8_t q[512];
+    size_t ql = 12;
+    elpis_name_t n;
+    elpis_ev_t ev;
+    struct pollfd pfd;
+
+    memset(q, 0, 12);
+    q[0] = 0xB1; q[1] = 0x0C;           /* ID */
+    q[2] = 0x01;                        /* RD */
+    q[5] = 1;                           /* one question */
+    q[11] = 1;                          /* and an OPT, so EDE can come back */
+    elpis_name_from_text(&n, name);
+    memcpy(q + ql, n.d, n.len); ql += n.len;
+    elpis_put16(q + ql, ELPIS_T_A); ql += 2;
+    elpis_put16(q + ql, ELPIS_CLASS_IN); ql += 2;
+    q[ql++] = 0;                        /* OPT: the root, */
+    elpis_put16(q + ql, ELPIS_T_OPT); ql += 2;
+    elpis_put16(q + ql, 1232); ql += 2; /* the buffer size, */
+    memset(q + ql, 0, 6); ql += 6;      /* no flags, no options */
+
+    if (sendto(cfd, q, ql, 0, &srv->u.sa, srv->len) != (ssize_t)ql)
+        return -1;
+    pfd.fd = lfd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) != 1)
+        return -1;
+    memset(&ev, 0, sizeof ev);
+    ev.fd   = lfd;
+    ev.data = w;
+    elpis_server_udp_event(NULL, &ev, ELPIS_EV_READ);
+    pfd.fd = cfd;
+    if (poll(&pfd, 1, 2000) != 1)
+        return -1;
+    return recv(cfd, out, cap, 0);
+}
+
+/*
+ * The built-in blocklist: a listed name and everything below it is refused
+ * with EDE 15 before the cache or a task, and nothing else is.
+ */
+static void test_blocklist(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    static const uint8_t ede_blocked[6] = { 0, ELPIS_OPT_EDE, 0, 2,
+                                            0, ELPIS_EDE_BLOCKED };
+    elpis_conf_t c;
+    elpis_name_t n;
+    elpis_addr_t srv;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    uint8_t r[512];
+    ssize_t got;
+    char line[64];
+    int lfd = -1, cfd = -1;
+    size_t i;
+
+    section("blocklist");
+    CHECK(elpis_blocklist_count() > 0, "the built-in list has names (%u)",
+          elpis_blocklist_count());
+
+    elpis_name_from_text(&n, "darkorb.net.");
+    CHECK(elpis_blocklist_match(&n), "a listed name is blocked");
+    elpis_name_from_text(&n, "x7Fq.a.b.c.d.e.DarkOrb.NET.");
+    CHECK(elpis_blocklist_match(&n), "and any name below it, in any case");
+    elpis_name_from_text(&n, "notdarkorb.net.");
+    CHECK(!elpis_blocklist_match(&n), "on a label boundary");
+    elpis_name_from_text(&n, "darkorb.network.");
+    CHECK(!elpis_blocklist_match(&n), "a longer last label is not it");
+    elpis_name_from_text(&n, "net.");
+    CHECK(!elpis_blocklist_match(&n), "nor is the parent");
+    elpis_name_from_text(&n, "darkorb.net.example.com.");
+    CHECK(!elpis_blocklist_match(&n), "nor a name that only contains it");
+    elpis_name_from_text(&n, "www.example.com.");
+    CHECK(!elpis_blocklist_match(&n), "an ordinary name is not blocked");
+    CHECK(!elpis_blocklist_match(&elpis_name_root), "nor is the root");
+
+    elpis_conf_defaults(&c);
+    CHECK(c.blocklist, "on by default");
+    elpis_strlcpy(line, "blocklist: no", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK && !c.blocklist,
+          "blocklist: no switches it off");
+    elpis_strlcpy(line, "blocklist: sometimes", sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) != ELPIS_OK,
+          "anything but yes or no is an error");
+
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    w->ctx   = ctx;
+    w->rxbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->ctab  = (elpis_cslot_t *)elpis_calloc(ELPIS_BLD_CTAB, sizeof(elpis_cslot_t));
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    cfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (w->rxbuf == NULL || w->txbuf == NULL || w->ctab == NULL || cfd < 0 ||
+        elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0) {
+        CHECK(0, "a socket on 127.0.0.1");
+        goto out;
+    }
+    elpis_addr_parse(&srv, "127.0.0.1", ntohs(sin.sin_port));
+
+    got = udp_round(w, lfd, cfd, &srv, "q9z.vpnv.shop.", r, sizeof r);
+    CHECK(got >= 12 && r[0] == 0xB1 && r[1] == 0x0C && (r[2] & 0x80) &&
+          (r[3] & 0x0Fu) == ELPIS_RC_REFUSED,
+          "a query under a listed name is answered REFUSED");
+    for (i = 12; got >= 6 && i + 6 <= (size_t)got; i++)
+        if (memcmp(r + i, ede_blocked, 6) == 0)
+            break;
+    CHECK(got >= 6 && i + 6 <= (size_t)got, "with EDE 15, Blocked");
+    CHECK(got >= 12 && elpis_get16(r + 6) == 0 && elpis_get16(r + 8) == 0 &&
+          got <= 64, "with no records in it (%zd bytes)", got);
+    CHECK(w->stats.blocked == 1 && w->n_tasks == 0 && w->stats.recursions == 0,
+          "counted, and nothing resolved");
+
+    got = udp_round(w, lfd, cfd, &srv, "localhost.", r, sizeof r);
+    CHECK(got >= 12 && (r[3] & 0x0Fu) == ELPIS_RC_NOERROR &&
+          w->stats.blocked == 1, "a name not on the list goes on as before");
+
+out:
+    if (lfd >= 0)
+        close(lfd);
+    if (cfd >= 0)
+        close(cfd);
+    if (w != NULL) {
+        elpis_free(w->rxbuf);
+        elpis_free(w->txbuf);
+        elpis_free(w->ctab);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 /* The special names answered before anything is cached or resolved. */
 static int local_answer(elpis_worker_t *w, const char *name, uint16_t qtype,
                         unsigned *rcode, unsigned *ancount)
@@ -5782,6 +5927,7 @@ int main(void)
     test_cookies();
     test_task_ceiling();
     test_quirks();
+    test_blocklist();
     test_localzone();
     test_ecs();
     test_caps_exempt();

@@ -73,6 +73,17 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Denials checked through the signatures kept with their proof | A NODATA/NXDOMAIN marker keeps its NSEC/NSEC3 and RRSIGs as items after the SOA, not in `sigcount`. A stale proof that lapsed can't show an unsigned cut. |
 | The message cache left alone | Its stale replies go out with EDE 3 and a short TTL while a refresh runs, which already worked. |
 
+### The built-in blocklist (unreleased)
+
+| decision | why |
+|---|---|
+| Compiled in from `bogus.txt` in the ElpisDNS repo, never fetched | Maintainer's call ("an array source file"); the list is gathered from their honeypot. Nothing at runtime depends on GitHub being reachable. The refresh `sed` one-liner is in the file's header comment. |
+| REFUSED + EDE 15 (Blocked), not NXDOMAIN or a silent drop | REFUSED doesn't lie about the namespace; a drop makes stubs retry, which is more packets, not fewer. RFC 8914's 15 is "blocked by the resolver operator's policy". |
+| Checked right after the RD/snoop check, before `localzone` | A listed name is refused whatever the type: ANY would otherwise get the RFC 8482 HINFO. Queries for a listed name aren't printed by `log-queries`, which comes later. |
+| A hash table looked up once per label suffix, skipping suffixes with more or fewer labels than any entry | A linear walk would make every query pay for the length of a list that's meant to grow. About 16-22 ns per query on the maintainer's box, hit or miss (2026-10-09). |
+| Only the client's question, not CNAME targets or NS names | The point is cheap refusal of floods; following chains would mean a task. |
+| `blocklist: no` switches it off; no per-name unblock yet | An escape hatch for a false positive without a rebuild. `vtb.com` is VTB Bank's (NS `ns1-3.vtb.ru`), with a 3,367-byte signed DNSKEY answer (via 1.1.1.1, 2026-10-09), so likely there as an amplification name; its real users get REFUSED too. |
+
 ### Older ones
 
 | decision | why |

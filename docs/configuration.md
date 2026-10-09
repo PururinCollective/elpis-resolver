@@ -10,6 +10,7 @@ Where the config lives, what the settings do, and how to run it.
 [Case randomisation](#-names-asked-without-case-randomisation) ·
 [DNS over TLS to authoritative servers](#-dns-over-tls-to-authoritative-servers) ·
 [Quirks](#-zones-whose-servers-misbehave) ·
+[Blocklist](#-names-refused-on-sight) ·
 [Status page password](#-hashing-a-status-page-password) ·
 [Running it](#-running-it)
 
@@ -581,6 +582,43 @@ Elpis answers "no data" instead of timing out into SERVFAIL.
 <sub>A built-in list covers the zones known to need one. These lines add to it,
 and `none` switches a built-in entry off. See [quirks](quirks.md) for the
 flags, the built-in list, and how to find a zone that needs one.</sub>
+
+## 🚫 Names refused on sight
+
+```
+blocklist: yes
+```
+
+A built-in list of names that are asked only to make a resolver work. A query
+for one of them, or for any name below it, is answered REFUSED with EDE 15
+(Blocked) as soon as the question is read: no cache lookup, no resolution,
+nothing sent upstream, and a reply with no records in it.
+
+```
+$ dig @127.0.0.1 -p 5335 q9z.vpnv.shop A
+;; ->>HEADER<<- opcode: QUERY, status: REFUSED, id: 55595
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+; EDE: 15 (Blocked)
+```
+
+| a query for | costs, without the list | with it |
+|---|---|---|
+| random labels under a domain, a new name each time | a cache miss and a full resolution each, and a cache entry that pushes out a real one | a parse and a few hash lookups, about 20 ns |
+| a name with a big signed answer, from a spoofed address | an answer of a kilobyte or more, sent to whoever was spoofed | a refusal with no records, a few bytes over the query |
+
+The names come from the ElpisDNS honeypot, a resolver that serves no one, so
+every name it's asked was chosen by someone scanning, flooding or tunnelling
+through open resolvers. They're compiled in, from
+[`src/blocklist.c`](../src/blocklist.c); the **blocked** line in the status
+page's counters and `blocked=` in the `SIGUSR1` statistics count the queries
+refused. `blocklist: no` switches the list off.
+
+<sub>The list is the published one at
+`https://raw.githubusercontent.com/Anime4000/ElpisDNS/refs/heads/main/bogus.txt`,
+copied in when it changes; Elpis never fetches it. Only the name a client asks
+is checked, not a CNAME it leads to. The check runs before the special names,
+so an ANY query for a listed name is refused too, not answered with RFC 8482's
+HINFO.</sub>
 
 ## 🔑 Hashing a status page password
 

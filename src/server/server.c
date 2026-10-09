@@ -8,6 +8,7 @@
  * patched in place.  No record is re-encoded and no name is re-compressed.
  */
 #include "elpis/resolver.h"
+#include "elpis/blocklist.h"
 #include "elpis/sock.h"
 #include "elpis/rdata.h"
 #include "elpis/simd.h"
@@ -806,6 +807,21 @@ static void handle_query(elpis_worker_t *w, const uint8_t *wire, size_t len,
     if (!(m.hdr.flags & ELPIS_FLAG_RD) && !snoop) {
         /* Not a recursion request and this client may not snoop the cache. */
         reply_error(w, fd, &m, ELPIS_RC_REFUSED, from, to, conn);
+        return;
+    }
+
+    /*
+     * The built-in blocklist (blocklist.c): names asked only to make a
+     * resolver work.  Refused here, whatever the type, before the cache is
+     * looked at, so a flood of them costs a parse and a few hash lookups
+     * each, and none of them can push a real answer out of the cache.  Ahead
+     * of the special names too: RFC 8482's HINFO for ANY is small, but it is
+     * still an answer.
+     */
+    if (c->blocklist && elpis_blocklist_match(&m.qname)) {
+        elpis_stat_inc(&w->stats.blocked, 1);
+        reply_error_ede(w, fd, &m, ELPIS_RC_REFUSED, from, to, conn,
+                        ELPIS_EDE_BLOCKED);
         return;
     }
 
