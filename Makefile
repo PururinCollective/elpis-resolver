@@ -115,7 +115,7 @@ WEBUI_SRC := \
 
 CORE_SRC := \
   src/util.c src/log.c src/conf.c src/stats.c src/licence.c src/conflict.c \
-  src/quirks.c \
+  src/quirks.c src/blocklist.c \
   src/simd/simd.c $(DNS_SRC) $(CACHE_SRC) $(NET_SRC) $(SERVER_SRC) \
   $(RESOLVER_SRC) $(DNSSEC_SRC) $(WEBUI_SRC) src/main.c
 

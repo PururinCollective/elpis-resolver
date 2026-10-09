@@ -16,6 +16,24 @@ nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 
 ## Unreleased
 
+No config that worked stops working.
+
+### Added
+
+**A built-in blocklist refuses names that are asked only to make a resolver
+work.** A resolver that answers an ISP's customers on plain port 53 is asked
+for random labels under a domain, each one a cache miss and a resolution of
+its own, and for names with big signed answers from spoofed addresses, so the
+answer lands on someone else. The names the ElpisDNS honeypot gathers are now
+compiled in (`src/blocklist.c`, 11 names). A query for one of them, or for any
+name below it, over UDP or TCP and of any type, is answered REFUSED with EDE
+15 (Blocked) before the cache is looked at. The lookup is a hash per label of
+the question, about 20 ns whether it matches or not, so it costs no more as
+the list grows. Nothing is resolved, sent upstream or cached for it. The
+status page's counters and the `SIGUSR1` statistics count them as
+**blocked**. On by default; `blocklist: no` switches it off. Only the name
+the client asks is checked, not a CNAME target.
+
 ### Fixed
 
 **`elpis -t` fails a config with a bad value in it.** It logged the bad line

@@ -6,6 +6,7 @@
  * config is read by people at 3am; it should not need a grammar reference.
  */
 #include "elpis/conf.h"
+#include "elpis/blocklist.h"
 #include "elpis/dns.h"
 
 #include <errno.h>
@@ -128,6 +129,7 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->block_private_reverse = 1;
     c->refuse_any            = 1;
     c->answer_version_bind   = 1;
+    c->blocklist             = 1;
     c->identity              = 1;
     c->identity_system       = 0;
     elpis_strlcpy(c->identity_name, ELPIS_IDENTITY_NAME_DEFAULT,
@@ -691,6 +693,7 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
     if (KEY("block-private-reverse")) return want_bool(&p, key, val, &c->block_private_reverse);
     if (KEY("refuse-any"))            return want_bool(&p, key, val, &c->refuse_any);
     if (KEY("answer-version-bind"))   return want_bool(&p, key, val, &c->answer_version_bind);
+    if (KEY("blocklist"))             return want_bool(&p, key, val, &c->blocklist);
     if (KEY("identity"))             return want_bool(&p, key, val, &c->identity);
     if (KEY("identity-system"))      return want_bool(&p, key, val, &c->identity_system);
 
@@ -955,6 +958,10 @@ void elpis_conf_dump(const elpis_conf_t *c)
                    c->adot_max_try ? "" : " (no limit)");
     elpis_info("  max-pending=%u per worker%s", c->max_pending,
                c->max_pending_auto ? " (auto)" : "");
+    if (c->blocklist)
+        elpis_info("  blocklist=yes (%u names built in)", elpis_blocklist_count());
+    else
+        elpis_info("  blocklist=no");
     if (c->edns_auto)
         elpis_info("  edns-buffer-size=auto (IPv4 %u, IPv6 %u) "
                    "max-udp-reply-size=%u", (unsigned)c->edns_buffer4,

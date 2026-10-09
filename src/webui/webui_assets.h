@@ -741,6 +741,7 @@ static const char elpis_webui_page[] =
     "        \"<b>REFUSED</b><span>\" + num(st.refused) + \"</span>\" +\n"
     "        \"<b>timeouts</b><span>\" + num(st.timeouts) + \"</span>\" +\n"
     "        \"<b>cut short by a hold</b><span>\" + num(st.held) + \"</span>\" +\n"
+    "        \"<b>blocked</b><span>\" + num(st.blocked) + \"</span>\" +\n"
     "        \"<b>dropped</b><span>\" + num(st.dropped) + \"</span>\" +\n"
     "        \"<b>bad cookie</b><span>\" + num(st.cookiebad) + \"</span>\" +\n"
     "      \"</div></div>\" +\n"

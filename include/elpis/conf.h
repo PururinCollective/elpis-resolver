@@ -221,6 +221,7 @@ typedef struct {
     uint8_t      block_private_reverse;   /* RFC 6761 / AS112        */
     uint8_t      refuse_any;              /* RFC 8482                */
     uint8_t      answer_version_bind;
+    uint8_t      blocklist;               /* the built-in list, blocklist.c */
 
     /*
      * The identity probe: one TXT name this resolver answers about itself,

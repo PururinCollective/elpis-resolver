@@ -59,11 +59,12 @@ void elpis_stats_report(elpis_ctx_t *ctx)
                (unsigned long long)ctx->loop.nosleep,
                ctx->loop.timers, (unsigned)ctx->loop.slowest_ms);
     elpis_info("  nxdomain=%llu servfail=%llu overload=%llu held=%llu "
-               "timeouts=%llu tcp=%llu truncated=%llu dns64=%llu",
+               "blocked=%llu timeouts=%llu tcp=%llu truncated=%llu dns64=%llu",
                (unsigned long long)s->nxdomain,
                (unsigned long long)s->servfail,
                (unsigned long long)s->overload,
                (unsigned long long)s->held,
+               (unsigned long long)s->blocked,
                (unsigned long long)s->timeouts,
                (unsigned long long)s->tcp_queries,
                (unsigned long long)s->truncated,

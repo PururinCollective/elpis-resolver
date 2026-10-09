@@ -38,6 +38,8 @@ typedef struct {
     uint64_t races;
     /* Queries answered SERVFAIL at once because max-pending was reached. */
     uint64_t overload;
+    /* Queries answered REFUSED at once for a name on the blocklist. */
+    uint64_t blocked;
     /*
      * Resolutions ended SERVFAIL because every server left to ask in the zone
      * was held down (server-hold-down), rather than asked again.  When the
