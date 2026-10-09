@@ -267,6 +267,7 @@ typedef struct {
     unsigned     stats_interval;           /* seconds, 0 = off           */
 
     char         path[512];                /* file actually loaded       */
+    unsigned     errors;                   /* its lines refused as bad   */
 } elpis_conf_t;
 
 void elpis_conf_defaults(elpis_conf_t *c);
@@ -275,6 +276,8 @@ int  elpis_conf_load(elpis_conf_t *c, const char *explicit_path);
 int  elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
                            unsigned lineno);
 void elpis_conf_dump(const elpis_conf_t *c);
+/* What -t says about a loaded config; returns its exit status, 0 or 1. */
+int  elpis_conf_check(const elpis_conf_t *c);
 /* "none", "client" or "this". */
 const char *elpis_ecs_type_name(unsigned type);
 /* May a query for `qname` carry a subnet, as far as ecs-zone: goes? */

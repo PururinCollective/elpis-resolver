@@ -12,6 +12,7 @@ have to guess.
 | Elpis won't start: something holds the port | [Something else on port 53](#-something-else-on-port-53) |
 | Not running after a reboot, and nothing in its log | [Under the shipped systemd unit](#under-the-shipped-systemd-unit) |
 | A warning that an address isn't there yet | [Listening on one address](configuration.md#listening-on-one-address) |
+| `bad value for` in the log, or `elpis -t` exits 1 | [Checking the config](configuration.md#checking-the-config) |
 | `dropped` counts climbing | [Malformed input](#-malformed-input) |
 
 > [!TIP]

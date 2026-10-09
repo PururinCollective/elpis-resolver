@@ -72,11 +72,19 @@ make static ${OPT_ARG[@]+"${OPT_ARG[@]}"}
 # make merges new shipped defaults into bin/elpis.conf, and leaves it alone
 # where they clash with your edits (tools/conf-merge.sh).  A config copied
 # over from that merge with its markers still in would start -- the marker
-# lines are skipped as bad settings -- so refuse it here rather than run it.
+# lines are skipped as unknown settings, which elpis -t only warns about --
+# so refuse it here rather than run it.
 if grep -q -e '^<<<<<<< ' -e '^>>>>>>> ' bin/elpis.conf; then
     die "bin/elpis.conf has merge conflict markers in it; not restarting"
 fi
-./bin/elpis -t >/dev/null 2>&1 || die "built binary rejects the config; not restarting"
+# elpis -t fails a config with a bad value in it, and names the line.  A
+# start would only log that and run on the setting's default -- for a bad
+# access-control line, refusing the clients it was meant to serve -- so show
+# the line and leave the old binary serving.
+if ! out=$(./bin/elpis -t 2>&1); then
+    grep -E ' (ERROR|FATAL) ' <<<"$out" >&2 || tail -5 <<<"$out" >&2
+    die "built binary rejects the config; not restarting"
+fi
 new=$(./bin/elpis -V)
 
 # The unit is a copy in /etc/systemd/system, which a pull does not reach,
