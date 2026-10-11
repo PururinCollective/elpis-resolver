@@ -67,14 +67,14 @@ The About window carries the version, the release name, and the commit `make`
 built from:
 
 ```
-version   2.5.0
-release   Erdentempel
-build     v2.5.0
+version   2.6.0
+release   Borrowed Wings
+build     v2.6.0
 ```
 
 | Built from | build reads |
 |---|---|
-| a release tag | `v2.5.0` |
+| a release tag | `v2.6.0` |
 | any other commit | branch and commit, `main@bcc97d252fac` |
 | a tarball, no git | *not a git checkout* |
 
