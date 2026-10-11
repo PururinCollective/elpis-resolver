@@ -69,7 +69,8 @@ Where things live and how one query moves through them.
 | `src/util.c`, `src/log.c`, `src/stats.c` | helpers, logging, SIGUSR1 statistics |
 | `src/licence.c` | licence token decode and Ed25519 check (**protected, see AGENTS.md**) |
 | `src/quirks.c` | built-in zone quirk list |
-| `src/blocklist.c` | built-in blocklist (names from the ElpisDNS honeypot), hashed per label suffix |
+| `src/nameset.c` | a fixed set of names looked up one hash per label suffix; the blocklist and forward list are each one |
+| `src/blocklist.c` | built-in blocklist (names from the ElpisDNS honeypot) |
 | `src/conflict.c` | who holds the port, systemd-resolved handling |
 | `src/dns/` | names, messages, rdata, EDNS, cookies, ECS |
 | `src/cache/` | sharded hash table (`cache.c`), message/RRset caches, `infra.c` (per-server RTT, EDNS, cookies, hold-down, DoT state), `delegation.c` |
