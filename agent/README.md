@@ -24,7 +24,7 @@ from "cold" to "useful" fast, and remember what earlier sessions learned.
 
 | | |
 |---|---|
-| What | A recursive, DNSSEC-validating DNS resolver. No forwarding by default: it asks the root, TLDs and authoritative servers itself |
+| What | A recursive, DNSSEC-validating DNS resolver. It asks the root, TLDs and authoritative servers itself; the only forwarding by default is the built-in forward list (`src/forwardlist.c`), a few zones that won't answer it, asked of 1.1.1.1 and 8.8.8.8 |
 | Language | Strict C99 + POSIX.1-2008. GNU make. No dependencies: crypto, TLS 1.3 client, event loop and DNS wire format are in-tree. Links libc, `-lm`, `-pthread` |
 | Build | `make` → `bin/elpis` and `bin/elpis.conf` |
 | Test | `make test` → `bin/elpis-test`: 735 checks at 2.5.0, no network needed |

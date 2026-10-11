@@ -18,6 +18,7 @@
 #include "elpis/dnssec.h"
 #include "elpis/rdata.h"
 #include "elpis/deleg.h"
+#include "elpis/forwardlist.h"
 #include "elpis/infra.h"
 #include "elpis/log.h"
 #include "elpis/telemetry.h"
@@ -92,13 +93,14 @@ int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name)
     return (int)r->zone.labels;
 }
 
-/* Turn a configured route into a delegation the send path can use. */
-static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
+/* Turn a route's zone and addresses into a delegation the send path can use. */
+static int route_to_deleg(const elpis_name_t *zone, const elpis_addr_t *addr,
+                          unsigned naddr, elpis_deleg_t *d)
 {
     unsigned i;
 
     memset(d, 0, sizeof *d);
-    d->zone = r->zone;
+    d->zone = *zone;
     d->sec      = ELPIS_SEC_UNCHECKED;
     d->ds_state = ELPIS_DS_UNKNOWN;
     d->ttl      = 3600;
@@ -109,8 +111,8 @@ static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
      * looks at that name except to avoid resolving it.
      */
     elpis_deleg_add_ns(d, &d->zone);
-    for (i = 0; i < r->naddr; i++) {
-        const elpis_addr_t *a = &r->addr[i];
+    for (i = 0; i < naddr; i++) {
+        const elpis_addr_t *a = &addr[i];
         uint16_t port = elpis_addr_port(a);
         if (port == 0)
             port = 53;
@@ -124,6 +126,38 @@ static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
                                       AF_INET6, ELPIS_NSF_RESOLVED, port);
     }
     return elpis_deleg_addr_count(d) > 0;
+}
+
+int elpis_route_deleg(const elpis_conf_t *c, const elpis_name_t *name,
+                      elpis_deleg_t *d)
+{
+    const elpis_zoneroute_t *r = route_lookup(c, name);
+    const elpis_addr_t *fa;
+    elpis_name_t zone;
+    unsigned labels, nfa, i, usable = 0;
+
+    if (r != NULL) {
+        if (!route_to_deleg(&r->zone, r->addr, r->naddr, d))
+            return ELPIS_ROUTE_NONE;
+        return r->is_stub ? ELPIS_ROUTE_STUB : ELPIS_ROUTE_FORWARD;
+    }
+    if (!c->forwardlist || (labels = elpis_forwardlist_match(name)) == 0)
+        return ELPIS_ROUTE_NONE;
+    /*
+     * With none of the public resolvers reachable by a family in use, the
+     * zone's own servers are asked as before: a chance of an answer beats a
+     * certain SERVFAIL.  A configured route is not second-guessed like this.
+     */
+    fa = elpis_forwardlist_servers(&nfa);
+    for (i = 0; i < nfa; i++)
+        usable += elpis_addr_family(&fa[i]) == AF_INET ? c->do_ipv4
+                                                       : c->do_ipv6;
+    if (usable == 0 || elpis_name_suffix(name, labels, &zone) != 0)
+        return ELPIS_ROUTE_NONE;
+    elpis_name_lower(&zone);
+    if (!route_to_deleg(&zone, fa, nfa, d))
+        return ELPIS_ROUTE_NONE;
+    return ELPIS_ROUTE_LISTED;
 }
 
 /* ================================================================== */
@@ -2362,11 +2396,16 @@ void elpis_task_step(elpis_task_t *t)
 
             t->forwarding = 0;
             t->lame_nodata = 0;
+            t->deleg_from_list = 0;
             {
-                const elpis_zoneroute_t *r = route_lookup(c, &start);
-                if (r != NULL && route_to_deleg(r, &t->deleg)) {
-                    t->forwarding = r->is_stub ? 0u : 1u;
+                int route = elpis_route_deleg(c, &start, &t->deleg);
+                if (route != ELPIS_ROUTE_NONE) {
+                    t->forwarding = route != ELPIS_ROUTE_STUB ? 1u : 0u;
                     t->deleg_from_route = 1;
+                    if (route == ELPIS_ROUTE_LISTED) {
+                        t->deleg_from_list = 1;
+                        elpis_stat_inc(&w->stats.forwardlisted, 1);
+                    }
                     t->have_deleg = 1;
                     t->ntried = 0;
                     t->rounds = 0;

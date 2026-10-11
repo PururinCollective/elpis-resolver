@@ -43,6 +43,9 @@ Where things live and how one query moves through them.
  task  src/resolver/resolver.c   elpis_task_start() → elpis_task_step()
    │   states: INIT → LOOKUP → DELEG → SEND → WAIT → (NSADDR) → VALIDATE → FINISH
    │
+   │   DELEG             elpis_route_deleg(): a forward-zone/stub-zone first, then
+   │                     the built-in forward list (src/forwardlist.c), else the
+   │                     delegation cache or the root
    │   choose_server()   cheapest untried address; DoT-capable first when
    │                     authoritative-dot is on; held servers skipped
    │   send_query()      elpis_out_send(), plus races/probes to unmeasured servers
@@ -71,6 +74,7 @@ Where things live and how one query moves through them.
 | `src/quirks.c` | built-in zone quirk list |
 | `src/nameset.c` | a fixed set of names looked up one hash per label suffix; the blocklist and forward list are each one |
 | `src/blocklist.c` | built-in blocklist (names from the ElpisDNS honeypot) |
+| `src/forwardlist.c` | built-in forward list: zones that won't answer Elpis, asked of 1.1.1.1/1.0.0.1/8.8.8.8/8.8.4.4 |
 | `src/conflict.c` | who holds the port, systemd-resolved handling |
 | `src/dns/` | names, messages, rdata, EDNS, cookies, ECS |
 | `src/cache/` | sharded hash table (`cache.c`), message/RRset caches, `infra.c` (per-server RTT, EDNS, cookies, hold-down, DoT state), `delegation.c` |

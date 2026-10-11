@@ -85,6 +85,18 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Only the client's question, not CNAME targets or NS names | The point is cheap refusal of floods; following chains would mean a task. |
 | `blocklist: no` switches it off; no per-name unblock yet | An escape hatch for a false positive without a rebuild. `vtb.com` is VTB Bank's (NS `ns1-3.vtb.ru`), with a 3,367-byte signed DNSKEY answer (via 1.1.1.1, 2026-10-09), so likely there as an amplification name; its real users get REFUSED too. |
 
+### The built-in forward list (Unreleased)
+
+| decision | why |
+|---|---|
+| Asked of the public resolvers always, not only after the zone's own servers fail | Maintainer's request, modelled on the AdGuard Home upstreams they used as a stopgap (`[/charter.com/]1.1.1.1`). Asking first would pay the timeouts (8-10 s measured) on every cache miss, and keep feeding a rate limiter that is the cause. |
+| Cloudflare and Google, two addresses each | `usda.gov` on 2026-10-11: 1.1.1.1 SERVFAIL EDE 22, 8.8.8.8 answered. A forwarder's SERVFAIL already moves to the next address (`next_server`), so failover needed no new code. |
+| No ECS at all to them, not even ecs-ip-type: none's /0 | Maintainer's request ("ECH" in the request; no ECH exists in the tree, ECS was meant). The /0 would hide nothing worth hiding: Google would add this resolver's own subnet, which the zone's servers see anyway when asked directly. |
+| A configured forward-zone/stub-zone covering the name always wins, however shallow | `forward-zone: .` to a chosen upstream must not quietly send some names to Cloudflare. |
+| `elpis_route_depth()` leaves the list out | It drives the RFC 8020 cache rules and the DNSSEC exemption for an operator's private zones (a signed NXDOMAIN above a routed zone makes it insecure). Listed zones are public and signed-tree; exempting them would let a real "doesn't exist" turn forwarded data insecure instead of bogus. |
+| IPv4 off → the zone's own servers, not SERVFAIL | Every listed resolver is IPv4. A configured route isn't second-guessed this way. |
+| The hash table moved to `nameset.c` | The blocklist's table, shared rather than copied. Same seed, same lookups. |
+
 ### Older ones
 
 | decision | why |
@@ -118,6 +130,9 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   `TCP_NODELAY`. That's the test server, not Elpis.
 - **Infra entries expire after an hour of disuse**, except while their DoT
   state needs keeping.
+- **`elpis -d` stays in the foreground.** Run it as a background task. With
+  `log-file:` set, the startup dump goes to the file and later lines go to
+  stderr, so don't wait on the file for "listening with".
 - **The status API wants a session**: `POST /api/login` then `GET /api/status`.
 - **`webui_assets.h` is generated.** Edit `web/index.html` and run `make`.
 - **A disabled unit looks exactly like a cancelled one**: inactive,

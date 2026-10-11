@@ -207,6 +207,9 @@ typedef struct {
     /* --- forwarders / stubs --------------------------------------- */
     elpis_zoneroute_t route[ELPIS_MAX_FORWARD + ELPIS_MAX_STUB];
     unsigned     nroute;
+    /* Zones asked through public resolvers, the built-in list in
+     * forwardlist.c; a route above always comes first. */
+    uint8_t      forwardlist;
 
     /* --- zones whose servers misbehave (quirks.c) ------------------- */
     elpis_quirk_t quirk[ELPIS_MAX_QUIRKS];
