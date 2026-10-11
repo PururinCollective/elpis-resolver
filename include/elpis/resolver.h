@@ -266,6 +266,15 @@ struct elpis_task {
      * written back into the delegation cache.
      */
     unsigned        deleg_from_route : 1;
+    /* ... and from the built-in forward list in particular (forwardlist.c),
+     * whose public resolvers are never sent a client's subnet. */
+    unsigned        deleg_from_list : 1;
+    /*
+     * Every resolver on the forward list failed this resolution, so it went
+     * to the zone's own servers instead, and the list is not used again: not
+     * after a CNAME, not by a child lookup.  See the SEND state.
+     */
+    unsigned        list_off : 1;
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;
@@ -548,6 +557,20 @@ int  elpis_selfinfo_ecs(elpis_ctx_t *ctx, elpis_ecs_t *out);
 /* Labels in the configured stub-zone or forward-zone that `name` is inside
  * ("corp." is 1, "." is 0), or -1 when there is none. */
 int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name);
+/*
+ * Where a resolution of `name` starts when it is not from the root: a
+ * configured stub-zone or forward-zone, the deepest that covers it, or else
+ * the built-in forward list.  Fills *d and says which, or returns
+ * ELPIS_ROUTE_NONE with *d undefined.  elpis_route_depth() above leaves the
+ * list out on purpose: listed zones are public, in the signed tree, and
+ * nothing that exempts an operator's private zone applies to them.
+ */
+#define ELPIS_ROUTE_NONE    0
+#define ELPIS_ROUTE_STUB    1
+#define ELPIS_ROUTE_FORWARD 2
+#define ELPIS_ROUTE_LISTED  3
+int elpis_route_deleg(const elpis_conf_t *c, const elpis_name_t *name,
+                      elpis_deleg_t *d);
 uint32_t elpis_clamp_ttl(const elpis_conf_t *c, uint32_t ttl);
 uint32_t elpis_clamp_neg_ttl(const elpis_conf_t *c, uint32_t ttl);
 /* The status of an answer so far (`chain`) once `link` is added to it: the

@@ -40,6 +40,12 @@ typedef struct {
     uint64_t overload;
     /* Queries answered REFUSED at once for a name on the blocklist. */
     uint64_t blocked;
+    /* Resolutions, the validator's included, sent to the public resolvers
+     * of the built-in forward list. */
+    uint64_t forwardlisted;
+    /* Of those, the ones that went to the zone's own servers after every
+     * resolver on the list had failed. */
+    uint64_t forwardfallback;
     /*
      * Resolutions ended SERVFAIL because every server left to ask in the zone
      * was held down (server-hold-down), rather than asked again.  When the

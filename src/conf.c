@@ -7,6 +7,7 @@
  */
 #include "elpis/conf.h"
 #include "elpis/blocklist.h"
+#include "elpis/forwardlist.h"
 #include "elpis/dns.h"
 
 #include <errno.h>
@@ -116,6 +117,8 @@ void elpis_conf_defaults(elpis_conf_t *c)
     c->adot_ttl_s       = 86400;
     c->adot_retry_s     = 3600;
     c->adot_max_try     = 24;
+
+    c->forwardlist      = 1;
 
     c->ecs              = 0;
     c->ecs_ip_type      = ELPIS_ECS_TYPE_CLIENT;
@@ -641,6 +644,7 @@ int elpis_conf_parse_line(elpis_conf_t *c, char *line, const char *src,
         c->nroute++;
         return ELPIS_OK;
     }
+    if (KEY("forwardlist")) return want_bool(&p, key, val, &c->forwardlist);
 
     /* ---- zones whose servers misbehave ---- */
     if (KEY("quirk")) {
@@ -982,6 +986,21 @@ void elpis_conf_dump(const elpis_conf_t *c)
                    c->route[i].is_stub ? "stub-zone   " : "forward-zone",
                    c->route[i].name, list);
     }
+    if (c->forwardlist) {
+        char list[256];
+        const elpis_addr_t *fa;
+        unsigned j, nfa;
+        list[0] = '\0';
+        fa = elpis_forwardlist_servers(&nfa);
+        for (j = 0; j < nfa; j++) {
+            if (j) elpis_strlcat(list, " ", sizeof list);
+            elpis_strlcat(list, elpis_addr_str(&fa[j], buf, sizeof buf),
+                          sizeof list);
+        }
+        elpis_info("  forwardlist=yes (%u names built in) -> %s",
+                   elpis_forwardlist_count(), list);
+    } else
+        elpis_info("  forwardlist=no");
     if (c->ecs) {
         elpis_info("  ecs=yes ecs-ip-type=%s prefix=/%u (IPv4) /%u (IPv6)%s",
                    elpis_ecs_type_name(c->ecs_ip_type),

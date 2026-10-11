@@ -63,7 +63,7 @@ hold the answers ever sees what you look up.
 
 | | |
 |---|---|
-| 🌳 **Real recursion** | Resolves from the root servers down. No upstream to trust, nothing to forward to. |
+| 🌳 **Real recursion** | Resolves from the root servers down, with no upstream to trust. The exception is a short [built-in list](docs/configuration.md#-zones-asked-through-public-resolvers) of zones whose servers won't answer it, asked through 1.1.1.1 and 8.8.8.8. |
 | 🔐 **DNSSEC validation** | RSA, ECDSA, Ed25519 and post-quantum ML-DSA. Forged and stripped answers are refused, even behind a forwarder. |
 | 🔒 **DoT to authoritative servers** | What it asks the root, the TLDs and the authorities goes encrypted wherever they offer DNS over TLS ([RFC 9539](docs/configuration.md#-dns-over-tls-to-authoritative-servers)). |
 | ⚡ **Fast** | 0.6 ms median from cache. Hand-written AVX2, SSE2 and NEON code, picked at runtime for the CPU it runs on. |

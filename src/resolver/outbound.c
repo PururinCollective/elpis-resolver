@@ -264,6 +264,14 @@ static int ecs_decide(elpis_worker_t *w, elpis_outq_t *q,
     if (!c->ecs)
         return 0;
     /*
+     * Never to the public resolvers of the built-in forward list.  The zones
+     * on it are there for an answer at all, not a tailored one, and a
+     * client's subnet would tell Cloudflare and Google who asked.  Not even
+     * ecs-ip-type: none's /0: no option at all is the plainer promise.
+     */
+    if (t->deleg_from_list)
+        return 0;
+    /*
      * Never to the root or a TLD, which only ever refer onwards: a subnet
      * there tells them something for nothing.  A forwarder is asked for
      * everything, so it is asked with a subnet for everything.

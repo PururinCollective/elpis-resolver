@@ -11,6 +11,7 @@ Where the config lives, what the settings do, and how to run it.
 [DNS over TLS to authoritative servers](#-dns-over-tls-to-authoritative-servers) ·
 [Quirks](#-zones-whose-servers-misbehave) ·
 [Blocklist](#-names-refused-on-sight) ·
+[Forward list](#-zones-asked-through-public-resolvers) ·
 [Status page password](#-hashing-a-status-page-password) ·
 [Running it](#-running-it)
 
@@ -619,6 +620,60 @@ copied in when it changes; Elpis never fetches it. Only the name a client asks
 is checked, not a CNAME it leads to. The check runs before the special names,
 so an ANY query for a listed name is refused too, not answered with RFC 8482's
 HINFO.</sub>
+
+## 🛟 Zones asked through public resolvers
+
+```
+forwardlist: yes
+```
+
+A few zones' servers don't answer a resolver like Elpis: they drop queries
+from sources they don't know, or rate-limit a busy one until it gets nothing.
+Asked directly, such a name times out into SERVFAIL, while the big public
+resolvers, which those servers do answer, have it. A name on the built-in
+list, or any name below one, is asked of the public resolvers instead, with
+RD set, as a `forward-zone:` would be.
+
+```
+$ dig @127.0.0.1 -p 5335 charter.com A        # forwardlist: no, after 8 s
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL
+; EDE: 22 (No Reachable Authority)
+
+$ dig @127.0.0.1 -p 5335 charter.com A        # forwardlist: yes, 0.5 s
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR
+charter.com.		300	IN	A	142.136.81.136
+```
+
+| | |
+|---|---|
+| zones | `charter.com`, `usda.gov`, in [`src/forwardlist.c`](../src/forwardlist.c) with what was seen for each |
+| asked of | 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 2606:4700:4700::1111, 2606:4700:4700::1001, 2001:4860:4860::8888, 2001:4860:4860::8844: the fastest first, the next when one times out or answers SERVFAIL |
+| validated | like any answer: usda.gov's keys are checked against the DS from `.gov`'s own servers, and come back with AD |
+| if they all fail | the zone's own servers are asked after all, from the root, as if the name weren't listed |
+| client subnet | never sent with these queries, whatever `ecs:` says |
+| counted | **via the forward list** and **forward list fallbacks** in the status page's counters, `forwardlisted=` and `forwardfallback=` in the `SIGUSR1` statistics |
+
+A `forward-zone:` or `stub-zone:` that covers the name comes first. The list
+only changes names that would have been resolved from the root, so
+`forward-zone: .` keeps every name with your upstream. `forwardlist: no`
+switches the list off.
+
+> [!NOTE]
+> This is the one place Elpis forwards by default. Cloudflare and Google see
+> the listed names, asked from this resolver's address, not the client's.
+> Two providers, because one can have trouble with a zone too: on
+> 2026-10-11, 1.1.1.1 answered SERVFAIL for usda.gov while 8.8.8.8 answered,
+> and Cloudflare's IPv6 addresses answered SERVFAIL for charter.com while
+> Google's answered.
+
+<sub>IPv4 is asked first, as for any server, unless `prefer-ipv6: yes`; with
+`do-ipv4: no` the IPv6 addresses are asked. The fallback comes after one pass
+over the list's addresses, not after `max-retries` rounds of them, and only
+once per question: a CNAME or a lookup for the zone's keys after it skips the
+list too. A configured `forward-zone:` never falls back. The validator's lookups inside a
+listed zone, its DNSKEY, go the same way; a DS comes from the parent's servers, which answer.
+A CNAME out of a listed zone is followed as usual: `www.charter.com` leads
+to `twcable.com`, whose servers answer, so that part is asked directly.</sub>
 
 ## 🔑 Hashing a status page password
 

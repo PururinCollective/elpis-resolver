@@ -18,6 +18,7 @@
 #include "elpis/dnssec.h"
 #include "elpis/rdata.h"
 #include "elpis/deleg.h"
+#include "elpis/forwardlist.h"
 #include "elpis/infra.h"
 #include "elpis/log.h"
 #include "elpis/telemetry.h"
@@ -92,38 +93,117 @@ int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name)
     return (int)r->zone.labels;
 }
 
-/* Turn a configured route into a delegation the send path can use. */
-static int route_to_deleg(const elpis_zoneroute_t *r, elpis_deleg_t *d)
+/*
+ * The name of a route's k-th pseudo-nameserver: the zone itself for the
+ * first, then "2.<zone>", "3.<zone>" and so on.  0 when it would not fit.
+ */
+static int route_ns_name(const elpis_name_t *zone, unsigned k,
+                         elpis_name_t *out)
 {
-    unsigned i;
+    if (k == 0) {
+        *out = *zone;
+        return 1;
+    }
+    if (k > 8u || (unsigned)zone->len + 2u > ELPIS_MAX_NAME)
+        return 0;
+    memset(out, 0, sizeof *out);
+    out->d[0] = 1;
+    out->d[1] = (uint8_t)('1' + k);
+    memcpy(out->d + 2, zone->d, zone->len);
+    out->len    = (uint8_t)(zone->len + 2u);
+    out->labels = (uint8_t)(zone->labels + 1u);
+    return 1;
+}
+
+/* Turn a route's zone and addresses into a delegation the send path can use. */
+static int route_to_deleg(const elpis_name_t *zone, const elpis_addr_t *addr,
+                          unsigned naddr, elpis_deleg_t *d)
+{
+    unsigned i, k;
 
     memset(d, 0, sizeof *d);
-    d->zone = r->zone;
+    d->zone = *zone;
     d->sec      = ELPIS_SEC_UNCHECKED;
     d->ds_state = ELPIS_DS_UNKNOWN;
     d->ttl      = 3600;
 
     /*
-     * The configured addresses have no names of their own, so they are all
-     * hung off one pseudo-nameserver named for the zone.  Nothing downstream
-     * looks at that name except to avoid resolving it.
+     * The configured addresses have no names of their own, so they are hung
+     * off pseudo-nameservers, the first named for the zone.  Each address
+     * goes on the first one with room for its family and with its port, or
+     * no address yet: an NS record holds ELPIS_NS_MAX_A4 IPv4 and
+     * ELPIS_NS_MAX_A6 IPv6 addresses and one port.  Everything used to go on
+     * the one, so a forward-zone's fifth IPv4 address or third IPv6 was
+     * dropped without a word, and every address was asked on the port of the
+     * last one listed.  Nothing downstream looks at the names except to
+     * avoid resolving them.
      */
     elpis_deleg_add_ns(d, &d->zone);
-    for (i = 0; i < r->naddr; i++) {
-        const elpis_addr_t *a = &r->addr[i];
+    for (i = 0; i < naddr; i++) {
+        const elpis_addr_t *a = &addr[i];
+        int fam = elpis_addr_family(a);
         uint16_t port = elpis_addr_port(a);
+        const uint8_t *ip;
+
         if (port == 0)
             port = 53;
-        if (elpis_addr_family(a) == AF_INET)
-            elpis_deleg_add_addr_port(d, &d->zone,
-                                      (const uint8_t *)&a->u.v4.sin_addr,
-                                      AF_INET, ELPIS_NSF_RESOLVED, port);
-        else if (elpis_addr_family(a) == AF_INET6)
-            elpis_deleg_add_addr_port(d, &d->zone,
-                                      (const uint8_t *)&a->u.v6.sin6_addr,
-                                      AF_INET6, ELPIS_NSF_RESOLVED, port);
+        if (fam == AF_INET)
+            ip = (const uint8_t *)&a->u.v4.sin_addr;
+        else if (fam == AF_INET6)
+            ip = (const uint8_t *)&a->u.v6.sin6_addr;
+        else
+            continue;
+        for (k = 0; ; k++) {
+            elpis_name_t ns;
+            const elpis_nsrec_t *r;
+
+            if (!route_ns_name(&d->zone, k, &ns))
+                break;              /* no room left anywhere: dropped */
+            r = elpis_deleg_find_ns(d, &ns);
+            if (r != NULL &&
+                (fam == AF_INET ? r->n4 >= ELPIS_NS_MAX_A4
+                                : r->n6 >= ELPIS_NS_MAX_A6))
+                continue;
+            if (r != NULL && r->n4 + r->n6 != 0 && r->port != port)
+                continue;
+            elpis_deleg_add_addr_port(d, &ns, ip, fam, ELPIS_NSF_RESOLVED,
+                                      port);
+            break;
+        }
     }
     return elpis_deleg_addr_count(d) > 0;
+}
+
+int elpis_route_deleg(const elpis_conf_t *c, const elpis_name_t *name,
+                      elpis_deleg_t *d)
+{
+    const elpis_zoneroute_t *r = route_lookup(c, name);
+    const elpis_addr_t *fa;
+    elpis_name_t zone;
+    unsigned labels, nfa, i, usable = 0;
+
+    if (r != NULL) {
+        if (!route_to_deleg(&r->zone, r->addr, r->naddr, d))
+            return ELPIS_ROUTE_NONE;
+        return r->is_stub ? ELPIS_ROUTE_STUB : ELPIS_ROUTE_FORWARD;
+    }
+    if (!c->forwardlist || (labels = elpis_forwardlist_match(name)) == 0)
+        return ELPIS_ROUTE_NONE;
+    /*
+     * With none of the public resolvers reachable by a family in use, the
+     * zone's own servers are asked as before: a chance of an answer beats a
+     * certain SERVFAIL.  A configured route is not second-guessed like this.
+     */
+    fa = elpis_forwardlist_servers(&nfa);
+    for (i = 0; i < nfa; i++)
+        usable += elpis_addr_family(&fa[i]) == AF_INET ? c->do_ipv4
+                                                       : c->do_ipv6;
+    if (usable == 0 || elpis_name_suffix(name, labels, &zone) != 0)
+        return ELPIS_ROUTE_NONE;
+    elpis_name_lower(&zone);
+    if (!route_to_deleg(&zone, fa, nfa, d))
+        return ELPIS_ROUTE_NONE;
+    return ELPIS_ROUTE_LISTED;
 }
 
 /* ================================================================== */
@@ -1092,6 +1172,9 @@ elpis_task_t *elpis_task_child(elpis_task_t *parent, const elpis_name_t *qname,
     t->done_cb  = cb;
     t->done_ctx = ctx;
     t->client_do = parent->client_do;
+    /* A parent that gave up on the forward list: its resolvers would only
+     * fail the child too, the same zone's keys or nameservers. */
+    t->list_off = parent->list_off;
 
     t->sib_next = parent->children;
     if (parent->children != NULL)
@@ -2362,11 +2445,19 @@ void elpis_task_step(elpis_task_t *t)
 
             t->forwarding = 0;
             t->lame_nodata = 0;
+            t->deleg_from_list = 0;
             {
-                const elpis_zoneroute_t *r = route_lookup(c, &start);
-                if (r != NULL && route_to_deleg(r, &t->deleg)) {
-                    t->forwarding = r->is_stub ? 0u : 1u;
+                int route = elpis_route_deleg(c, &start, &t->deleg);
+                /* The list already failed this resolution (SEND, below). */
+                if (route == ELPIS_ROUTE_LISTED && t->list_off)
+                    route = ELPIS_ROUTE_NONE;
+                if (route != ELPIS_ROUTE_NONE) {
+                    t->forwarding = route != ELPIS_ROUTE_STUB ? 1u : 0u;
                     t->deleg_from_route = 1;
+                    if (route == ELPIS_ROUTE_LISTED) {
+                        t->deleg_from_list = 1;
+                        elpis_stat_inc(&w->stats.forwardlisted, 1);
+                    }
                     t->have_deleg = 1;
                     t->ntried = 0;
                     t->rounds = 0;
@@ -2457,6 +2548,29 @@ void elpis_task_step(elpis_task_t *t)
                  */
                 if (t->lame_nodata) {
                     synth_nodata(t);
+                    continue;
+                }
+                /*
+                 * Every resolver on the forward list has been asked, or is
+                 * held down, and none gave an answer.  Ask the zone's own
+                 * servers after all, from the root, like any other name: a
+                 * zone the public resolvers can't reach may still answer
+                 * us.  usda.gov did, on 2026-10-11, while Cloudflare on both
+                 * families and Google over IPv6 answered it SERVFAIL.  Not
+                 * another round of the list first: eight addresses at two
+                 * providers are the retries already.  Once only, since
+                 * list_off stays set through a CNAME and is handed to child
+                 * lookups, which would only meet the same resolvers; and
+                 * never for a configured route, which is the operator's
+                 * choice.  What the resolvers said goes with them, or an
+                 * NXDOMAIN from the zone would go out with their EDE.
+                 */
+                if (t->deleg_from_list) {
+                    t->list_off = 1;
+                    t->ede = -1;
+                    t->have_deleg = 0;
+                    elpis_stat_inc(&w->stats.forwardfallback, 1);
+                    t->state = ELPIS_TS_DELEG;
                     continue;
                 }
                 /*
