@@ -23,6 +23,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.4 "Celestial Equations" | 2026-10-07 | A FORMERR with no question, to an EDNS query, is read as an EDNS refusal and the same server asked again plain: every Exchange Online mail host (`*.mail.protection.outlook.com`) had been a SERVFAIL |
 | 2.4.5 "Celestial Cascade" | 2026-10-08 | A cached record past its TTL and past every signature on it is a cache miss, for answers and for the validator's DNSKEY/DS/denials: `accounts.pandasecurity.com` (Route 53, signed on the fly for ~65 min, TTL 300) had been a SERVFAIL once stale |
 | 2.5.0 "Erdentempel" | 2026-10-10 | A built-in blocklist (`src/blocklist.c`, 11 names from the ElpisDNS honeypot) answers REFUSED + EDE 15 before the cache; `blocklist: no` turns it off. `elpis -t` exits 1 on a bad value. Ran on the maintainer's resolver for ~5 h as `main@d97dea6f9183` before the bump |
+| 2.6.0 "Borrowed Wings" | 2026-10-12 | A built-in forward list (`src/forwardlist.c`: `charter.com`, `usda.gov`) asks Cloudflare and Google, IPv4 and IPv6, never with ECS, and falls back to the zone's own servers when they all fail; `forwardlist: no` turns it off. A route's addresses past 4 IPv4 / 2 IPv6 were dropped and all took the last port; fixed. Tested on scratch instances only, not on the maintainer's resolver, before the bump |
 
 ## 🧭 Decisions, and why
 
@@ -85,7 +86,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Only the client's question, not CNAME targets or NS names | The point is cheap refusal of floods; following chains would mean a task. |
 | `blocklist: no` switches it off; no per-name unblock yet | An escape hatch for a false positive without a rebuild. `vtb.com` is VTB Bank's (NS `ns1-3.vtb.ru`), with a 3,367-byte signed DNSKEY answer (via 1.1.1.1, 2026-10-09), so likely there as an amplification name; its real users get REFUSED too. |
 
-### The built-in forward list (Unreleased)
+### The built-in forward list (2.6.0)
 
 | decision | why |
 |---|---|
