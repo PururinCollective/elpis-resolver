@@ -236,8 +236,8 @@ dig +short TXT elpis.sakurako.oomuro @127.0.0.1     # the same
 ```
 
 ```
-elpis.sakurako.oomuro   text = "elpis=2.5.0" "codename=Erdentempel"
-                               "edition=community" "build=v2.5.0"
+elpis.sakurako.oomuro   text = "elpis=2.6.0" "codename=Borrowed Wings"
+                               "edition=community" "build=v2.6.0"
                                "uptime=3601" "workers=8" "simd=avx2"
                                "dnssec=validating"
 ```

@@ -14,7 +14,16 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.6.0 "Borrowed Wings" — 2026-10-12
+
+The long way round. A few zones' servers won't answer Elpis, while Cloudflare
+and Google have the names. Elpis now carries a short list of them and asks
+those resolvers instead, over IPv4 and IPv6, never with a client's subnet, and
+still validates what comes back. If they fail as well, the zone's own servers
+are asked after all. And a `forward-zone:` or `stub-zone:` now uses every
+address it lists, each on its own port.
+
+No config that worked stops working.
 
 ### Added
 
@@ -43,8 +52,6 @@ nameserver record, which holds 4 IPv4 addresses, 2 IPv6 and one port. A
 fifth IPv4 or third IPv6 address was dropped without a word, and every
 address was asked on the port of the one listed last:
 `stub-zone: corp 127.0.0.1@5300 127.0.0.2` asked both on 53.
-
-No config that worked stops working.
 
 ## 2.5.0 "Erdentempel" — 2026-10-10
 
