@@ -3950,6 +3950,175 @@ out:
 }
 
 /* ================================================================== */
+/* How a task in the test below ended, or -1 while it has not.  A task with
+ * no client and no parent frees itself as it ends. */
+static int fallback_rcode;
+
+static void fallback_done(elpis_task_t *t, void *ctx)
+{
+    (void)ctx;
+    fallback_rcode = (int)t->rcode;
+}
+
+/*
+ * A resolution routed by the forward list, whose resolvers have all failed,
+ * goes to the zone's own servers from the root; one under a configured
+ * forward-zone does not.  The root is a socket on 127.0.0.1 and the list's
+ * addresses are marked as asked and answered before the task takes a step,
+ * so nothing leaves the host.
+ */
+static void test_forwardlist_fallback(void)
+{
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_task_t *t = NULL, *child;
+    elpis_addr_t srv;
+    elpis_name_t n;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    struct pollfd pfd;
+    uint8_t pkt[512];
+    char line[128];
+    ssize_t got = -1;
+    unsigned i, j;
+    int lfd = -1;
+
+    section("forward list fallback");
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 16;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    ctx->conf.qname_minimisation = 0;   /* the whole name, to the root */
+    ctx->infra  = elpis_infra_new(1u << 20, 2);
+    ctx->rcache = elpis_rcache_new(1u << 20, 2);
+    ctx->dcache = elpis_dcache_new(1u << 20, 2);
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);      /* never run: nothing is answered */
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rrbuf = (elpis_rrset_buf_t *)elpis_malloc(sizeof *w->rrbuf);
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    if (ctx->infra == NULL || ctx->rcache == NULL || ctx->dcache == NULL ||
+        w->loop == NULL || w->txbuf == NULL || w->rrbuf == NULL ||
+        elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "caches, a socket on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+    /* The root's one server is the socket. */
+    elpis_name_init_root(&ctx->root_hints.zone);
+    elpis_name_from_text(&n, "a.root.test.");
+    elpis_deleg_add_addr_port(&ctx->root_hints, &n,
+                              (const uint8_t *)&sin.sin_addr, AF_INET,
+                              ELPIS_NSF_RESOLVED, ntohs(sin.sin_port));
+
+    /* www.usda.gov., and every resolver on the list said SERVFAIL. */
+    elpis_clock_tick();
+    t = elpis_task_new(w);
+    if (t == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    elpis_name_from_text(&t->qname, "www.usda.gov.");
+    t->qtype = ELPIS_T_A;
+    t->orig_qname = t->qname;
+    t->orig_qtype = t->qtype;
+    CHECK(elpis_route_deleg(&ctx->conf, &t->qname, &t->deleg) ==
+          ELPIS_ROUTE_LISTED, "www.usda.gov. is routed by the list");
+    t->forwarding = t->deleg_from_route = t->deleg_from_list = 1;
+    t->have_deleg = 1;
+    for (i = 0; i < t->deleg.nns; i++)
+        for (j = 0; j < t->deleg.ns[i].n4 && t->ntried < ELPIS_MAX_TRIED; j++)
+            elpis_addr_from4(&t->tried[t->ntried++], t->deleg.ns[i].a4[j],
+                             t->deleg.ns[i].port);
+    t->tried_answered = (uint32_t)((1u << t->ntried) - 1u);
+    t->ede = ELPIS_EDE_NETWORK_ERROR;
+    t->done_cb = fallback_done;
+    fallback_rcode = -1;
+    t->state = ELPIS_TS_SEND;
+    elpis_task_step(t);
+    if (fallback_rcode >= 0) {
+        CHECK(0, "it is not over: it ended %d, without asking anyone else",
+              fallback_rcode);
+        t = NULL;                       /* gone */
+        goto out;
+    }
+
+    pfd.fd = lfd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) == 1)
+        got = recv(lfd, pkt, sizeof pkt, 0);
+    CHECK(got >= (ssize_t)(ELPIS_HDR_LEN + t->qname.len + 4u) &&
+          elpis_eq_ci(pkt + ELPIS_HDR_LEN, t->qname.d, t->qname.len) &&
+          !(pkt[2] & 0x01),
+          "the root is asked instead, for the whole name, without RD");
+    CHECK(t->list_off && !t->deleg_from_list && !t->forwarding &&
+          t->state == ELPIS_TS_WAIT && w->stats.forwardfallback == 1,
+          "once, counted, and the list is off for the rest of it");
+    CHECK(t->ede < 0, "the resolvers' EDE goes with them");
+    elpis_name_from_text(&n, "usda.gov.");
+    child = elpis_task_child(t, &n, ELPIS_T_DNSKEY, NULL, NULL);
+    CHECK(child != NULL && child->list_off,
+          "a child lookup, its keys, starts without the list too");
+    t->done_cb = NULL;
+    elpis_task_free(t);                 /* the child finishes in fini */
+    t = NULL;
+
+    /* A configured forward-zone whose one server said SERVFAIL. */
+    elpis_strlcpy(line, "forward-zone: corp.test 192.0.2.1", sizeof line);
+    elpis_conf_parse_line(&ctx->conf, line, "-", 1);
+    t = elpis_task_new(w);
+    if (t == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    elpis_name_from_text(&t->qname, "www.corp.test.");
+    t->qtype = ELPIS_T_A;
+    t->orig_qname = t->qname;
+    t->orig_qtype = t->qtype;
+    t->done_cb = fallback_done;
+    fallback_rcode = -1;
+    CHECK(elpis_route_deleg(&ctx->conf, &t->qname, &t->deleg) ==
+          ELPIS_ROUTE_FORWARD, "www.corp.test. is routed by the config");
+    t->forwarding = t->deleg_from_route = 1;
+    t->have_deleg = 1;
+    elpis_addr_parse(&t->tried[0], "192.0.2.1", 53);
+    t->ntried = 1;
+    t->tried_answered = 1;
+    t->state = ELPIS_TS_SEND;
+    elpis_task_step(t);                 /* ends it: it frees itself */
+    t = NULL;
+    CHECK(fallback_rcode == ELPIS_RC_SERVFAIL && poll(&pfd, 1, 300) == 0 &&
+          w->stats.forwardfallback == 1,
+          "a configured forward-zone is SERVFAIL, and asks no one else");
+
+out:
+    if (t != NULL)
+        elpis_task_free(t);
+    if (lfd >= 0)
+        close(lfd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->txbuf);
+        elpis_free(w->rrbuf);
+    }
+    if (ctx != NULL) {
+        elpis_cache_free(ctx->infra);
+        elpis_cache_free(ctx->rcache);
+        elpis_cache_free(ctx->dcache);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
 /* The port the address `ip4` is asked on in `d`, or 0 when it is not there. */
 static unsigned deleg_port4(const elpis_deleg_t *d, const char *ip4)
 {
@@ -6246,6 +6415,7 @@ int main(void)
     test_blocklist();
     test_forwardlist();
     test_route_addrs();
+    test_forwardlist_fallback();
     test_localzone();
     test_ecs();
     test_caps_exempt();

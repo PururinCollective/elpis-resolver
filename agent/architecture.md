@@ -45,7 +45,8 @@ Where things live and how one query moves through them.
    │
    │   DELEG             elpis_route_deleg(): a forward-zone/stub-zone first, then
    │                     the built-in forward list (src/forwardlist.c), else the
-   │                     delegation cache or the root
+   │                     delegation cache or the root; a listed name whose list
+   │                     resolvers all failed comes back here with list_off set
    │   choose_server()   cheapest untried address; DoT-capable first when
    │                     authoritative-dot is on; held servers skipped
    │   send_query()      elpis_out_send(), plus races/probes to unmeasured servers

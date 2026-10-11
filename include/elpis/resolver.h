@@ -269,6 +269,12 @@ struct elpis_task {
     /* ... and from the built-in forward list in particular (forwardlist.c),
      * whose public resolvers are never sent a client's subnet. */
     unsigned        deleg_from_list : 1;
+    /*
+     * Every resolver on the forward list failed this resolution, so it went
+     * to the zone's own servers instead, and the list is not used again: not
+     * after a CNAME, not by a child lookup.  See the SEND state.
+     */
+    unsigned        list_off : 1;
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;

@@ -649,8 +649,9 @@ charter.com.		300	IN	A	142.136.81.136
 | zones | `charter.com`, `usda.gov`, in [`src/forwardlist.c`](../src/forwardlist.c) with what was seen for each |
 | asked of | 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 2606:4700:4700::1111, 2606:4700:4700::1001, 2001:4860:4860::8888, 2001:4860:4860::8844: the fastest first, the next when one times out or answers SERVFAIL |
 | validated | like any answer: usda.gov's keys are checked against the DS from `.gov`'s own servers, and come back with AD |
+| if they all fail | the zone's own servers are asked after all, from the root, as if the name weren't listed |
 | client subnet | never sent with these queries, whatever `ecs:` says |
-| counted | **via the forward list** in the status page's counters, `forwardlisted=` in the `SIGUSR1` statistics |
+| counted | **via the forward list** and **forward list fallbacks** in the status page's counters, `forwardlisted=` and `forwardfallback=` in the `SIGUSR1` statistics |
 
 A `forward-zone:` or `stub-zone:` that covers the name comes first. The list
 only changes names that would have been resolved from the root, so
@@ -666,7 +667,10 @@ switches the list off.
 > Google's answered.
 
 <sub>IPv4 is asked first, as for any server, unless `prefer-ipv6: yes`; with
-`do-ipv4: no` the IPv6 addresses are asked. The validator's lookups inside a
+`do-ipv4: no` the IPv6 addresses are asked. The fallback comes after one pass
+over the list's addresses, not after `max-retries` rounds of them, and only
+once per question: a CNAME or a lookup for the zone's keys after it skips the
+list too. A configured `forward-zone:` never falls back. The validator's lookups inside a
 listed zone, its DNSKEY, go the same way; a DS comes from the parent's servers, which answer.
 A CNAME out of a listed zone is followed as usual: `www.charter.com` leads
 to `twcable.com`, whose servers answer, so that part is asked directly.</sub>

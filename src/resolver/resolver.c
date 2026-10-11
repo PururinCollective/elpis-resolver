@@ -1172,6 +1172,9 @@ elpis_task_t *elpis_task_child(elpis_task_t *parent, const elpis_name_t *qname,
     t->done_cb  = cb;
     t->done_ctx = ctx;
     t->client_do = parent->client_do;
+    /* A parent that gave up on the forward list: its resolvers would only
+     * fail the child too, the same zone's keys or nameservers. */
+    t->list_off = parent->list_off;
 
     t->sib_next = parent->children;
     if (parent->children != NULL)
@@ -2445,6 +2448,9 @@ void elpis_task_step(elpis_task_t *t)
             t->deleg_from_list = 0;
             {
                 int route = elpis_route_deleg(c, &start, &t->deleg);
+                /* The list already failed this resolution (SEND, below). */
+                if (route == ELPIS_ROUTE_LISTED && t->list_off)
+                    route = ELPIS_ROUTE_NONE;
                 if (route != ELPIS_ROUTE_NONE) {
                     t->forwarding = route != ELPIS_ROUTE_STUB ? 1u : 0u;
                     t->deleg_from_route = 1;
@@ -2542,6 +2548,29 @@ void elpis_task_step(elpis_task_t *t)
                  */
                 if (t->lame_nodata) {
                     synth_nodata(t);
+                    continue;
+                }
+                /*
+                 * Every resolver on the forward list has been asked, or is
+                 * held down, and none gave an answer.  Ask the zone's own
+                 * servers after all, from the root, like any other name: a
+                 * zone the public resolvers can't reach may still answer
+                 * us.  usda.gov did, on 2026-10-11, while Cloudflare on both
+                 * families and Google over IPv6 answered it SERVFAIL.  Not
+                 * another round of the list first: eight addresses at two
+                 * providers are the retries already.  Once only, since
+                 * list_off stays set through a CNAME and is handed to child
+                 * lookups, which would only meet the same resolvers; and
+                 * never for a configured route, which is the operator's
+                 * choice.  What the resolvers said goes with them, or an
+                 * NXDOMAIN from the zone would go out with their EDE.
+                 */
+                if (t->deleg_from_list) {
+                    t->list_off = 1;
+                    t->ede = -1;
+                    t->have_deleg = 0;
+                    elpis_stat_inc(&w->stats.forwardfallback, 1);
+                    t->state = ELPIS_TS_DELEG;
                     continue;
                 }
                 /*

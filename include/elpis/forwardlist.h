@@ -13,6 +13,11 @@
  * answers SERVFAIL, so one provider having trouble with a zone is not the
  * end of it.  What comes back is still validated.
  *
+ * When every one of them has been asked and none gave an answer, the name is
+ * resolved from the root after all, as if it were not listed: a zone the
+ * public resolvers can't reach may still answer this resolver.  Once per
+ * resolution, and its CNAMEs and child lookups go the same way.
+ *
  * These queries never carry EDNS Client Subnet, whatever ecs: says: a
  * client's subnet would tell two more companies who was asking.
  *

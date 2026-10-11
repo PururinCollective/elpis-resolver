@@ -734,6 +734,7 @@ static const char elpis_webui_page[] =
     "        \"<b>recursions</b><span>\" + num(st.recursions) + \"</span>\" +\n"
     "        \"<b>upstream</b><span>\" + num(st.upstream) + \"</span>\" +\n"
     "        \"<b>via the forward list</b><span>\" + num(st.forwardlisted) + \"</span>\" +\n"
+    "        \"<b>forward list fallbacks</b><span>\" + num(st.forwardfallback) + \"</span>\" +\n"
     "        \"<b>prefetches</b><span>\" + num(st.prefetch) + \"</span>\" +\n"
     "      \"</div></div>\" +\n"
     "      \"<div><h4>Trouble</h4><div class='kv'>\" +\n"
