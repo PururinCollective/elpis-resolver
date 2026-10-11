@@ -93,11 +93,33 @@ int elpis_route_depth(const elpis_conf_t *c, const elpis_name_t *name)
     return (int)r->zone.labels;
 }
 
+/*
+ * The name of a route's k-th pseudo-nameserver: the zone itself for the
+ * first, then "2.<zone>", "3.<zone>" and so on.  0 when it would not fit.
+ */
+static int route_ns_name(const elpis_name_t *zone, unsigned k,
+                         elpis_name_t *out)
+{
+    if (k == 0) {
+        *out = *zone;
+        return 1;
+    }
+    if (k > 8u || (unsigned)zone->len + 2u > ELPIS_MAX_NAME)
+        return 0;
+    memset(out, 0, sizeof *out);
+    out->d[0] = 1;
+    out->d[1] = (uint8_t)('1' + k);
+    memcpy(out->d + 2, zone->d, zone->len);
+    out->len    = (uint8_t)(zone->len + 2u);
+    out->labels = (uint8_t)(zone->labels + 1u);
+    return 1;
+}
+
 /* Turn a route's zone and addresses into a delegation the send path can use. */
 static int route_to_deleg(const elpis_name_t *zone, const elpis_addr_t *addr,
                           unsigned naddr, elpis_deleg_t *d)
 {
-    unsigned i;
+    unsigned i, k;
 
     memset(d, 0, sizeof *d);
     d->zone = *zone;
@@ -106,24 +128,48 @@ static int route_to_deleg(const elpis_name_t *zone, const elpis_addr_t *addr,
     d->ttl      = 3600;
 
     /*
-     * The configured addresses have no names of their own, so they are all
-     * hung off one pseudo-nameserver named for the zone.  Nothing downstream
-     * looks at that name except to avoid resolving it.
+     * The configured addresses have no names of their own, so they are hung
+     * off pseudo-nameservers, the first named for the zone.  Each address
+     * goes on the first one with room for its family and with its port, or
+     * no address yet: an NS record holds ELPIS_NS_MAX_A4 IPv4 and
+     * ELPIS_NS_MAX_A6 IPv6 addresses and one port.  Everything used to go on
+     * the one, so a forward-zone's fifth IPv4 address or third IPv6 was
+     * dropped without a word, and every address was asked on the port of the
+     * last one listed.  Nothing downstream looks at the names except to
+     * avoid resolving them.
      */
     elpis_deleg_add_ns(d, &d->zone);
     for (i = 0; i < naddr; i++) {
         const elpis_addr_t *a = &addr[i];
+        int fam = elpis_addr_family(a);
         uint16_t port = elpis_addr_port(a);
+        const uint8_t *ip;
+
         if (port == 0)
             port = 53;
-        if (elpis_addr_family(a) == AF_INET)
-            elpis_deleg_add_addr_port(d, &d->zone,
-                                      (const uint8_t *)&a->u.v4.sin_addr,
-                                      AF_INET, ELPIS_NSF_RESOLVED, port);
-        else if (elpis_addr_family(a) == AF_INET6)
-            elpis_deleg_add_addr_port(d, &d->zone,
-                                      (const uint8_t *)&a->u.v6.sin6_addr,
-                                      AF_INET6, ELPIS_NSF_RESOLVED, port);
+        if (fam == AF_INET)
+            ip = (const uint8_t *)&a->u.v4.sin_addr;
+        else if (fam == AF_INET6)
+            ip = (const uint8_t *)&a->u.v6.sin6_addr;
+        else
+            continue;
+        for (k = 0; ; k++) {
+            elpis_name_t ns;
+            const elpis_nsrec_t *r;
+
+            if (!route_ns_name(&d->zone, k, &ns))
+                break;              /* no room left anywhere: dropped */
+            r = elpis_deleg_find_ns(d, &ns);
+            if (r != NULL &&
+                (fam == AF_INET ? r->n4 >= ELPIS_NS_MAX_A4
+                                : r->n6 >= ELPIS_NS_MAX_A6))
+                continue;
+            if (r != NULL && r->n4 + r->n6 != 0 && r->port != port)
+                continue;
+            elpis_deleg_add_addr_port(d, &ns, ip, fam, ELPIS_NSF_RESOLVED,
+                                      port);
+            break;
+        }
     }
     return elpis_deleg_addr_count(d) > 0;
 }

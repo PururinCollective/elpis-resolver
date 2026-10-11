@@ -33,6 +33,15 @@ The status page counts them as **via the forward list**, and the `SIGUSR1`
 statistics as `forwardlisted=`. On by default; `forwardlist: no` switches it
 off.
 
+### Fixed
+
+**Every address of a `forward-zone:` or `stub-zone:` is used, each on its
+own port.** A route takes up to 8 addresses, but they were all kept on one
+nameserver record, which holds 4 IPv4 addresses, 2 IPv6 and one port. A
+fifth IPv4 or third IPv6 address was dropped without a word, and every
+address was asked on the port of the one listed last:
+`stub-zone: corp 127.0.0.1@5300 127.0.0.2` asked both on 53.
+
 No config that worked stops working.
 
 ## 2.5.0 "Erdentempel" — 2026-10-10

@@ -3941,6 +3941,68 @@ out:
 }
 
 /* ================================================================== */
+/* The port the address `ip4` is asked on in `d`, or 0 when it is not there. */
+static unsigned deleg_port4(const elpis_deleg_t *d, const char *ip4)
+{
+    struct in_addr in;
+    unsigned i, j;
+
+    if (inet_pton(AF_INET, ip4, &in) != 1)
+        return 0;
+    for (i = 0; i < d->nns; i++)
+        for (j = 0; j < d->ns[i].n4; j++)
+            if (memcmp(d->ns[i].a4[j], &in, 4) == 0)
+                return d->ns[i].port;
+    return 0;
+}
+
+/*
+ * Every address of a forward-zone or stub-zone, each on its own port.  They
+ * all used to hang off one NS record, which holds four IPv4 addresses, two
+ * IPv6 and one port: the rest were dropped, and every address was asked on
+ * the port listed last.
+ */
+static void test_route_addrs(void)
+{
+    elpis_deleg_t *d = (elpis_deleg_t *)elpis_malloc(sizeof *d);
+    elpis_conf_t c;
+    elpis_name_t n;
+    char line[256];
+
+    section("forward-zone addresses");
+    CHECK(d != NULL, "a delegation to fill");
+    if (d == NULL)
+        return;
+
+    elpis_conf_defaults(&c);
+    elpis_strlcpy(line, "forward-zone: corp 192.0.2.1 192.0.2.2 192.0.2.3 "
+                  "192.0.2.4 192.0.2.5 2001:db8::1 2001:db8::2 2001:db8::3",
+                  sizeof line);
+    CHECK(elpis_conf_parse_line(&c, line, "-", 1) == ELPIS_OK &&
+          c.nroute == 1 && c.route[0].naddr == 8, "eight addresses parse");
+    elpis_name_from_text(&n, "www.corp.");
+    CHECK(elpis_route_deleg(&c, &n, d) == ELPIS_ROUTE_FORWARD &&
+          elpis_deleg_addr_count(d) == 8,
+          "and all eight are asked, five IPv4 and three IPv6 (%u)",
+          elpis_deleg_addr_count(d));
+    CHECK(deleg_port4(d, "192.0.2.5") == 53, "the fifth IPv4 one too");
+
+    elpis_conf_defaults(&c);
+    elpis_strlcpy(line, "stub-zone: corp 127.0.0.1@5300 127.0.0.2 "
+                  "127.0.0.3@5300", sizeof line);
+    elpis_conf_parse_line(&c, line, "-", 1);
+    CHECK(elpis_route_deleg(&c, &n, d) == ELPIS_ROUTE_STUB &&
+          elpis_deleg_addr_count(d) == 3, "three addresses on two ports");
+    CHECK(deleg_port4(d, "127.0.0.1") == 5300 &&
+          deleg_port4(d, "127.0.0.3") == 5300,
+          "each asked on its own port (%u, %u)", deleg_port4(d, "127.0.0.1"),
+          deleg_port4(d, "127.0.0.3"));
+    CHECK(deleg_port4(d, "127.0.0.2") == 53,
+          "and one without a port on 53 (%u)", deleg_port4(d, "127.0.0.2"));
+    elpis_free(d);
+}
+
+/* ================================================================== */
 /* The special names answered before anything is cached or resolved. */
 static int local_answer(elpis_worker_t *w, const char *name, uint16_t qtype,
                         unsigned *rcode, unsigned *ancount)
@@ -6174,6 +6236,7 @@ int main(void)
     test_quirks();
     test_blocklist();
     test_forwardlist();
+    test_route_addrs();
     test_localzone();
     test_ecs();
     test_caps_exempt();
