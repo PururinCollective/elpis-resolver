@@ -8,7 +8,9 @@
  *
  *   charter.com  ns1-4.charter.com (24.216.90.1, 24.216.90.2, 24.240.146.1,
  *                24.240.146.2) time out from Elpis in Malaysia, and answer
- *                1.1.1.1, 8.8.8.8 and 9.9.9.9 (2026-10-11).
+ *                1.1.1.1, 8.8.8.8 and 9.9.9.9 (2026-10-11).  Later that day
+ *                Cloudflare's IPv6 addresses answered it SERVFAIL while
+ *                1.1.1.1 and Google's answered.
  *   usda.gov     rate-limits: no answer through the maintainer's resolver,
  *                answers through Cloudflare.  ns1/ns2.usda.gov answered a
  *                quiet test box directly, and 1.1.1.1 itself was SERVFAIL
@@ -30,14 +32,20 @@ static const char *const k_names[] = {
 };
 
 /*
- * Two providers, two addresses each, Cloudflare first.  Order matters little:
- * each is measured and the fastest asked, as with any forward-zone.
+ * Two providers, two addresses each in each family, Cloudflare first.  Order
+ * matters little: each is measured and the fastest asked, as with any
+ * forward-zone, with IPv4 a little ahead unless prefer-ipv6 says otherwise.
+ * The IPv6 ones keep the list working on a host with do-ipv4: no.
  */
 static const char *const k_servers[] = {
     "1.1.1.1",
     "1.0.0.1",
     "8.8.8.8",
     "8.8.4.4",
+    "2606:4700:4700::1111",
+    "2606:4700:4700::1001",
+    "2001:4860:4860::8888",
+    "2001:4860:4860::8844",
 };
 
 static elpis_nameset_t g_set;

@@ -997,9 +997,8 @@ void elpis_conf_dump(const elpis_conf_t *c)
             elpis_strlcat(list, elpis_addr_str(&fa[j], buf, sizeof buf),
                           sizeof list);
         }
-        elpis_info("  forwardlist=yes (%u names built in) -> %s%s",
-                   elpis_forwardlist_count(), list,
-                   c->do_ipv4 ? "" : " (unused: do-ipv4 is no)");
+        elpis_info("  forwardlist=yes (%u names built in) -> %s",
+                   elpis_forwardlist_count(), list);
     } else
         elpis_info("  forwardlist=no");
     if (c->ecs) {

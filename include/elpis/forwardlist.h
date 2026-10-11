@@ -7,7 +7,8 @@
  * it gets nothing at all.  Asked directly, such a zone is a timeout and then
  * a SERVFAIL, while the big public resolvers, which those servers do answer,
  * have the name.  A name on the built-in list, and every name below it, is
- * asked of 1.1.1.1, 1.0.0.1, 8.8.8.8 and 8.8.4.4 instead, with RD set, as a
+ * asked of Cloudflare's and Google's public resolvers instead (1.1.1.1,
+ * 1.0.0.1, 8.8.8.8, 8.8.4.4 and their IPv6 addresses), with RD set, as a
  * forward-zone would be: the cheapest first, and the next when one fails or
  * answers SERVFAIL, so one provider having trouble with a zone is not the
  * end of it.  What comes back is still validated.

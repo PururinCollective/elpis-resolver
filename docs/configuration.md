@@ -647,7 +647,7 @@ charter.com.		300	IN	A	142.136.81.136
 | | |
 |---|---|
 | zones | `charter.com`, `usda.gov`, in [`src/forwardlist.c`](../src/forwardlist.c) with what was seen for each |
-| asked of | 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4: the fastest first, the next when one times out or answers SERVFAIL |
+| asked of | 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 2606:4700:4700::1111, 2606:4700:4700::1001, 2001:4860:4860::8888, 2001:4860:4860::8844: the fastest first, the next when one times out or answers SERVFAIL |
 | validated | like any answer: usda.gov's keys are checked against the DS from `.gov`'s own servers, and come back with AD |
 | client subnet | never sent with these queries, whatever `ecs:` says |
 | counted | **via the forward list** in the status page's counters, `forwardlisted=` in the `SIGUSR1` statistics |
@@ -661,11 +661,13 @@ switches the list off.
 > This is the one place Elpis forwards by default. Cloudflare and Google see
 > the listed names, asked from this resolver's address, not the client's.
 > Two providers, because one can have trouble with a zone too: on
-> 2026-10-11, 1.1.1.1 answered SERVFAIL for usda.gov while 8.8.8.8 answered.
+> 2026-10-11, 1.1.1.1 answered SERVFAIL for usda.gov while 8.8.8.8 answered,
+> and Cloudflare's IPv6 addresses answered SERVFAIL for charter.com while
+> Google's answered.
 
-<sub>The list needs IPv4: with `do-ipv4: no`, listed zones are asked of their
-own servers as before. The validator's lookups inside a listed zone, its
-DNSKEY, go the same way; a DS comes from the parent's servers, which answer.
+<sub>IPv4 is asked first, as for any server, unless `prefer-ipv6: yes`; with
+`do-ipv4: no` the IPv6 addresses are asked. The validator's lookups inside a
+listed zone, its DNSKEY, go the same way; a DS comes from the parent's servers, which answer.
 A CNAME out of a listed zone is followed as usual: `www.charter.com` leads
 to `twcable.com`, whose servers answer, so that part is asked directly.</sub>
 

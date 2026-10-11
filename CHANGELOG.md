@@ -24,8 +24,8 @@ resolvers.** `charter.com`'s servers time out from Elpis in Malaysia, and
 Google have both names. Asked directly, every name under them was a SERVFAIL
 (EDE 22) after 8 to 10 seconds. A built-in list (`src/forwardlist.c`, 2 zones)
 now sends a listed name, and anything below it, to 1.1.1.1, 1.0.0.1, 8.8.8.8
-and 8.8.4.4 with RD set, as a `forward-zone:` would: the fastest first, the
-next when one times out or answers SERVFAIL. Answers are still validated;
+and 8.8.4.4, or their IPv6 addresses, with RD set, as a `forward-zone:` would:
+the fastest first, the next when one times out or answers SERVFAIL. Answers are still validated;
 `usda.gov` comes back with AD. These queries never carry EDNS Client Subnet,
 whatever `ecs:` says. A configured `forward-zone:` or `stub-zone:` that covers
 the name comes first, so `forward-zone: .` keeps everything with its upstream.

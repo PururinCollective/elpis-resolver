@@ -3785,18 +3785,22 @@ static void test_forwardlist(void)
     struct sockaddr_in sin;
     socklen_t slen = sizeof sin;
     char line[128], ab[80];
-    unsigned i, nfa, v4 = 0;
+    unsigned i, nfa, v4 = 0, v6 = 0;
     int lfd = -1;
 
     section("forward list");
     CHECK(elpis_forwardlist_count() > 0, "the built-in list has names (%u)",
           elpis_forwardlist_count());
     fa = elpis_forwardlist_servers(&nfa);
-    for (i = 0; i < nfa; i++)
+    for (i = 0; i < nfa; i++) {
         v4 += elpis_addr_family(&fa[i]) == AF_INET &&
               elpis_addr_port(&fa[i]) == 53;
-    CHECK(nfa == 4 && v4 == 4,
-          "asked of four public resolvers, on port 53 (%u, first %s)", nfa,
+        v6 += elpis_addr_family(&fa[i]) == AF_INET6 &&
+              elpis_addr_port(&fa[i]) == 53;
+    }
+    CHECK(nfa == 8 && v4 == 4 && v6 == 4,
+          "asked of public resolvers, four IPv4 and four IPv6, on port 53 "
+          "(%u, first %s)", nfa,
           nfa ? elpis_addr_str(&fa[0], ab, sizeof ab) : "none");
 
     elpis_name_from_text(&n, "charter.com.");
@@ -3830,8 +3834,9 @@ static void test_forwardlist(void)
     elpis_name_from_text(&n, "www.charter.com.");
     elpis_name_from_text(&z, "charter.com.");
     CHECK(elpis_route_deleg(&c, &n, d) == ELPIS_ROUTE_LISTED &&
-          elpis_name_eq(&d->zone, &z) && elpis_deleg_addr_count(d) == 4,
-          "a name under a listed zone is routed to the list, under that zone");
+          elpis_name_eq(&d->zone, &z) && elpis_deleg_addr_count(d) == 8,
+          "a name under a listed zone is routed to the list, under that zone, "
+          "with all eight addresses (%u)", elpis_deleg_addr_count(d));
     CHECK(elpis_route_depth(&c, &n) == -1,
           "but is not a configured zone, for the NXDOMAIN and DNSSEC rules");
     elpis_name_from_text(&z, "www.example.com.");
@@ -3842,9 +3847,13 @@ static void test_forwardlist(void)
           "and so is a listed one, with the list off");
     c.forwardlist = 1;
     c.do_ipv4 = 0;
+    CHECK(elpis_route_deleg(&c, &n, d) == ELPIS_ROUTE_LISTED,
+          "with IPv4 off the list is still used, over IPv6");
+    c.do_ipv6 = 0;
     CHECK(elpis_route_deleg(&c, &n, d) == ELPIS_ROUTE_NONE,
-          "and with IPv4 off, which every listed resolver needs");
+          "and with both families off it is not");
     c.do_ipv4 = 1;
+    c.do_ipv6 = 1;
 
     elpis_strlcpy(line, "stub-zone: corp 192.0.2.53", sizeof line);
     elpis_conf_parse_line(&c, line, "-", 1);
