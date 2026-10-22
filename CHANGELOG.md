@@ -14,7 +14,15 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.6.1 "Faded Signposts" — 2026-10-23
+
+The sign still points the way. When a zone's nameservers have their own
+addresses in a zone whose signatures have run out, Elpis now uses those
+addresses to reach the servers and for nothing else. Anyone who asks for the
+addresses themselves still gets SERVFAIL. `fitgirl-repacks.site` had been a
+SERVFAIL here while 1.1.1.1 and 8.8.8.8 answered it.
+
+No config that worked stops working.
 
 ### Fixed
 

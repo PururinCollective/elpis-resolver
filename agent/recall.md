@@ -24,6 +24,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.4.5 "Celestial Cascade" | 2026-10-08 | A cached record past its TTL and past every signature on it is a cache miss, for answers and for the validator's DNSKEY/DS/denials: `accounts.pandasecurity.com` (Route 53, signed on the fly for ~65 min, TTL 300) had been a SERVFAIL once stale |
 | 2.5.0 "Erdentempel" | 2026-10-10 | A built-in blocklist (`src/blocklist.c`, 11 names from the ElpisDNS honeypot) answers REFUSED + EDE 15 before the cache; `blocklist: no` turns it off. `elpis -t` exits 1 on a bad value. Ran on the maintainer's resolver for ~5 h as `main@d97dea6f9183` before the bump |
 | 2.6.0 "Borrowed Wings" | 2026-10-12 | A built-in forward list (`src/forwardlist.c`: `charter.com`, `usda.gov`) asks Cloudflare and Google, IPv4 and IPv6, never with ECS, and falls back to the zone's own servers when they all fail; `forwardlist: no` turns it off. A route's addresses past 4 IPv4 / 2 IPv6 were dropped and all took the last port; fixed. Tested on scratch instances only, not on the maintainer's resolver, before the bump |
+| 2.6.1 "Faded Signposts" | 2026-10-23 | A nameserver's address that fails validation is used to reach that server and for nothing else, never served or cached: `fitgirl-repacks.site` (NS `ns1`/`ns2.terradns.org`, whose zone's signatures had expired) had been SERVFAIL EDE 22. Tested on scratch instances only, with gcc only (no clang on the box) |
 
 ## 🧭 Decisions, and why
 
@@ -99,7 +100,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Neither family usable → the zone's own servers, not SERVFAIL | Only reachable with `do-ipv4: no` and `do-ipv6: no`. A configured route isn't second-guessed this way. |
 | The hash table moved to `nameset.c` | The blocklist's table, shared rather than copied. Same seed, same lookups. |
 
-### Nameserver addresses that fail validation (unreleased)
+### Nameserver addresses that fail validation (2.6.1)
 
 | decision | why |
 |---|---|
