@@ -275,6 +275,13 @@ struct elpis_task {
      * after a CNAME, not by a child lookup.  See the SEND state.
      */
     unsigned        list_off : 1;
+    /*
+     * A nameserver's address, looked up for the task above to send to: what
+     * it finds is used for that and nothing else.  One that fails validation
+     * still goes to that task, but to no client and into no cache.  See
+     * task_finish().
+     */
+    unsigned        addr_only : 1;
     unsigned        referrals, restarts, sends;
     elpis_addr_t    tried[ELPIS_MAX_TRIED];
     unsigned        ntried;
