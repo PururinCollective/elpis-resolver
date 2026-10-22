@@ -3089,6 +3089,234 @@ out:
 
 /* ================================================================== */
 /*
+ * A nameserver whose own address fails validation.  ns1 and ns2.terradns.org
+ * are in a zone whose signatures ran out, and every zone they serve was
+ * SERVFAIL, EDE 22, though nothing in those zones was wrong: the lookups of
+ * the two addresses were refused like any answer, which left no server to
+ * ask.  Here dns.test. has let its signatures run out, and site.test.'s one
+ * nameserver, ns1.dns.test., has its address there.  site.test. must still be
+ * asked, at that address, and the address must still be refused to anyone
+ * who asks for it.
+ */
+static int nsaddr_rcode;
+static unsigned nsaddr_count;
+
+static void nsaddr_bogus_done(elpis_task_t *t, void *ctx)
+{
+    (void)ctx;
+    nsaddr_rcode = (int)t->rcode;
+    nsaddr_count = t->ans.n;
+}
+
+static void test_nsaddr_bogus(void)
+{
+    static elpis_rrset_buf_t top_keys, keys, ds, ans, got;
+    static uint8_t wire[4096];
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    uint8_t sk_top[32], sk_low[32], dsr[4 + 32], lo[4] = { 127, 0, 0, 1 };
+    const elpis_rrset_buf_t *sets[1];
+    elpis_name_t top, low, ns1, site;
+    elpis_task_t *p = NULL, *q;
+    elpis_nsrec_t *r;
+    elpis_addr_t srv;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    struct pollfd pfd;
+    uint8_t pkt[512];
+    ssize_t n = -1;
+    char path[] = "/tmp/elpis-ta-XXXXXX";
+    char hex[65];
+    uint16_t top_tag, low_tag;
+    uint32_t now = elpis_cached_now_s();
+    int fd, lfd = -1;
+    unsigned i;
+    size_t len;
+    FILE *fp;
+
+    section("a nameserver address that fails validation");
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 64;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    ctx->conf.qname_minimisation = 0;   /* the whole name, to site.test. */
+    ctx->infra  = elpis_infra_new(1u << 20, 2);
+    ctx->rcache = elpis_rcache_new(4u << 20, 2);
+    ctx->dcache = elpis_dcache_new(1u << 20, 2);
+    ctx->ta     = elpis_ta_new();
+    w->ctx   = ctx;
+    w->loop  = elpis_loop_new(16);      /* never run: lookups get no further
+                                         * than their first timer */
+    w->rrbuf = (elpis_rrset_buf_t *)elpis_malloc(sizeof *w->rrbuf);
+    w->rd1   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd2   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    if (ctx->infra == NULL || ctx->rcache == NULL || ctx->dcache == NULL ||
+        ctx->ta == NULL || w->loop == NULL || w->rrbuf == NULL ||
+        w->rd1 == NULL || w->rd2 == NULL || w->txbuf == NULL ||
+        elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "caches, a socket on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+
+    for (i = 0; i < 32; i++) {
+        sk_top[i] = (uint8_t)(0x20 + i);
+        sk_low[i] = (uint8_t)(0xa0 + i);
+    }
+    elpis_name_from_text(&top,  "test.");
+    elpis_name_from_text(&low,  "dns.test.");
+    elpis_name_from_text(&ns1,  "ns1.dns.test.");
+    elpis_name_from_text(&site, "site.test.");
+
+    /* test. is the trust anchor, and vouches for dns.test.'s key. */
+    top_tag = ttl0_keys(&top_keys, &top, sk_top, 3600);
+    ttl0_ds(dsr, &top, &top_keys, top_tag);
+    for (i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", dsr[4 + i]);
+    fd = mkstemp(path);
+    CHECK(fd >= 0, "trust anchor file");
+    if (fd < 0)
+        goto out;
+    fp = fdopen(fd, "w");
+    fprintf(fp, "test. 3600 IN DS %u 15 2 %s\n", top_tag, hex);
+    fclose(fp);
+    CHECK(elpis_ta_load_file(ctx->ta, path) == ELPIS_OK, "the anchor loads");
+    unlink(path);
+    elpis_rcache_put_buf(ctx->rcache, &top_keys, 0, 0);
+
+    low_tag = ttl0_keys(&keys, &low, sk_low, 3600);
+    ttl0_ds(dsr, &low, &keys, low_tag);
+    elpis_rrset_buf_init(&ds, &low, ELPIS_T_DS, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&ds, dsr, sizeof dsr);
+    ttl0_sign(&ds, &top, sk_top, top_tag);
+    elpis_rcache_put_buf(ctx->rcache, &ds, 0, 0);
+    elpis_rcache_put_buf(ctx->rcache, &keys, 0, 0);
+
+    /* ns1.dns.test.'s address, whose signature ran out yesterday.  The
+     * address is the test's own socket, on its own port below. */
+    elpis_rrset_buf_init(&ans, &ns1, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&ans, lo, sizeof lo);
+    ttl0_sign_at(&ans, &low, sk_low, low_tag, elpis_wall_s() - 2 * 86400);
+
+    /* www.site.test., at the point of looking up its one server's address. */
+    elpis_clock_tick();
+    p = elpis_task_new(w);
+    if (p == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    elpis_name_from_text(&p->qname, "www.site.test.");
+    p->qtype = ELPIS_T_A;
+    p->orig_qname = p->qname;
+    p->orig_qtype = p->qtype;
+    p->deleg.zone = site;
+    p->deleg.sec  = ELPIS_SEC_UNCHECKED;
+    elpis_deleg_add_ns(&p->deleg, &ns1);
+    r = elpis_deleg_find_ns(&p->deleg, &ns1);
+    if (r != NULL)
+        r->port = ntohs(sin.sin_port);
+    p->have_deleg = 1;
+    p->done_cb = nsaddr_bogus_done;
+    nsaddr_rcode = -1;
+    p->state = ELPIS_TS_NSADDR;
+    elpis_task_step(p);
+    CHECK(p->children != NULL && p->children->qtype == ELPIS_T_A &&
+          p->children->addr_only && p->state == ELPIS_TS_NSADDR,
+          "ns1.dns.test.'s address is looked up, as an address only");
+
+    sets[0] = &ans;
+    len = ttl0_reply(wire, &ns1, ELPIS_T_A, ELPIS_SEC_ANSWER, sets, 1);
+    CHECK(ttl0_feed(p, "ns1.dns.test.", ELPIS_T_A, wire, len),
+          "and answered, with the signature that ran out");
+    CHECK(w->stats.dnssec_bogus == 1, "the answer is bogus (%llu)",
+          (unsigned long long)w->stats.dnssec_bogus);
+
+    if (nsaddr_rcode >= 0) {
+        CHECK(0, "but site.test. is asked all the same: it ended %d, with "
+              "no server to ask", nsaddr_rcode);
+        p = NULL;                       /* gone */
+    } else {
+        pfd.fd = lfd;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 2000) == 1)
+            n = recv(lfd, pkt, sizeof pkt, 0);
+        r = elpis_deleg_find_ns(&p->deleg, &ns1);
+        CHECK(r != NULL && r->n4 == 1 && memcmp(r->a4[0], lo, 4) == 0 &&
+              n >= (ssize_t)(ELPIS_HDR_LEN + p->qname.len + 4u) &&
+              elpis_eq_ci(pkt + ELPIS_HDR_LEN, p->qname.d, p->qname.len),
+              "but site.test. is asked all the same, at that address");
+        p->done_cb = NULL;
+        elpis_task_free(p);
+        p = NULL;
+    }
+    CHECK(elpis_rcache_get(ctx->rcache, &ns1, ELPIS_T_A, ELPIS_CLASS_IN,
+                           now, 86400, &got) == ELPIS_ENOTFOUND,
+          "and the address is not kept in the cache");
+
+    /* Asked for by name, the same records are refused as before. */
+    q = elpis_task_new(w);
+    if (q == NULL) {
+        CHECK(0, "a task");
+        goto out;
+    }
+    q->qname = q->orig_qname = ns1;
+    q->qtype = q->orig_qtype = ELPIS_T_A;
+    q->rcode = ELPIS_RC_NOERROR;
+    q->state = ELPIS_TS_VALIDATE;
+    q->done_cb = nsaddr_bogus_done;
+    q->ans.zone_labels = ELPIS_ZONE_STAMP(&low);
+    for (i = 0; i < (unsigned)ans.count + ans.sigcount; i++)
+        elpis_rrlist_add(&q->ans, ELPIS_SEC_ANSWER, &ans.name,
+                         i < ans.count ? ans.type : (uint16_t)ELPIS_T_RRSIG,
+                         ELPIS_CLASS_IN, ans.ttl, ans.data + ans.off[i],
+                         ans.len[i]);
+    nsaddr_rcode = -1;
+    nsaddr_count = 99;
+    if (elpis_val_start(q) == 0) {
+        q->state = ELPIS_TS_FINISH;
+        elpis_task_step(q);             /* ends it: it frees itself */
+    } else {
+        elpis_task_free(q);
+    }
+    CHECK(nsaddr_rcode == (int)ELPIS_RC_SERVFAIL && nsaddr_count == 0,
+          "asked for by name, the address is SERVFAIL, with nothing in it "
+          "(%d, %u)", nsaddr_rcode, nsaddr_count);
+
+out:
+    if (p != NULL)
+        elpis_task_free(p);
+    if (lfd >= 0)
+        close(lfd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->rrbuf);
+        elpis_free(w->rd1);
+        elpis_free(w->rd2);
+        elpis_free(w->txbuf);
+    }
+    if (ctx != NULL) {
+        elpis_cache_free(ctx->infra);
+        elpis_cache_free(ctx->rcache);
+        elpis_cache_free(ctx->dcache);
+        elpis_ta_free(ctx->ta);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
+/* ================================================================== */
+/*
  * A denial whose proof does not fit the client's UDP size.  To a client that
  * set DO the authority section is the proof, so the reply is truncated -- TC,
  * nothing in it -- rather than sent with AD and no proof.  The message cache
@@ -6395,6 +6623,7 @@ int main(void)
     test_rrset_why();
     test_sigs_lapsed();
     test_ttl0_material();
+    test_nsaddr_bogus();
     test_reply_fit();
     test_pq_downgrade();
     test_root_sentinel();

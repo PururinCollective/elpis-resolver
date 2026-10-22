@@ -1256,6 +1256,21 @@ static void nsaddr_done(elpis_task_t *child, void *ctxp)
     }
 }
 
+/*
+ * Look up one of a nameserver's addresses for `t`, as an address and nothing
+ * more (addr_only).  Marked after elpis_task_child() returns, which is in
+ * time: a child only starts on the next turn of the loop.
+ */
+static int nsaddr_child(elpis_task_t *t, const elpis_name_t *ns, uint16_t type)
+{
+    elpis_task_t *c = elpis_task_child(t, ns, type, nsaddr_done, NULL);
+
+    if (c == NULL)
+        return 0;
+    c->addr_only = 1;
+    return 1;
+}
+
 /* ================================================================== */
 /* Response handling                                                   */
 /* ================================================================== */
@@ -2646,11 +2661,9 @@ void elpis_task_step(elpis_task_t *t)
             /* Mark it now so we do not pick the same one again this pass. */
             r->flags = (uint8_t)(r->flags | ELPIS_NSF_NOADDR);
 
-            if (c->do_ipv4 &&
-                elpis_task_child(t, &ns, ELPIS_T_A, nsaddr_done, NULL) != NULL)
+            if (c->do_ipv4 && nsaddr_child(t, &ns, ELPIS_T_A))
                 launched++;
-            if (c->do_ipv6 &&
-                elpis_task_child(t, &ns, ELPIS_T_AAAA, nsaddr_done, NULL) != NULL)
+            if (c->do_ipv6 && nsaddr_child(t, &ns, ELPIS_T_AAAA))
                 launched++;
 
             if (launched == 0) {
@@ -2763,6 +2776,7 @@ static int nxdomain_storable(const elpis_task_t *t)
 static void task_finish(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
+    int withheld = 0;
 
     if (t->state == ELPIS_TS_DEAD)
         return;
@@ -2790,13 +2804,15 @@ static void task_finish(elpis_task_t *t)
          * the answer, which for a CNAME chain was seldom the link at fault.
          */
         elpis_logf_rl(ELPIS_LOG_WARN, ELPIS_DROP__MAX - 1, __FILE__, __LINE__,
-                      "dnssec: %s for %s %s: %s (EDE %d %s); replying SERVFAIL",
+                      "dnssec: %s for %s %s: %s (EDE %d %s); %s",
                       forged ? "bogus answer"
                              : "could not fetch validation material",
                       elpis_name_str(&t->orig_qname, nb, sizeof nb),
                       elpis_type_name(t->orig_qtype),
                       t->val_why != NULL ? t->val_why : "no reason recorded",
-                      ede, ede_name(ede));
+                      ede, ede_name(ede),
+                      t->addr_only ? "used only as a nameserver's address"
+                                   : "replying SERVFAIL");
         /*
          * Take the answer back out of the cache before dropping it.
          *
@@ -2843,10 +2859,29 @@ static void task_finish(elpis_task_t *t)
                                      t->qclass);
             }
         }
-        elpis_rrlist_clear(&t->ans);
-        t->rcode = ELPIS_RC_SERVFAIL;
-        if (t->ede < 0)
-            t->ede = ELPIS_EDE_DNSSEC_BOGUS;
+        /*
+         * A nameserver's address is the one exception: it goes back to the
+         * lookup that needed a server to send to, and nowhere else.  Refused,
+         * it left that zone with no server to ask.  ns1 and ns2.terradns.org
+         * are in a zone whose signatures ran out at the end of July 2026, so
+         * every zone they serve was SERVFAIL, EDE 22: fitgirl-repacks.site
+         * among them, which 1.1.1.1 and 8.8.8.8 both answered while refusing
+         * ns1.terradns.org itself, as this still does.
+         *
+         * Nothing is given up.  An answer from a signed zone is checked
+         * against that zone's own chain whichever server sent it, so a forged
+         * address can only make it fail; an answer from an unsigned zone
+         * could have been forged outright by whoever could forge the address.
+         * Glue, which is never signed, is already used the same way.
+         */
+        if (t->addr_only) {
+            withheld = 1;
+        } else {
+            elpis_rrlist_clear(&t->ans);
+            t->rcode = ELPIS_RC_SERVFAIL;
+            if (t->ede < 0)
+                t->ede = ELPIS_EDE_DNSSEC_BOGUS;
+        }
     }
 
     /*
@@ -2874,7 +2909,7 @@ static void task_finish(elpis_task_t *t)
      * name whose prebuilt response has expired permanently on the slow path,
      * reassembling the same records on every query.
      */
-    if (t->sec != ELPIS_SEC_BOGUS &&
+    if (t->sec != ELPIS_SEC_BOGUS && !withheld &&
         (t->rcode == ELPIS_RC_NOERROR ||
          (t->rcode == ELPIS_RC_NXDOMAIN && nxdomain_storable(t))))
         cache_store_answer(t);

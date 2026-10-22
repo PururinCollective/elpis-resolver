@@ -99,6 +99,15 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | Neither family usable → the zone's own servers, not SERVFAIL | Only reachable with `do-ipv4: no` and `do-ipv6: no`. A configured route isn't second-guessed this way. |
 | The hash table moved to `nameset.c` | The blocklist's table, shared rather than copied. Same seed, same lookups. |
 
+### Nameserver addresses that fail validation (unreleased)
+
+| decision | why |
+|---|---|
+| An NSADDR child (`addr_only`) that ends bogus or unverifiable keeps its records and NOERROR for `nsaddr_done()`; no client, no message cache, and its RRsets are still taken out of the RRset cache | 2026-10-22, user report: `fitgirl-repacks.site` (unsigned; NS `ns1`/`ns2.terradns.org`, whose zone's RRSIGs expired about 86 days earlier) was SERVFAIL EDE 22. 1.1.1.1 and 8.8.8.8 both answered it while both SERVFAIL `ns1.terradns.org A`, so they use such addresses for transport only. Signed targets are still validated on their own chain; for unsigned ones a forger of the address could forge the answer. |
+| Still validated, not skipped like `ns_lookup_background()` (`warming`) | The verdict is kept for the log and the RRset cache; a skip would cache the records unchecked. |
+| The user's two ideas, declined: comparing with 1.1.1.1/8.8.8.8, and accepting expired signatures | Both public resolvers SERVFAIL the failing names themselves, so there was nothing to compare; agreement isn't authentication, and it would send every bogus name to them. Expiry is replay protection; `signature-clock-skew:` is for clocks. `dnssec-permissive: yes` also "fixed" it, but serves `ns1.terradns.org` as NOERROR to clients, for every zone. |
+| Not a negative trust anchor (`domain-insecure:` as in Unbound) | Not needed for this case; still a possible operator tool for a zone broken at its own answers. |
+
 ### Older ones
 
 | decision | why |

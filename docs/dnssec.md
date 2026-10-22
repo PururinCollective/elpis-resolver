@@ -37,6 +37,24 @@ matters most for records that arrive with no signature at all:
 produced each record as it accepts it, so the question is answered from fact
 rather than inferred from whatever else shares the message.</sub>
 
+### A nameserver's address is only an address
+
+When Elpis looks up a nameserver's address so it can send to that server, the
+address is used for that and nothing else. If it fails validation, the server
+is still asked, but the address is never handed to a client or kept in a
+cache. Ask for that name directly and you get SERVFAIL, as 1.1.1.1 and 8.8.8.8
+do.
+
+| the zone being asked is | what a forged address could do |
+|---|---|
+| signed | nothing: the answer is checked against the zone's own chain, whichever server sent it, so it can only fail |
+| unsigned | no more than forging the answer itself |
+
+<sub>Glue, which is never signed, has always been used this way. Before this,
+a zone whose nameservers lived in a zone with expired signatures had no server
+left to ask: `fitgirl-repacks.site`, served by `ns1`/`ns2.terradns.org`, was
+SERVFAIL with `No Reachable Authority`.</sub>
+
 ## 🧬 Post-quantum downgrade
 
 A zone can be signed with two algorithms at once, say ECDSA P-256 and

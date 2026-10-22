@@ -14,6 +14,24 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**A zone whose nameservers' own addresses fail validation is still asked.**
+`ns1` and `ns2.terradns.org` are in a zone whose signatures ran out at the
+end of July 2026. Elpis refused those addresses as bogus, like any answer,
+and that left the zones they serve with no server to ask: `fitgirl-repacks.site`,
+an unsigned zone with nothing wrong in it, was SERVFAIL (EDE 22), while 1.1.1.1
+and 8.8.8.8 both answered it. An address looked up for a nameserver is now
+used to reach that server, even when it fails validation, and for nothing
+else. It is never handed to a client or kept in a cache, so asking for
+`ns1.terradns.org` itself is still SERVFAIL (EDE 7), as it is at 1.1.1.1 and
+8.8.8.8. Nothing is given up: an answer from a signed zone is checked against
+that zone's own chain, whichever server sent it, and anyone able to forge an
+address could forge an unsigned zone's answer directly. The log line ends
+`used only as a nameserver's address` instead of `replying SERVFAIL`.
+
 ## 2.6.0 "Borrowed Wings" — 2026-10-12
 
 The long way round. A few zones' servers won't answer Elpis, while Cloudflare

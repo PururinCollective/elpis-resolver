@@ -134,6 +134,13 @@ Reading it, left to right:
 | `NSEC/NSEC3 records, which do not prove` | A "no such name" or "no such data" whose proof doesn't cover the question. |
 | `DS says ... digest does not match` | The parent's DS and the child's DNSKEY disagree: the zone's own mistake, usually after a key change at the registrar. |
 
+> [!NOTE]
+> A line that ends `used only as a nameserver's address`, not `replying
+> SERVFAIL`, is about a nameserver's address that Elpis looked up for itself.
+> No client was refused: the zone that server answers for was still asked,
+> and only a client asking for that address by name gets SERVFAIL. See
+> [A nameserver's address is only an address](dnssec.md#a-nameservers-address-is-only-an-address).
+
 > [!TIP]
 > Zone or here? Ask a validating public resolver the same question. If 1.1.1.1
 > answers it with AD set, the zone is fine, and the log line is the thing to
