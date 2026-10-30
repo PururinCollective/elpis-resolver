@@ -28,6 +28,8 @@
 static void task_finish(elpis_task_t *t);
 static void cache_store_answer(elpis_task_t *t);
 static void note_refresh_outcome(elpis_task_t *t);
+static void stale_refresh(elpis_task_t *t);
+static void stale_refresh_done(elpis_task_t *t, int usable);
 
 /* ================================================================== */
 /* Small helpers                                                       */
@@ -594,10 +596,14 @@ static int cache_try(elpis_task_t *t)
                 add_negative_soa(t, b);
                 chain_sec(t, b->sec);
                 t->from_cache = 1;
+                if (b->ttl == 0)
+                    t->served_stale = 1;
                 return 1;
             }
             if (b->count > 0) {
                 add_rrset(t, ELPIS_SEC_ANSWER, b);
+                if (b->ttl == 0)
+                    t->served_stale = 1;
                 t->rcode = ELPIS_RC_NOERROR;
                 chain_sec(t, b->sec);
                 t->from_cache = 1;
@@ -627,6 +633,14 @@ static int cache_try(elpis_task_t *t)
                 return 0;
             add_rrset(t, ELPIS_SEC_ANSWER, b);
             chain_sec(t, b->sec);
+            /*
+             * A link past its TTL: the answer's smallest TTL is then 0, so
+             * cache_store_answer() files it nowhere, and without a message-
+             * cache entry no prefetch ever comes for it.  See
+             * stale_refresh().
+             */
+            if (b->ttl == 0)
+                t->served_stale = 1;
             elpis_name_lower(&target);
             if (elpis_name_eq(&target, &t->qname))
                 return 0;                  /* self-referential CNAME */
@@ -2776,7 +2790,7 @@ static int nxdomain_storable(const elpis_task_t *t)
 static void task_finish(elpis_task_t *t)
 {
     elpis_worker_t *w = t->w;
-    int withheld = 0;
+    int withheld = 0, usable;
 
     if (t->state == ELPIS_TS_DEAD)
         return;
@@ -2909,12 +2923,18 @@ static void task_finish(elpis_task_t *t)
      * name whose prebuilt response has expired permanently on the slow path,
      * reassembling the same records on every query.
      */
-    if (t->sec != ELPIS_SEC_BOGUS && !withheld &&
-        (t->rcode == ELPIS_RC_NOERROR ||
-         (t->rcode == ELPIS_RC_NXDOMAIN && nxdomain_storable(t))))
+    usable = t->sec != ELPIS_SEC_BOGUS && !withheld &&
+             (t->rcode == ELPIS_RC_NOERROR ||
+              (t->rcode == ELPIS_RC_NXDOMAIN && nxdomain_storable(t)));
+    if (usable)
         cache_store_answer(t);
     else if (t->prefetch)
         note_refresh_outcome(t);
+    /* An answer with a stale RRset in it was filed nowhere: stale_refresh(). */
+    if (t->stale_refresh)
+        stale_refresh_done(t, usable);
+    else if (t->served_stale && t->has_client)
+        stale_refresh(t);
 
     /*
      * Completion callbacks run for parent-less tasks too: priming and cache
@@ -3001,6 +3021,103 @@ static void note_refresh_outcome(elpis_task_t *t)
                      t->qclass);
     elpis_rcache_del(t->w->ctx->rcache, &t->orig_qname, ELPIS_T_CNAME,
                      t->qclass);
+}
+
+/*
+ * An answer built here with an RRset past its TTL in it gets a refresh of its
+ * own question.
+ *
+ * The message cache refreshes its own entries: a hit on one that is stale,
+ * or nearly so, sends a prefetch.  An answer built from the RRset cache with
+ * a stale set in it has no entry to hit -- its smallest TTL is 0, and
+ * cache_store_answer() keeps nothing at 0 -- so no refresh was ever sent for
+ * it, and the stale sets went out for as long as serve-stale kept them, a
+ * day, or until their signatures ran out.  admin.microsoft.com is a chain of
+ * five, through three zones; on 2.6.1 at 192.168.89.101, admin-portal.
+ * office.com and m365adminportal.anc.tm.svc.cloud.microsoft were at TTL 0 in
+ * all 852 answers over ten minutes, each one rebuilt and revalidated, and
+ * neither was asked of its zone again.  RFC 8767 serves stale data while it
+ * cannot be refreshed, not in place of refreshing it.
+ *
+ * The client still gets the stale answer now, as from a stale message-cache
+ * entry.  The refresh asks the question again at every link, as a prefetch
+ * does, and files what comes back in the message cache for the next client.
+ * At most one a second for a question, never two at once, and backing off to
+ * a minute while they keep failing, as the message cache's own do.  Only for
+ * a client's question.  A nameserver's address taken stale by the lookup that
+ * needed it is left as it was, and the validator's DNSKEY and DS sets come
+ * through val_cached(), not here.
+ */
+static uint64_t stale_key(const elpis_task_t *t)
+{
+    elpis_mkey_t k;
+    uint8_t folded[ELPIS_MAX_NAME];
+
+    task_mkey(t, &k, folded);
+    /* And by subnet: what comes back can be tailored to each one. */
+    if (t->ecs.family != 0) {
+        k.ecs = t->ecs;
+        k.ecs.scope = 0;
+        elpis_mkey_hash(&k);
+    }
+    return k.hash ? k.hash : 1u;
+}
+
+static void stale_refresh(elpis_task_t *t)
+{
+    elpis_worker_t *w = t->w;
+    const elpis_conf_t *c = &w->ctx->conf;
+    uint64_t k = stale_key(t);
+    elpis_stale_slot_t *s = &w->stale[k % ELPIS_STALE_SLOTS];
+    uint32_t now = elpis_cached_now_s();
+    elpis_task_t *r;
+
+    /* Refreshes stop at half of max-pending, as in server.c. */
+    if (w->ctx->shutdown || w->n_tasks >= c->max_pending / 2u)
+        return;
+    if (s->key == k) {
+        unsigned f = s->fails > 6u ? 6u : s->fails;
+        /* A refresh ends by its deadline, so a busy slot older than that
+         * lost its ending somehow, and is not waited on. */
+        if (s->busy && now - s->at <= c->query_total_ms / 1000u + 1u)
+            return;
+        if (!s->busy && now - s->at < (1u << f))
+            return;
+    }
+    r = elpis_task_new(w);
+    if (r == NULL)
+        return;
+    if (s->key != k) {
+        s->key   = k;
+        s->fails = 0;
+    }
+    s->at   = now;
+    s->busy = 1;
+
+    r->qname         = t->orig_qname;
+    r->qtype         = t->orig_qtype;
+    r->qclass        = t->qclass;
+    r->prefetch      = 1;
+    r->stale_refresh = 1;
+    /* The same message-cache entry the client's own answer would have made:
+     * its DO and CD bits, and its subnet. */
+    r->client_do = t->client_do;
+    r->client_cd = t->client_cd;
+    r->ecs       = t->ecs;
+    elpis_stat_inc(&w->stats.prefetches, 1);
+    elpis_task_start(r);
+}
+
+static void stale_refresh_done(elpis_task_t *t, int usable)
+{
+    uint64_t k = stale_key(t);
+    elpis_stale_slot_t *s = &t->w->stale[k % ELPIS_STALE_SLOTS];
+
+    if (s->key != k)
+        return;                         /* taken over by another question */
+    s->busy  = 0;
+    s->at    = elpis_cached_now_s();
+    s->fails = usable ? 0u : (uint8_t)(s->fails < 15u ? s->fails + 1u : 15u);
 }
 
 /*

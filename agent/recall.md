@@ -25,6 +25,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.5.0 "Erdentempel" | 2026-10-10 | A built-in blocklist (`src/blocklist.c`, 11 names from the ElpisDNS honeypot) answers REFUSED + EDE 15 before the cache; `blocklist: no` turns it off. `elpis -t` exits 1 on a bad value. Ran on the maintainer's resolver for ~5 h as `main@d97dea6f9183` before the bump |
 | 2.6.0 "Borrowed Wings" | 2026-10-12 | A built-in forward list (`src/forwardlist.c`: `charter.com`, `usda.gov`) asks Cloudflare and Google, IPv4 and IPv6, never with ECS, and falls back to the zone's own servers when they all fail; `forwardlist: no` turns it off. A route's addresses past 4 IPv4 / 2 IPv6 were dropped and all took the last port; fixed. Tested on scratch instances only, not on the maintainer's resolver, before the bump |
 | 2.6.1 "Faded Signposts" | 2026-10-23 | A nameserver's address that fails validation is used to reach that server and for nothing else, never served or cached: `fitgirl-repacks.site` (NS `ns1`/`ns2.terradns.org`, whose zone's signatures had expired) had been SERVFAIL EDE 22. Tested on scratch instances only, with gcc only (no clang on the box) |
+| 2.6.2 "Turned Hourglass" | 2026-10-30 | An answer built from the RRset cache with a link past its TTL sends one throttled background refresh of the question; before, it went out at TTL 0 and was never refreshed (`admin.microsoft.com`: two links at TTL 0 for 10 min on the user's 192.168.89.101). Rebuilt with the fix and run on the user's 192.168.89.102 before the bump, where `admin.microsoft.com` answered. gcc 13.3 and clang 18.1 |
 
 ## 🧭 Decisions, and why
 
@@ -109,6 +110,16 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | The user's two ideas, declined: comparing with 1.1.1.1/8.8.8.8, and accepting expired signatures | Both public resolvers SERVFAIL the failing names themselves, so there was nothing to compare; agreement isn't authentication, and it would send every bogus name to them. Expiry is replay protection; `signature-clock-skew:` is for clocks. `dnssec-permissive: yes` also "fixed" it, but serves `ns1.terradns.org` as NOERROR to clients, for every zone. |
 | Not a negative trust anchor (`domain-insecure:` as in Unbound) | Not needed for this case; still a possible operator tool for a zone broken at its own answers. |
 
+### Stale links in answers built from the RRset cache (2.6.2)
+
+| decision | why |
+|---|---|
+| `cache_try()` sets `served_stale` when it adds an RRset at TTL 0. `task_finish()` then sends one refresh of the client's question (`prefetch` + `stale_refresh`), and the client still gets the stale answer | 2026-10-30, the user's 192.168.89.101 on 2.6.1: the `admin-portal.office.com` and `m365adminportal.anc.tm.svc.cloud.microsoft` CNAMEs were at TTL 0 in all 852 answers over 10 min. Such an answer's smallest TTL is 0, so it gets no message-cache entry, and so no prefetch ever comes. Reproduced on 2.6.1 with the clock-shift shim at +7400 s, with and without a client subnet; with the fix, every link is fresh on the second ask. Stale first and refresh in the background matches the message cache's stale path, rather than making the client wait. |
+| The throttle is per worker, `w->stale[256]`, keyed by the message-cache key's hash plus the client subnet. One refresh in flight, the next no sooner than 1 s after the last, backing off 2^fails up to 64 s. A busy slot older than `query-total-timeout` is ignored | Without a throttle, every query for a stale name while upstream is down starts another 20 s refresh. It's per worker and not shared: a worker's tasks are its own, and a collision only costs an extra refresh. |
+| Only for a client's question (`has_client`) | Kept to the case that was seen. A nameserver address that an NSADDR child takes stale from `cache_try()` is still never refreshed by this; no harm from that has been seen. Stale DNSKEY/DS goes through `val_cached()`, not `cache_try()`. |
+| An NXDOMAIN from such a refresh counts as a failure | There's no message-cache entry to count `refresh-nxdomain-confirmations` in, so the stale answer stays, as before, with backoff. Deleting `orig_qname`'s records, as `note_refresh_outcome()` does, wouldn't reach a stale link deeper in the chain. Open. |
+| No EDE 3 and no `serve-stale-reply-ttl` on these answers | Left as it was: they still go out at TTL 0 with no EDE, unlike a stale message-cache hit (TTL 30, EDE 3). Now it lasts for one answer, not a day. |
+
 ### Older ones
 
 | decision | why |
@@ -172,7 +183,10 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
   `CLOCK_REALTIME` and `CLOCK_MONOTONIC` works (`clock_gettime` and `time`;
   re-read the file every 200 ms). Real upstreams sign live: pick the shift so
   the cached signature has expired but a fresh one has not (Route 53: cache,
-  wait 3 min, shift +63 min).
+  wait 3 min, shift +63 min). After the shift, ask a name that is only in
+  the RRset cache, such as a chain's middle link or the AAAA when only the A
+  was asked. A name in the message cache takes that cache's stale path
+  instead.
 
 ## 📌 Open items
 
@@ -184,3 +198,5 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | P-256 key share | only if the "no X25519" counter shows real servers need it. |
 | README contact for commercial support | a TODO comment, waiting on the maintainer. |
 | `accounts.pandasecurity.com` on the maintainer's box | 2026-10-08: SERVFAIL EDE 6 on every query for minutes, healed after a fresh DNSKEY/CNAME fetch. Reproduced locally only as EDE 7 (stale CNAME past its signature), which heals after one failure; the fix covers stale answers and stale DNSKEY/DS/denials past their signatures. The box's own log line was not seen, so its exact EDE 6 path is unconfirmed. |
+| `admin.microsoft.com` false EDE 6 on the user's 192.168.89.102/.103 | 2026-10-30, 2.6.1: SERVFAIL EDE 6 for every name from `admin-portal.office.com` down to the `afdcafe` CNAME. Every signature and every `+cd` copy verified offline, and every box held the right keys; it healed by itself in about 5 min. Not reproduced locally in 10 min of polling, nor with a clock shift. The stale-link fix above isn't known to be the cause. The `dnssec: bogus answer for ...` log line from those boxes is the next step. Same shape as the 2026-09-29 false bogus. .102 answered after it was rebuilt with the fix, but a rebuild restarts Elpis with empty caches, so that doesn't show the cause is gone. |
+| `test_dot` fails on a long-up machine | "unavailable: plain for good, its entry kept for it" uses a fixed `now = 1000000` but checks against the real monotonic `elpis_cached_now_s()`, so it fails once uptime is past about 13.6 days. Seen 2026-10-30 at 29.6 days; fails the same way on 2.6.1. A test bug, not a regression. |

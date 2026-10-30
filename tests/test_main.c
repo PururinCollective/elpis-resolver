@@ -6586,6 +6586,317 @@ out:
     elpis_free(w);
 }
 
+/* ================================================================== */
+/*
+ * An answer built from the RRset cache with a link past its TTL in it.
+ * Nothing ever refreshed one: it had no message-cache entry for a prefetch to
+ * come from, so the stale links went out at TTL 0 for as long as serve-stale
+ * kept them.  Two of admin.microsoft.com's five did, in every answer for ten
+ * minutes.  The client still has the stale answer at once, and a refresh
+ * goes out beside it: one at a time, backing off while they fail.  Queries
+ * come in through the real UDP handler; the forwarder for stale.test. is a
+ * socket on 127.0.0.1.
+ */
+
+/* Ask `name` A of the worker as a client: the reply's length, or -1. */
+static ssize_t stale_ask(elpis_worker_t *w, int lfd, int cfd,
+                         const elpis_addr_t *srv, const char *name,
+                         uint8_t *out, size_t cap)
+{
+    uint8_t q[512];
+    size_t ql = 12;
+    elpis_name_t n;
+    elpis_ev_t ev;
+    struct pollfd pfd;
+    int i;
+
+    memset(q, 0, 12);
+    q[0] = 0x5A; q[1] = 0x1E;           /* ID */
+    q[2] = 0x01;                        /* RD */
+    q[5] = 1;                           /* one question, no OPT */
+    elpis_name_from_text(&n, name);
+    memcpy(q + ql, n.d, n.len); ql += n.len;
+    elpis_put16(q + ql, ELPIS_T_A); ql += 2;
+    elpis_put16(q + ql, ELPIS_CLASS_IN); ql += 2;
+
+    if (sendto(cfd, q, ql, 0, &srv->u.sa, srv->len) != (ssize_t)ql)
+        return -1;
+    pfd.fd = lfd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) != 1)
+        return -1;
+    memset(&ev, 0, sizeof ev);
+    ev.fd   = lfd;
+    ev.data = w;
+    elpis_server_udp_event(NULL, &ev, ELPIS_EV_READ);
+    /* Sent already from the message cache, or by a task on the loop. */
+    pfd.fd = cfd;
+    for (i = 0; i < 200; i++) {
+        if (poll(&pfd, 1, 0) == 1)
+            return recv(cfd, out, cap, 0);
+        elpis_loop_once(w->loop, 10);
+    }
+    return -1;
+}
+
+/* The TTL of the reply's first answer record of `type`, and its rdata; -1
+ * when there is none. */
+static long stale_ttl(const uint8_t *r, ssize_t len, uint16_t type,
+                      const uint8_t **rd)
+{
+    elpis_msg_t m;
+    elpis_rr_iter_t it;
+    elpis_rr_t rr;
+    int drop;
+
+    if (len < ELPIS_HDR_LEN ||
+        elpis_msg_parse(&m, r, (size_t)len, ELPIS_PARSE_RESPONSE, &drop) !=
+            ELPIS_OK)
+        return -1;
+    elpis_rr_iter(&it, &m, ELPIS_SEC_ANSWER);
+    while (elpis_rr_next(&it, &rr, &drop) == ELPIS_OK) {
+        if (rr.type != type)
+            continue;
+        if (rd != NULL)
+            *rd = r + rr.rdoff;
+        return (long)rr.ttl;
+    }
+    return -1;
+}
+
+/* Refreshes of stale answers still out. */
+static unsigned stale_pending(const elpis_worker_t *w)
+{
+    const elpis_task_t *t;
+    unsigned n = 0;
+    for (t = w->tasks; t != NULL; t = t->live_next)
+        n += t->stale_refresh;
+    return n;
+}
+
+/*
+ * Answer one query on `afd` as stale.test.'s forwarder, at TTL 300: web.
+ * stale.test. with 192.0.2.`octet`, anything else with a CNAME to it and
+ * that address.  The name asked goes in *asked.  1 when it was answered.
+ */
+static int stale_forward(int afd, uint8_t octet, elpis_name_t *asked)
+{
+    uint8_t q[512], a[512], addr[4] = { 192, 0, 2, 0 };
+    struct sockaddr_in from;
+    socklen_t flen = sizeof from;
+    elpis_msg_t m;
+    elpis_name_t web;
+    elpis_bld_t b;
+    size_t pos;
+    ssize_t got;
+    int drop;
+
+    got = recvfrom(afd, q, sizeof q, 0, (struct sockaddr *)&from, &flen);
+    if (got < ELPIS_HDR_LEN ||
+        elpis_msg_parse(&m, q, (size_t)got, ELPIS_PARSE_QUERY, &drop) !=
+            ELPIS_OK)
+        return 0;
+    *asked = m.qname;
+    addr[3] = octet;
+    elpis_name_from_text(&web, "web.stale.test.");
+    elpis_bld_init(&b, a, sizeof a, NULL, 0);
+    elpis_bld_header(&b, m.hdr.id, (uint16_t)(ELPIS_FLAG_QR | ELPIS_FLAG_RD |
+                                              ELPIS_FLAG_RA));
+    elpis_bld_question_raw(&b, q + ELPIS_HDR_LEN, m.qname.len, m.qtype,
+                           m.qclass);
+    if (!elpis_name_eq(&m.qname, &web)) {
+        elpis_bld_rr_begin(&b, &m.qname, ELPIS_T_CNAME, ELPIS_CLASS_IN, 300,
+                           &pos);
+        elpis_bld_name_raw(&b, &web);
+        elpis_bld_rr_end(&b, pos);
+        elpis_bld_count(&b, ELPIS_SEC_ANSWER, 1);
+    }
+    elpis_bld_rr_begin(&b, &web, ELPIS_T_A, ELPIS_CLASS_IN, 300, &pos);
+    elpis_bld_bytes(&b, addr, sizeof addr);
+    elpis_bld_rr_end(&b, pos);
+    elpis_bld_count(&b, ELPIS_SEC_ANSWER, 1);
+    elpis_bld_finish(&b);
+    return sendto(afd, a, b.len, 0, (struct sockaddr *)&from, flen) ==
+           (ssize_t)b.len;
+}
+
+static void test_stale_refresh(void)
+{
+    static elpis_rrset_buf_t set;
+    elpis_ctx_t *ctx = (elpis_ctx_t *)elpis_calloc(1, sizeof *ctx);
+    elpis_worker_t *w = (elpis_worker_t *)elpis_calloc(1, sizeof *w);
+    elpis_name_t www, ftp, web, asked;
+    elpis_addr_t srv;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof sin;
+    struct pollfd pfd;
+    uint8_t r[512], addr[4] = { 192, 0, 2, 1 };
+    const uint8_t *rd = NULL;
+    char line[96];
+    uint32_t t0;
+    ssize_t got;
+    unsigned i, asks = 0;
+    int lfd = -1, cfd = -1, afd = -1;
+
+    section("an answer with a stale link in it is refreshed");
+    CHECK(ctx != NULL && w != NULL, "set up");
+    if (ctx == NULL || w == NULL)
+        goto out;
+    elpis_conf_defaults(&ctx->conf);
+    ctx->conf.max_pending = 64;
+    ctx->conf.do_ipv6     = 0;
+    ctx->conf.out_sockets = 2;
+    ctx->conf.dnssec      = 0;          /* freshness, not signatures */
+    ctx->infra  = elpis_infra_new(1u << 20, 2);
+    ctx->rcache = elpis_rcache_new(1u << 20, 2);
+    ctx->mcache = elpis_mcache_new(1u << 20, 2);
+    ctx->dcache = elpis_dcache_new(1u << 20, 2);
+    w->ctx     = ctx;
+    w->loop    = elpis_loop_new(16);
+    w->rxbuf   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->txbuf   = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd1     = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->rd2     = (uint8_t *)elpis_malloc(ELPIS_MAX_MSG + 16);
+    w->ctab    = (elpis_cslot_t *)elpis_calloc(ELPIS_BLD_CTAB,
+                                               sizeof(elpis_cslot_t));
+    w->rrbuf   = (elpis_rrset_buf_t *)elpis_malloc(sizeof *w->rrbuf);
+    w->ttl_off = (uint32_t *)elpis_malloc(4096 * sizeof(uint32_t));
+    w->ttl_val = (uint32_t *)elpis_malloc(4096 * sizeof(uint32_t));
+    elpis_addr_parse(&srv, "127.0.0.1", 0);
+    cfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ctx->infra == NULL || ctx->rcache == NULL || ctx->mcache == NULL ||
+        ctx->dcache == NULL || w->loop == NULL || w->rxbuf == NULL ||
+        w->txbuf == NULL || w->rd1 == NULL || w->rd2 == NULL ||
+        w->ctab == NULL || w->rrbuf == NULL || w->ttl_off == NULL ||
+        w->ttl_val == NULL || cfd < 0 ||
+        elpis_sock_udp_listen(&srv, 0, &afd) != ELPIS_OK ||
+        getsockname(afd, (struct sockaddr *)&sin, &slen) != 0 ||
+        elpis_out_init(w) != ELPIS_OK) {
+        CHECK(0, "caches, sockets on 127.0.0.1 and an outbound pool");
+        goto out;
+    }
+    snprintf(line, sizeof line, "forward-zone: stale.test 127.0.0.1@%u",
+             (unsigned)ntohs(sin.sin_port));
+    CHECK(elpis_conf_parse_line(&ctx->conf, line, "-", 1) == ELPIS_OK,
+          "stale.test. is forwarded to the test's socket");
+    slen = sizeof sin;
+    if (elpis_sock_udp_listen(&srv, 0, &lfd) != ELPIS_OK ||
+        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0) {
+        CHECK(0, "a socket on 127.0.0.1 for clients");
+        goto out;
+    }
+    elpis_addr_parse(&srv, "127.0.0.1", ntohs(sin.sin_port));
+
+    /* Two CNAMEs at TTL 1 to an address at TTL 3600, all in the RRset cache
+     * and none in the message cache. */
+    elpis_name_from_text(&www, "www.stale.test.");
+    elpis_name_from_text(&ftp, "ftp.stale.test.");
+    elpis_name_from_text(&web, "web.stale.test.");
+    elpis_clock_tick();
+    t0 = elpis_cached_now_s();
+    elpis_rrset_buf_init(&set, &www, ELPIS_T_CNAME, ELPIS_CLASS_IN, 1);
+    elpis_rrset_buf_add(&set, web.d, web.len);
+    set.sec = ELPIS_SEC_INSECURE;
+    elpis_rcache_put_buf(ctx->rcache, &set, ctx->conf.serve_stale, 0);
+    elpis_rrset_buf_init(&set, &ftp, ELPIS_T_CNAME, ELPIS_CLASS_IN, 1);
+    elpis_rrset_buf_add(&set, web.d, web.len);
+    set.sec = ELPIS_SEC_INSECURE;
+    elpis_rcache_put_buf(ctx->rcache, &set, ctx->conf.serve_stale, 0);
+    elpis_rrset_buf_init(&set, &web, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+    elpis_rrset_buf_add(&set, addr, sizeof addr);
+    set.sec = ELPIS_SEC_INSECURE;
+    elpis_rcache_put_buf(ctx->rcache, &set, ctx->conf.serve_stale, 0);
+    /* A second on, both CNAMEs are past their TTL, and kept stale. */
+    while (elpis_now_s() == t0)
+        poll(NULL, 0, 20);
+    elpis_clock_tick();
+
+    got = stale_ask(w, lfd, cfd, &srv, "www.stale.test.", r, sizeof r);
+    CHECK(got > 0 && (r[3] & 0x0Fu) == ELPIS_RC_NOERROR &&
+          stale_ttl(r, got, ELPIS_T_CNAME, NULL) == 0 &&
+          stale_ttl(r, got, ELPIS_T_A, NULL) > 0,
+          "the client has the stale CNAME at once, at TTL 0");
+    CHECK(w->stats.prefetches == 1 && stale_pending(w) == 1,
+          "and a refresh of its question goes out (%llu)",
+          (unsigned long long)w->stats.prefetches);
+    got = stale_ask(w, lfd, cfd, &srv, "www.stale.test.", r, sizeof r);
+    CHECK(got > 0 && stale_ttl(r, got, ELPIS_T_CNAME, NULL) == 0 &&
+          w->stats.prefetches == 1,
+          "asked again before it is back: stale again, and no second "
+          "refresh (%llu)", (unsigned long long)w->stats.prefetches);
+
+    /* The forwarder answers whatever the refresh asks, until it is done. */
+    pfd.fd = afd;
+    pfd.events = POLLIN;
+    elpis_name_init_root(&asked);
+    for (i = 0; i < 300 && stale_pending(w) > 0; i++) {
+        elpis_name_t n;
+        if (poll(&pfd, 1, 0) == 1 && stale_forward(afd, 2, &n)) {
+            if (asks++ == 0)
+                asked = n;
+            continue;
+        }
+        elpis_loop_once(w->loop, 10);
+    }
+    CHECK(asks >= 1 && elpis_name_eq(&asked, &www) && stale_pending(w) == 0,
+          "the refresh asks the forwarder for www.stale.test. itself, and "
+          "is done (%u asked)", asks);
+    got = stale_ask(w, lfd, cfd, &srv, "www.stale.test.", r, sizeof r);
+    CHECK(got > 0 && stale_ttl(r, got, ELPIS_T_CNAME, NULL) > 0 &&
+          stale_ttl(r, got, ELPIS_T_A, &rd) > 0 && rd != NULL && rd[3] == 2 &&
+          w->stats.cache_hits == 1,
+          "the next client has the fresh answer, out of the message cache");
+
+    /* A refresh that fails holds the next one back. */
+    ctx->conf.query_total_ms = 200;     /* the forwarder will not answer */
+    got = stale_ask(w, lfd, cfd, &srv, "ftp.stale.test.", r, sizeof r);
+    CHECK(got > 0 && stale_ttl(r, got, ELPIS_T_CNAME, NULL) == 0 &&
+          w->stats.prefetches == 2 && stale_pending(w) == 1,
+          "ftp.stale.test.: stale, and refreshed");
+    for (i = 0; i < 300 && stale_pending(w) > 0; i++)
+        elpis_loop_once(w->loop, 10);
+    while (poll(&pfd, 1, 0) == 1 &&
+           recv(afd, r, sizeof r, 0) >= 0)
+        ;                               /* never answered */
+    CHECK(stale_pending(w) == 0, "the refresh runs out of time");
+    got = stale_ask(w, lfd, cfd, &srv, "ftp.stale.test.", r, sizeof r);
+    CHECK(got > 0 && stale_ttl(r, got, ELPIS_T_CNAME, NULL) == 0 &&
+          w->stats.prefetches == 2 && stale_pending(w) == 0,
+          "asked straight after: stale, and no refresh before the backoff "
+          "is over (%llu)", (unsigned long long)w->stats.prefetches);
+
+out:
+    if (lfd >= 0)
+        close(lfd);
+    if (cfd >= 0)
+        close(cfd);
+    if (afd >= 0)
+        close(afd);
+    if (w != NULL) {
+        if (w->loop != NULL) {
+            elpis_resolver_fini(w);
+            elpis_out_fini(w);
+            elpis_loop_free(w->loop);
+        }
+        elpis_free(w->rxbuf);
+        elpis_free(w->txbuf);
+        elpis_free(w->rd1);
+        elpis_free(w->rd2);
+        elpis_free(w->ctab);
+        elpis_free(w->rrbuf);
+        elpis_free(w->ttl_off);
+        elpis_free(w->ttl_val);
+    }
+    if (ctx != NULL) {
+        elpis_cache_free(ctx->infra);
+        elpis_cache_free(ctx->rcache);
+        elpis_cache_free(ctx->mcache);
+        elpis_cache_free(ctx->dcache);
+    }
+    elpis_free(ctx);
+    elpis_free(w);
+}
+
 static void test_tlscrypto(void)
 {
     test_hkdf();
@@ -6650,6 +6961,7 @@ int main(void)
     test_caps_exempt();
     test_edns_refusal();
     test_pool_refill();
+    test_stale_refresh();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
