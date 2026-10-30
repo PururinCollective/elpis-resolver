@@ -27,8 +27,8 @@ from "cold" to "useful" fast, and remember what earlier sessions learned.
 | What | A recursive, DNSSEC-validating DNS resolver. It asks the root, TLDs and authoritative servers itself; the only forwarding by default is the built-in forward list (`src/forwardlist.c`), a few zones that won't answer it, asked of 1.1.1.1 and 8.8.8.8 |
 | Language | Strict C99 + POSIX.1-2008. GNU make. No dependencies: crypto, TLS 1.3 client, event loop and DNS wire format are in-tree. Links libc, `-lm`, `-pthread` |
 | Build | `make` → `bin/elpis` and `bin/elpis.conf` |
-| Test | `make test` → `bin/elpis-test`: 784 checks at 2.6.1, no network needed |
-| Version | `VERSION` and `CODENAME` in the `Makefile`: 2.6.1 "Faded Signposts" |
+| Test | `make test` → `bin/elpis-test`: 794 checks at 2.6.2, no network needed |
+| Version | `VERSION` and `CODENAME` in the `Makefile`: 2.6.2 "Turned Hourglass" |
 | Default listen | `127.0.0.1:5335` (not 5353: that's mDNS) |
 | Config | `elpis.conf` in the tree is the reference; `bin/elpis.conf` is the user's copy, 3-way merged on `make` |
 | Status page | `web/index.html`, compiled into `src/webui/webui_assets.h` by `make` (python3) |

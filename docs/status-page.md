@@ -67,14 +67,14 @@ The About window carries the version, the release name, and the commit `make`
 built from:
 
 ```
-version   2.6.1
-release   Faded Signposts
-build     v2.6.1
+version   2.6.2
+release   Turned Hourglass
+build     v2.6.2
 ```
 
 | Built from | build reads |
 |---|---|
-| a release tag | `v2.6.1` |
+| a release tag | `v2.6.2` |
 | any other commit | branch and commit, `main@bcc97d252fac` |
 | a tarball, no git | *not a git checkout* |
 

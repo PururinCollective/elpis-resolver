@@ -25,6 +25,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.5.0 "Erdentempel" | 2026-10-10 | A built-in blocklist (`src/blocklist.c`, 11 names from the ElpisDNS honeypot) answers REFUSED + EDE 15 before the cache; `blocklist: no` turns it off. `elpis -t` exits 1 on a bad value. Ran on the maintainer's resolver for ~5 h as `main@d97dea6f9183` before the bump |
 | 2.6.0 "Borrowed Wings" | 2026-10-12 | A built-in forward list (`src/forwardlist.c`: `charter.com`, `usda.gov`) asks Cloudflare and Google, IPv4 and IPv6, never with ECS, and falls back to the zone's own servers when they all fail; `forwardlist: no` turns it off. A route's addresses past 4 IPv4 / 2 IPv6 were dropped and all took the last port; fixed. Tested on scratch instances only, not on the maintainer's resolver, before the bump |
 | 2.6.1 "Faded Signposts" | 2026-10-23 | A nameserver's address that fails validation is used to reach that server and for nothing else, never served or cached: `fitgirl-repacks.site` (NS `ns1`/`ns2.terradns.org`, whose zone's signatures had expired) had been SERVFAIL EDE 22. Tested on scratch instances only, with gcc only (no clang on the box) |
+| 2.6.2 "Turned Hourglass" | 2026-10-30 | An answer built from the RRset cache with a link past its TTL sends one throttled background refresh of the question; before, it went out at TTL 0 and was never refreshed (`admin.microsoft.com`: two links at TTL 0 for 10 min on the user's 192.168.89.101). Rebuilt with the fix and run on the user's 192.168.89.102 before the bump, where `admin.microsoft.com` answered. gcc 13.3 and clang 18.1 |
 
 ## 🧭 Decisions, and why
 
@@ -109,7 +110,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | The user's two ideas, declined: comparing with 1.1.1.1/8.8.8.8, and accepting expired signatures | Both public resolvers SERVFAIL the failing names themselves, so there was nothing to compare; agreement isn't authentication, and it would send every bogus name to them. Expiry is replay protection; `signature-clock-skew:` is for clocks. `dnssec-permissive: yes` also "fixed" it, but serves `ns1.terradns.org` as NOERROR to clients, for every zone. |
 | Not a negative trust anchor (`domain-insecure:` as in Unbound) | Not needed for this case; still a possible operator tool for a zone broken at its own answers. |
 
-### Stale links in answers built from the RRset cache (unreleased)
+### Stale links in answers built from the RRset cache (2.6.2)
 
 | decision | why |
 |---|---|

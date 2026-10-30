@@ -14,7 +14,14 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.6.2 "Turned Hourglass" — 2026-10-30
+
+The sand had run out, and nobody turned the glass. A record in an answer
+that had gone past its TTL now gets asked for again, instead of going out at
+TTL 0 for a day. `admin.microsoft.com` had two of its links stuck that way on
+one resolver.
+
+No config that worked stops working.
 
 ### Fixed
 
