@@ -309,6 +309,14 @@ struct elpis_task {
     unsigned        dns64_synth : 1;
     unsigned        revalidate : 1;   /* cache hit whose status is unknown */
     /*
+     * The answer has an RRset in it from past its TTL (RFC 8767), so it goes
+     * into no message-cache entry and no prefetch will ever come for it:
+     * task_finish() sends a refresh of the question instead.  stale_refresh
+     * is set on that refresh.  See stale_refresh() in resolver.c.
+     */
+    unsigned        served_stale : 1;
+    unsigned        stale_refresh : 1;
+    /*
      * The chain of trust could not be checked because DNSKEY or DS data was
      * unreachable -- distinct from "the signatures are wrong".  Both end in
      * SERVFAIL, but only one of them is an attack.
@@ -381,6 +389,21 @@ struct elpis_tcpconn {
 #define ELPIS_MAX_OSOCK 128
 #define ELPIS_MAX_LSOCK (ELPIS_MAX_LISTEN * 2)
 
+/*
+ * One question answered from stale RRsets, and its refresh: when the last one
+ * went out or came back, how many in a row came back unusable, and whether
+ * one is out now.  Direct mapped by the question's hash; a slot another
+ * question takes over only costs that one an extra refresh.
+ */
+#define ELPIS_STALE_SLOTS 256u
+
+typedef struct {
+    uint64_t key;
+    uint32_t at;        /* monotonic seconds */
+    uint8_t  fails;
+    uint8_t  busy;
+} elpis_stale_slot_t;
+
 struct elpis_worker {
     elpis_ctx_t    *ctx;
     unsigned        index;
@@ -436,6 +459,7 @@ struct elpis_worker {
      * is only held down for its silence while others are heard from. */
     uint64_t        last_answer_ms;
     elpis_wtm_t     tm;          /* status-page tallies, worker-local */
+    elpis_stale_slot_t stale[ELPIS_STALE_SLOTS];
 
     /* Last second of event-loop behaviour; see report_spin() in main.c. */
     uint64_t        loop_turns, loop_idle, loop_nosleep;

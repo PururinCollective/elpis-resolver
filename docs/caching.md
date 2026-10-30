@@ -100,6 +100,21 @@ window, a day by default. The attempts are backed off, so the count is really
 a length of time. Below it the glitch is absorbed and no client ever sees it;
 above it the records are dropped and the next query resolves for real.</sub>
 
+### Answers built from the RRset cache
+
+Not every question has a message-cache entry of its own. A client may ask for
+the AAAA when only the A was asked before, or for a name partway down a CNAME
+chain. Elpis builds those answers from the RRset cache instead. When a record
+in one is past its TTL, the client gets the stale answer straight away. A
+refresh of the whole question goes out alongside it, with the same backoff as
+above. The next client gets the fresh answer from the message cache.
+
+<sub>A stale record has a TTL of 0. An answer with a 0 in it never goes into
+the message cache, and before this, nothing else ever refreshed it. Two of the
+five links behind `admin.microsoft.com` went out at TTL 0 in every answer for
+ten minutes. An NXDOMAIN from such a refresh counts as a failed refresh: the
+confirmations above need a message-cache entry to count in.</sub>
+
 ### Stale, but not past its signatures
 
 A stale record is only worth serving while it can still be validated. Once
