@@ -106,6 +106,17 @@ int elpis_rsa_verify(const uint8_t *key, size_t keylen,
                      const uint8_t *sig, size_t siglen,
                      const uint8_t *hash, size_t hashlen, int hash_alg);
 
+/* Modulus sizes elpis_rsa_verify() accepts, in bits. */
+#define ELPIS_RSA_MIN_BITS 1024u
+#define ELPIS_RSA_MAX_BITS 4096u
+
+/*
+ * The modulus size of a DNSKEY RSA public key, in bits, or 0 when the key is
+ * malformed.  Lets a caller tell a key this build will not use apart from a
+ * signature that failed.
+ */
+unsigned elpis_rsa_modulus_bits(const uint8_t *key, size_t keylen);
+
 /* ---- ECDSA (RFC 6605) --------------------------------------------- */
 #define ELPIS_CURVE_P256 1
 #define ELPIS_CURVE_P384 2

@@ -6910,10 +6910,15 @@ static void test_tlscrypto(void)
 
 /* ================================================================== */
 /*
- * NODATA with no NSEC at the name itself, which Elpis called bogus and every
- * public resolver answers.  tracker.tiny-vps.com A is a wildcard NODATA: no
- * such name, and the wildcard that would have answered, *.tiny-vps.com, holds
- * only TXT.  An empty non-terminal is the other case.
+ * Two answers Elpis called bogus that every public resolver answers.
+ *
+ * tracker.tiny-vps.com A is a wildcard NODATA: no such name, and the
+ * wildcard that would have answered, *.tiny-vps.com, holds only TXT.  An
+ * empty non-terminal is the other NODATA with no NSEC at the name itself.
+ *
+ * cbn.net.id signs with 512-bit RSA keys, too small to use.  1.1.1.1 answers
+ * it as unsigned; that is right only when no usable signing key exists, or
+ * stripping a strong signature would turn any answer into an unsigned one.
  */
 static size_t t_bitmap(const uint16_t *types, unsigned nt, uint8_t *out)
 {
@@ -6966,6 +6971,23 @@ static void t_nsec3(elpis_denial_rr_t *r, uint8_t *rd, const uint8_t *h,
     n += t_bitmap(types, nt, rd + n);
     r->rd = rd;
     r->rdlen = (uint16_t)n;
+}
+
+/* A DNSKEY rdata with an RSA key of `bits` (a multiple of 8): e = 65537. */
+static size_t t_rsa_key(uint8_t *out, uint16_t flags, unsigned bits,
+                        uint8_t fill)
+{
+    size_t n = 0, mlen = bits / 8u;
+
+    elpis_put16(out, flags); n = 2;
+    out[n++] = 3;
+    out[n++] = ELPIS_ALG_RSASHA256;
+    out[n++] = 3;                       /* exponent length */
+    out[n++] = 0x01; out[n++] = 0x00; out[n++] = 0x01;
+    memset(out + n, fill, mlen);
+    out[n] |= 0x80;                     /* the top bit set: exactly `bits` */
+    out[n + mlen - 1] |= 0x01;          /* odd */
+    return n + mlen;
 }
 
 static void test_wildcard_nodata(void)
@@ -7061,6 +7083,78 @@ static void test_wildcard_nodata(void)
 
 }
 
+static void test_weak_rsa_keys(void)
+{
+    section("weak RSA keys");
+    {
+        static elpis_rrset_buf_t keys, set;
+        elpis_conf_t c;
+        elpis_name_t zone;
+        uint8_t k512[96], k1024[160], z1024[160], sig[128], a[4];
+        size_t l512, l1024, lz;
+        int64_t now = 1700000000;
+        int ede = -1, rc;
+        size_t o = 0;
+
+        elpis_conf_defaults(&c);
+        (void)elpis_name_from_text(&zone, "example.");
+        l512  = t_rsa_key(k512,  ELPIS_DNSKEY_ZONE, 512, 0x5a);
+        l1024 = t_rsa_key(k1024, ELPIS_DNSKEY_ZONE | ELPIS_DNSKEY_SEP, 1024, 0x3c);
+        lz    = t_rsa_key(z1024, ELPIS_DNSKEY_ZONE, 1024, 0x77);
+        CHECK(elpis_rsa_modulus_bits(k512 + 4, l512 - 4) == 512,
+              "a 64-octet modulus is 512 bits");
+        CHECK(elpis_rsa_modulus_bits(k1024 + 4, l1024 - 4) == 1024,
+              "a 128-octet modulus is 1024 bits");
+
+        /* An A record signed by the 512-bit key; the signature never gets
+         * as far as the arithmetic, so its bytes do not matter. */
+        elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+        a[0] = 192; a[1] = 0; a[2] = 2; a[3] = 1;
+        elpis_rrset_buf_add(&set, a, 4);
+        elpis_put16(sig + o, ELPIS_T_A); o += 2;
+        sig[o++] = ELPIS_ALG_RSASHA256;
+        sig[o++] = 1;
+        elpis_put32(sig + o, 3600); o += 4;
+        elpis_put32(sig + o, (uint32_t)(now + 86400)); o += 4;
+        elpis_put32(sig + o, (uint32_t)(now - 86400)); o += 4;
+        elpis_put16(sig + o, elpis_dnskey_tag(k512, l512)); o += 2;
+        memcpy(sig + o, zone.d, zone.len); o += zone.len;
+        memset(sig + o, 0x11, 64); o += 64;
+        elpis_rrset_buf_add_sig(&set, sig, (uint16_t)o);
+
+        /* cbn.net.id's shape: a 1024-bit KSK and only a 512-bit ZSK. */
+        elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+        elpis_rrset_buf_add(&keys, k1024, (uint16_t)l1024);
+        elpis_rrset_buf_add(&keys, k512, (uint16_t)l512);
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EUNSUPPORTED,
+              "signed only by a 512-bit ZSK, with no usable ZSK: unsupported, "
+              "so unsigned (rc %d)", rc);
+        CHECK(ede == ELPIS_EDE_UNSUPPORTED_DNSKEY, "with EDE 1 (got %d)", ede);
+
+        /* A usable ZSK beside it: a stripped strong signature, not a weak zone. */
+        elpis_rrset_buf_add(&keys, z1024, (uint16_t)lz);
+        ede = -1;
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EBOGUS,
+              "the same signature with a usable ZSK in the set is bogus "
+              "(rc %d)", rc);
+
+        /* A weak key with the SEP bit only: no signing key at all. */
+        elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+        k512[1] |= 0x01;
+        elpis_rrset_buf_add(&keys, k512, (uint16_t)l512);
+        sig[16] = (uint8_t)(elpis_dnskey_tag(k512, l512) >> 8);
+        sig[17] = (uint8_t)elpis_dnskey_tag(k512, l512);
+        elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+        elpis_rrset_buf_add(&set, a, 4);
+        elpis_rrset_buf_add_sig(&set, sig, (uint16_t)o);
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EBOGUS,
+              "a weak key set with no ZSK at all stays bogus (rc %d)", rc);
+    }
+}
+
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -7100,6 +7194,7 @@ int main(void)
     test_licence();
     test_insecure_delegation();
     test_wildcard_nodata();
+    test_weak_rsa_keys();
     test_sec_link();
     test_ta_file();
     test_val_retry_budget();

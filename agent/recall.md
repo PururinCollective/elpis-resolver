@@ -120,11 +120,13 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | An NXDOMAIN from such a refresh counts as a failure | There's no message-cache entry to count `refresh-nxdomain-confirmations` in, so the stale answer stays, as before, with backoff. Deleting `orig_qname`'s records, as `note_refresh_outcome()` does, wouldn't reach a stale link deeper in the chain. Open. |
 | No EDE 3 and no `serve-stale-reply-ttl` on these answers | Left as it was: they still go out at TTL 0 with no EDE, unlike a stale message-cache hit (TTL 30, EDE 3). Now it lasts for one answer, not a day. |
 
-### Wildcard NODATA (unreleased)
+### Wildcard NODATA and weak RSA keys (unreleased)
 
 | decision | why |
 |---|---|
 | `elpis_nsec_proves_nodata()` accepts a wildcard NODATA (an NSEC covering the name, and one at `*.<closest encloser>` without the type or CNAME) and an empty non-terminal (a covering NSEC whose next name is below the name); `elpis_nsec3_proves_nodata()` accepts the RFC 5155 8.7 wildcard NODATA, as opt-out when the next closer's span is opt-out | 2026-11-23, the user's 192.168.89.103: `tracker.tiny-vps.com` A/AAAA SERVFAIL EDE 12, logged "2 NSEC/NSEC3 records, which do not prove ... has no such data". `*.tiny-vps.com` holds only TXT. 1.1.1.1, 8.8.8.8 and 9.9.9.9 all answered NOERROR + AD. The NSEC code had a comment saying this proof was valid, and returned 0. The closest encloser is the one `closest_encloser_labels()` already gives the NXDOMAIN proof. |
+| A signature by an RSA key outside 1024–4096 bits is `ENOTFOUND` + EDE 1 from `elpis_rrsig_verify()`, like an unsupported algorithm, before any arithmetic. `elpis_rrset_validate()` returns the new `ELPIS_EUNSUPPORTED` when nothing verified, nothing failed, a weak key was hit, and `signing_keys_unusable()`: every non-SEP, non-revoked zone key in the set is unusable. `verify_for_current()` makes that `SS_INSECURE` | Same day: `ns1.cbn.net.id` SERVFAIL, both ZSKs (46742, 59885) 512-bit, KSKs 1024-bit. Three behaviours were on offer: SERVFAIL (as before), insecure (1.1.1.1: no AD, EDE 1 "unsupported key size") or secure (8.8.8.8, 9.9.9.9: AD). The user chose 1.1.1.1's. The key-set test is what keeps it from being a downgrade: a zone with a strong ZSK beside a weak one, its strong signature stripped, stays bogus. SEP keys are left out because they sign the DNSKEY set and are already proven by then. |
+| Not done: EDE 1 on the insecure answer, and a DS signed only by weak parent keys | `server.c` attaches EDE only when the rcode isn't NOERROR. The DS check in the chain walk (`elpis_rrset_validate()` on the DS) still calls `ELPIS_EUNSUPPORTED` bogus; making it a cut needs a zone to test it on, and none was found. |
 
 ### Older ones
 

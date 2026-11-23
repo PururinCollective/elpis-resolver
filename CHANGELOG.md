@@ -29,6 +29,19 @@ answer bogus (EDE 12, NSEC Missing) and answered SERVFAIL, where 1.1.1.1,
 NSEC and for NSEC3 (RFC 5155 section 8.7). It also accepts the NSEC proof of
 an empty non-terminal: a name with nothing at it but names below it.
 
+**A zone signed only with keys too small to use is answered as unsigned.**
+`cbn.net.id` signs its records with two 512-bit RSA keys. Elpis uses RSA keys
+of 1024 to 4096 bits, and it called every answer from that zone bogus, so
+`ns1.cbn.net.id` was SERVFAIL. 1.1.1.1 answers it without AD, with EDE 1
+(Unsupported DNSKEY Algorithm); 8.8.8.8 and 9.9.9.9 accept the keys and set
+AD. Elpis now does what 1.1.1.1 does, which is what RFC 4035 asks for a zone
+signed only with algorithms a validator does not support: the answer is
+served, without AD. That happens only when no signing key in the zone's key
+set is usable. With a usable key beside the weak one, a lone weak signature
+is still bogus, because stripping the strong signature would leave exactly
+that. EDE 1 is not attached, since Elpis sends EDE only with errors, and a
+signed zone delegated from such a zone is still SERVFAIL.
+
 ## 2.6.2 "Turned Hourglass" — 2026-10-30
 
 The sand had run out, and nobody turned the glass. A record in an answer
