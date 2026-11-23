@@ -378,12 +378,39 @@ int elpis_nsec3_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
     }
 
     /*
-     * No direct match.  For a DS query this is still provable via opt-out;
-     * for anything else it is not a proof.
+     * No direct match.  For a DS query this is still provable via opt-out.
      */
     if (qtype == ELPIS_T_DS)
         return elpis_nsec3_proves_no_ds(rrs, n, qname, zone);
-    return 0;
+
+    /*
+     * Or it is a wildcard NODATA (RFC 5155 section 8.7): a closest encloser
+     * proof that the name itself does not exist, and an NSEC3 matching the
+     * wildcard at that encloser without the type.  This used to fall through
+     * to "no proof", so every such answer was called bogus.
+     */
+    {
+        elpis_name_t ce, nc, wc;
+        int ce_labels, opt_out = 0;
+
+        ce_labels = find_closest_encloser(rrs, n, qname, zone, &params, &ce);
+        if (ce_labels < 0 || (unsigned)ce_labels >= qname->labels)
+            return 0;
+        if (elpis_name_suffix(qname, (unsigned)ce_labels + 1u, &nc) != 0)
+            return 0;
+        if (!covered_by_any(rrs, n, zone, &params, &nc, &opt_out))
+            return 0;
+        if (elpis_name_prepend(&wc, (const uint8_t *)"*", 1, &ce) != ELPIS_OK)
+            return 0;
+        if (!matched_by_any(rrs, n, zone, &params, &wc, &hit))
+            return 0;
+        if (elpis_bitmap_has(hit.bitmap, hit.bitmaplen, qtype))
+            return 0;
+        if (qtype != ELPIS_T_CNAME &&
+            elpis_bitmap_has(hit.bitmap, hit.bitmaplen, ELPIS_T_CNAME))
+            return 0;
+        return opt_out ? ELPIS_NSEC3_OPTOUT_PROOF : 1;
+    }
 }
 
 /* See elpis_nsec_proves_insecure_deleg().  Opt-out (RFC 5155 section 6) is

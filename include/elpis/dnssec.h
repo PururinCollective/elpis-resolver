@@ -76,6 +76,14 @@ uint64_t elpis_dnssec_take_verifies(void);
  * its pool of validation states.  Called by a worker as it finishes. */
 void elpis_dnssec_thread_done(void);
 
+/*
+ * Returns ELPIS_OK when a signature verified; ELPIS_ENOTFOUND when the set has
+ * no signature; ELPIS_EUNSUPPORTED when every signature is by a key this build
+ * will not use (an RSA modulus outside ELPIS_RSA_MIN_BITS..MAX_BITS) and so is
+ * every key in `keys` that could sign data, which the caller treats as an
+ * unsigned zone, as RFC 4035 section 5.2 does an unsupported algorithm;
+ * ELPIS_EBOGUS otherwise.
+ */
 int elpis_rrset_validate(const elpis_conf_t *conf,
                          const elpis_rrset_buf_t *set,
                          const elpis_rrset_buf_t *keys,

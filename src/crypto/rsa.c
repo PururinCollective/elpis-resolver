@@ -49,11 +49,39 @@ static int rsa_parse(const uint8_t *key, size_t keylen, bn_t *n, bn_t *e)
     if (bn_is_zero(n) || bn_is_zero(e))
         return ELPIS_EFORMAT;
     /* RFC 8624: refuse keys below 1024 bits and above 4096. */
-    if (bn_bits(n) < 1024u || bn_bits(n) > 4096u)
+    if (bn_bits(n) < ELPIS_RSA_MIN_BITS || bn_bits(n) > ELPIS_RSA_MAX_BITS)
         return ELPIS_EFORMAT;
     if ((n->d[0] & 1u) == 0)
         return ELPIS_EFORMAT;
     return ELPIS_OK;
+}
+
+unsigned elpis_rsa_modulus_bits(const uint8_t *key, size_t keylen)
+{
+    size_t elen, off;
+    uint8_t top;
+    unsigned bits;
+
+    if (keylen < 3)
+        return 0;
+    if (key[0] == 0) {
+        elen = (size_t)elpis_get16(key + 1);
+        off  = 3;
+    } else {
+        elen = key[0];
+        off  = 1;
+    }
+    if (elen == 0 || off + elen >= keylen)
+        return 0;
+    off += elen;
+    while (off < keylen && key[off] == 0)
+        off++;                          /* leading zero octets carry no bits */
+    if (off >= keylen || keylen - off > 65536u / 8u)
+        return 0;
+    bits = (unsigned)(keylen - off - 1u) * 8u;
+    for (top = key[off]; top != 0; top >>= 1)
+        bits++;
+    return bits;
 }
 
 /* DigestInfo DER prefixes from RFC 8017 section 9.2, note 1. */

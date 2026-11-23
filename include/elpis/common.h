@@ -179,7 +179,8 @@ typedef enum {
     ELPIS_ENOTFOUND   = -7,
     ELPIS_ELOOP       = -8,
     ELPIS_EREFUSED    = -9,
-    ELPIS_EBOGUS      = -10   /* DNSSEC validation failure              */
+    ELPIS_EBOGUS      = -10,  /* DNSSEC validation failure              */
+    ELPIS_EUNSUPPORTED = -11  /* signed only with keys this build won't use */
 } elpis_rc_t;
 
 

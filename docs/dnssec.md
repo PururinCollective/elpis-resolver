@@ -19,8 +19,8 @@ SERVFAIL and an extended DNS error. **It is never handed to the client.**
 
 | | |
 |---|---|
-| **Signatures** | RSA (1024–4096), ECDSA P-256/P-384, Ed25519, **ML-DSA-44/65/87** (FIPS 204), all implemented from scratch |
-| **Denial of existence** | NSEC and NSEC3, including opt-out and the RFC 9276 iteration cap |
+| **Signatures** | RSA (1024–4096), ECDSA P-256/P-384, Ed25519, **ML-DSA-44/65/87** (FIPS 204), all implemented from scratch. A zone whose signing keys are all RSA outside 1024–4096 bits is served as unsigned, without AD, as 1.1.1.1 does |
+| **Denial of existence** | NSEC and NSEC3, including opt-out, wildcard NODATA, empty non-terminals and the RFC 9276 iteration cap |
 | **On failure** | SERVFAIL with an extended error, and one log line saying [which RRset failed and why](troubleshooting.md#-a-name-answered-servfail-as-bogus) |
 
 ### Insecure is not bogus

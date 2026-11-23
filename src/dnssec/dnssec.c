@@ -81,6 +81,65 @@ static int alg_is_pq(const elpis_conf_t *c, uint8_t alg)
 }
 
 /*
+ * A well-formed key of a supported algorithm that this build still will not
+ * use: an RSA modulus outside ELPIS_RSA_MIN_BITS..ELPIS_RSA_MAX_BITS.  `key`
+ * is the whole DNSKEY rdata.  A malformed key is not "unsupported", it is
+ * broken, and stays bogus.
+ */
+static int key_size_unsupported(const uint8_t *key, size_t keylen)
+{
+    unsigned bits;
+
+    if (keylen < 5)
+        return 0;
+    switch (key[3]) {
+    case ELPIS_ALG_RSASHA1:
+    case ELPIS_ALG_RSASHA1_NSEC3_SHA1:
+    case ELPIS_ALG_RSASHA256:
+    case ELPIS_ALG_RSASHA512:
+        bits = elpis_rsa_modulus_bits(key + 4, keylen - 4);
+        return bits != 0 &&
+               (bits < ELPIS_RSA_MIN_BITS || bits > ELPIS_RSA_MAX_BITS);
+    default:
+        return 0;
+    }
+}
+
+/*
+ * True when the zone has signing keys and not one of them is usable: every
+ * zone key without the SEP bit is of an algorithm or size this build will not
+ * use.  The SEP keys are left out because they are there to sign the DNSKEY
+ * set, and are already proven by the time this is asked.
+ *
+ * Asking about the whole key set, not just the keys an answer's signatures
+ * name, is what keeps this from being a downgrade.  A zone rolling from a weak
+ * key to a strong one signs with both; strip the strong signature and only
+ * the weak one is left, but the strong key is still in the set, so the answer
+ * stays bogus instead of becoming merely unsigned.
+ */
+static int signing_keys_unusable(const elpis_conf_t *conf,
+                                 const elpis_rrset_buf_t *keys)
+{
+    unsigned j, nsigning = 0;
+
+    for (j = 0; j < keys->count; j++) {
+        const uint8_t *k = keys->data + keys->off[j];
+        uint16_t kl = keys->len[j], flags;
+
+        if (kl < 5 || k[2] != 3)
+            continue;
+        flags = elpis_get16(k);
+        if (!(flags & ELPIS_DNSKEY_ZONE) || (flags & ELPIS_DNSKEY_REVOKE) ||
+            (flags & ELPIS_DNSKEY_SEP))
+            continue;
+        nsigning++;
+        if (elpis_alg_supported(conf, k[3]) && !key_size_unsupported(k, kl))
+            return 0;
+    }
+    return nsigning > 0;
+}
+
+/*
  * harden-pq-downgrade: the DS set names a post-quantum algorithm this
  * resolver implements, so only that path may authenticate the zone.
  *
@@ -531,7 +590,7 @@ int elpis_rrsig_verify(const elpis_conf_t *conf,
             return ELPIS_ENOTFOUND;      /* protocol field is always 3 */
     }
 
-    if (!elpis_alg_supported(conf, alg)) {
+    if (!elpis_alg_supported(conf, alg) || key_size_unsupported(key, keylen)) {
         if (ede) *ede = ELPIS_EDE_UNSUPPORTED_DNSKEY;
         return ELPIS_ENOTFOUND;
     }
@@ -584,7 +643,7 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
 {
     const uint8_t *rd[ELPIS_RRSET_MAX_RR];
     uint16_t rl[ELPIS_RRSET_MAX_RR];
-    unsigned i, j, fails = 0;
+    unsigned i, j, fails = 0, weak = 0;
     int saw_sig = 0;
 
     if (set->count == 0)
@@ -625,6 +684,8 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
                                     key, keylen, now, ede);
             if (rc == ELPIS_EBOGUS)
                 fails++;
+            else if (rc == ELPIS_ENOTFOUND && key_size_unsupported(key, keylen))
+                weak++;
             if (rc == ELPIS_OK) {
                 if (wildcard_out != NULL) {
                     uint8_t labels = sig[3];
@@ -640,6 +701,20 @@ int elpis_rrset_validate(const elpis_conf_t *conf,
                 return ELPIS_OK;
             }
         }
+    }
+
+    /*
+     * Nothing verified, nothing failed, and what stopped it was a key too
+     * small or too large to use -- in a zone with no usable signing key at
+     * all.  cbn.net.id signs with two 512-bit RSA keys, and this used to call
+     * every answer from it bogus and SERVFAIL it, where 1.1.1.1 answers it as
+     * unsigned, without AD, with EDE 1.  Answering it is the same outcome
+     * RFC 4035 asks for a zone signed only with algorithms we do not support:
+     * no false alarm, and no false trust in a key anyone can factor.
+     */
+    if (fails == 0 && weak > 0 && signing_keys_unusable(conf, keys)) {
+        if (ede) *ede = ELPIS_EDE_UNSUPPORTED_DNSKEY;
+        return ELPIS_EUNSUPPORTED;
     }
 
     if (ede && *ede < 0)
@@ -808,6 +883,11 @@ size_t elpis_rrset_why(const elpis_conf_t *conf,
             why_add(out, cap, &len, "the key's protocol is %u, not 3", key[2]);
         else if (!elpis_alg_supported(conf, alg))
             why_add(out, cap, &len, "algorithm not supported here");
+        else if (key_size_unsupported(key, keys->len[j]))
+            why_add(out, cap, &len, "a %u-bit RSA key, outside the %u to %u "
+                    "bits used here",
+                    elpis_rsa_modulus_bits(key + 4, keys->len[j] - 4u),
+                    ELPIS_RSA_MIN_BITS, ELPIS_RSA_MAX_BITS);
         else if (d_exp + skew < 0)
             why_add(out, cap, &len, "expired %ld s ago", -(long)d_exp);
         else if (d_inc + skew < 0)
@@ -2425,6 +2505,12 @@ static void verify_for_current(elpis_task_t *t, val_t *v)
              * the same data carries AD without walking the chain again.
              */
             set->sec = (uint8_t)ELPIS_SEC_SECURE;
+            put_verdict(t, i, set);
+        } else if (rc == ELPIS_EUNSUPPORTED) {
+            /* Signed only with keys we will not use: see
+             * elpis_rrset_validate().  Unsigned, not forged. */
+            v->status[i] = SS_INSECURE;
+            set->sec = (uint8_t)ELPIS_SEC_INSECURE;
             put_verdict(t, i, set);
         } else {
             v->status[i] = SS_BOGUS;

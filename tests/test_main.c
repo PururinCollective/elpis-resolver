@@ -6908,6 +6908,253 @@ static void test_tlscrypto(void)
     test_x25519();
 }
 
+/* ================================================================== */
+/*
+ * Two answers Elpis called bogus that every public resolver answers.
+ *
+ * tracker.tiny-vps.com A is a wildcard NODATA: no such name, and the
+ * wildcard that would have answered, *.tiny-vps.com, holds only TXT.  An
+ * empty non-terminal is the other NODATA with no NSEC at the name itself.
+ *
+ * cbn.net.id signs with 512-bit RSA keys, too small to use.  1.1.1.1 answers
+ * it as unsigned; that is right only when no usable signing key exists, or
+ * stripping a strong signature would turn any answer into an unsigned one.
+ */
+static size_t t_bitmap(const uint16_t *types, unsigned nt, uint8_t *out)
+{
+    uint8_t bits[32];
+    unsigned k, hi = 0;
+
+    memset(bits, 0, sizeof bits);
+    for (k = 0; k < nt; k++) {
+        bits[types[k] / 8u] |= (uint8_t)(0x80u >> (types[k] % 8u));
+        if (types[k] / 8u > hi) hi = types[k] / 8u;
+    }
+    out[0] = 0;
+    out[1] = (uint8_t)(hi + 1u);
+    memcpy(out + 2, bits, hi + 1u);
+    return 2u + hi + 1u;
+}
+
+static void t_nsec(elpis_denial_rr_t *r, uint8_t *rd, const char *owner,
+                   const char *next, const uint16_t *types, unsigned nt)
+{
+    elpis_name_t nx;
+    size_t n;
+
+    (void)elpis_name_from_text(&r->owner, owner);
+    (void)elpis_name_from_text(&nx, next);
+    memcpy(rd, nx.d, nx.len);
+    n = nx.len;
+    n += t_bitmap(types, nt, rd + n);
+    r->rd = rd;
+    r->rdlen = (uint16_t)n;
+}
+
+/* An NSEC3 (SHA-1, no salt, no iterations) at `h` whose next hash is `next`. */
+static void t_nsec3(elpis_denial_rr_t *r, uint8_t *rd, const uint8_t *h,
+                    const uint8_t *next, const char *zone,
+                    const uint16_t *types, unsigned nt)
+{
+    char b32[64], owner[128];
+    size_t n = 0;
+
+    (void)elpis_base32hex_encode(h, 20, b32, sizeof b32);
+    snprintf(owner, sizeof owner, "%s.%s", b32, zone);
+    (void)elpis_name_from_text(&r->owner, owner);
+    rd[n++] = 1;                        /* SHA-1 */
+    rd[n++] = 0;                        /* flags */
+    rd[n++] = 0; rd[n++] = 0;           /* iterations */
+    rd[n++] = 0;                        /* salt length */
+    rd[n++] = 20;
+    memcpy(rd + n, next, 20); n += 20;
+    n += t_bitmap(types, nt, rd + n);
+    r->rd = rd;
+    r->rdlen = (uint16_t)n;
+}
+
+/* A DNSKEY rdata with an RSA key of `bits` (a multiple of 8): e = 65537. */
+static size_t t_rsa_key(uint8_t *out, uint16_t flags, unsigned bits,
+                        uint8_t fill)
+{
+    size_t n = 0, mlen = bits / 8u;
+
+    elpis_put16(out, flags); n = 2;
+    out[n++] = 3;
+    out[n++] = ELPIS_ALG_RSASHA256;
+    out[n++] = 3;                       /* exponent length */
+    out[n++] = 0x01; out[n++] = 0x00; out[n++] = 0x01;
+    memset(out + n, fill, mlen);
+    out[n] |= 0x80;                     /* the top bit set: exactly `bits` */
+    out[n + mlen - 1] |= 0x01;          /* odd */
+    return n + mlen;
+}
+
+static void test_wildcard_nodata(void)
+{
+    static const uint16_t t_cname[] = { ELPIS_T_CNAME, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_txt[]   = { ELPIS_T_TXT, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_cn_wc[] = { ELPIS_T_CNAME, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_a[]     = { ELPIS_T_A, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_soa[]   = { ELPIS_T_SOA, ELPIS_T_NS, ELPIS_T_RRSIG,
+                                        ELPIS_T_DNSKEY, ELPIS_T_NSEC3PARAM };
+    static const uint16_t t3_txt[]  = { ELPIS_T_TXT, ELPIS_T_RRSIG };
+    static const uint16_t t3_a[]    = { ELPIS_T_A, ELPIS_T_RRSIG };
+    elpis_denial_rr_t rrs[3];
+    uint8_t rd[3][128];
+    elpis_name_t q;
+
+    section("wildcard NODATA");
+
+    /* tiny-vps.com as it answers tracker.tiny-vps.com A. */
+    t_nsec(&rrs[0], rd[0], "tpxy.tiny-vps.com.", "u42.tiny-vps.com.",
+           t_cname, ELPIS_ARRAY_LEN(t_cname));
+    t_nsec(&rrs[1], rd[1], "*.tiny-vps.com.", "_acme-challenge.tiny-vps.com.",
+           t_txt, ELPIS_ARRAY_LEN(t_txt));
+    (void)elpis_name_from_text(&q, "tracker.tiny-vps.com.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 1,
+          "a covered name and a TXT-only wildcard prove A NODATA");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_AAAA) == 1,
+          "and AAAA NODATA");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_TXT) == 0,
+          "but not TXT NODATA: the wildcard has TXT");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 0,
+          "without the wildcard's NSEC there is no proof");
+    CHECK(elpis_nsec_proves_nodata(rrs + 1, 1, &q, ELPIS_T_A) == 0,
+          "nor without the NSEC covering the name");
+
+    t_nsec(&rrs[1], rd[1], "*.tiny-vps.com.", "_acme-challenge.tiny-vps.com.",
+           t_cn_wc, ELPIS_ARRAY_LEN(t_cn_wc));
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 0,
+          "a CNAME at the wildcard would have answered: no proof");
+
+    /* A wildcard below the closest encloser is not the one that applies. */
+    t_nsec(&rrs[1], rd[1], "*.other.tiny-vps.com.", "pa.tiny-vps.com.",
+           t_txt, ELPIS_ARRAY_LEN(t_txt));
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 0,
+          "a wildcard that is not at the closest encloser proves nothing");
+
+    /* An empty non-terminal: b.example. has nothing, x.b.example. exists. */
+    t_nsec(&rrs[0], rd[0], "a.example.", "x.b.example.",
+           t_a, ELPIS_ARRAY_LEN(t_a));
+    (void)elpis_name_from_text(&q, "b.example.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 1,
+          "an NSEC whose next name is below the name proves an empty "
+          "non-terminal");
+    (void)elpis_name_from_text(&q, "ab.example.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 0,
+          "a covered name with nothing below it is NXDOMAIN, not NODATA");
+
+    /* The same wildcard NODATA, NSEC3. */
+    {
+        elpis_name_t zone, wc, nm;
+        uint8_t hz[32], hw[32], hq[32], lo[20], hi[20];
+        size_t l;
+        unsigned k;
+
+        (void)elpis_name_from_text(&zone, "example.");
+        (void)elpis_name_from_text(&wc, "*.example.");
+        (void)elpis_name_from_text(&nm, "a.example.");
+        (void)elpis_nsec3_hash(&zone, NULL, 0, 0, 1, hz, &l);
+        (void)elpis_nsec3_hash(&wc,   NULL, 0, 0, 1, hw, &l);
+        (void)elpis_nsec3_hash(&nm,   NULL, 0, 0, 1, hq, &l);
+        /* A span just around a.example.'s hash. */
+        memcpy(lo, hq, 20);
+        memcpy(hi, hq, 20);
+        for (k = 20; k-- > 0;) { if (lo[k]-- != 0) break; }
+        for (k = 20; k-- > 0;) { if (++hi[k] != 0) break; }
+
+        t_nsec3(&rrs[0], rd[0], hz, hi, "example.", t_soa,
+                ELPIS_ARRAY_LEN(t_soa));
+        t_nsec3(&rrs[1], rd[1], lo, hi, "example.", t3_a,
+                ELPIS_ARRAY_LEN(t3_a));
+        t_nsec3(&rrs[2], rd[2], hw, hi, "example.", t3_txt,
+                ELPIS_ARRAY_LEN(t3_txt));
+        CHECK(elpis_nsec3_proves_nodata(rrs, 3, &nm, ELPIS_T_A, &zone) == 1,
+              "NSEC3: encloser, covered next closer and a TXT-only wildcard "
+              "prove A NODATA");
+        CHECK(elpis_nsec3_proves_nodata(rrs, 3, &nm, ELPIS_T_TXT, &zone) == 0,
+              "NSEC3: but not TXT NODATA");
+        CHECK(elpis_nsec3_proves_nodata(rrs, 2, &nm, ELPIS_T_A, &zone) == 0,
+              "NSEC3: no wildcard record, no proof");
+        CHECK(elpis_nsec3_proves_nxdomain(rrs, 3, &nm, &zone) == 0,
+              "NSEC3: and the wildcard's existence still refutes NXDOMAIN");
+    }
+
+}
+
+static void test_weak_rsa_keys(void)
+{
+    section("weak RSA keys");
+    {
+        static elpis_rrset_buf_t keys, set;
+        elpis_conf_t c;
+        elpis_name_t zone;
+        uint8_t k512[96], k1024[160], z1024[160], sig[128], a[4];
+        size_t l512, l1024, lz;
+        int64_t now = 1700000000;
+        int ede = -1, rc;
+        size_t o = 0;
+
+        elpis_conf_defaults(&c);
+        (void)elpis_name_from_text(&zone, "example.");
+        l512  = t_rsa_key(k512,  ELPIS_DNSKEY_ZONE, 512, 0x5a);
+        l1024 = t_rsa_key(k1024, ELPIS_DNSKEY_ZONE | ELPIS_DNSKEY_SEP, 1024, 0x3c);
+        lz    = t_rsa_key(z1024, ELPIS_DNSKEY_ZONE, 1024, 0x77);
+        CHECK(elpis_rsa_modulus_bits(k512 + 4, l512 - 4) == 512,
+              "a 64-octet modulus is 512 bits");
+        CHECK(elpis_rsa_modulus_bits(k1024 + 4, l1024 - 4) == 1024,
+              "a 128-octet modulus is 1024 bits");
+
+        /* An A record signed by the 512-bit key; the signature never gets
+         * as far as the arithmetic, so its bytes do not matter. */
+        elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+        a[0] = 192; a[1] = 0; a[2] = 2; a[3] = 1;
+        elpis_rrset_buf_add(&set, a, 4);
+        elpis_put16(sig + o, ELPIS_T_A); o += 2;
+        sig[o++] = ELPIS_ALG_RSASHA256;
+        sig[o++] = 1;
+        elpis_put32(sig + o, 3600); o += 4;
+        elpis_put32(sig + o, (uint32_t)(now + 86400)); o += 4;
+        elpis_put32(sig + o, (uint32_t)(now - 86400)); o += 4;
+        elpis_put16(sig + o, elpis_dnskey_tag(k512, l512)); o += 2;
+        memcpy(sig + o, zone.d, zone.len); o += zone.len;
+        memset(sig + o, 0x11, 64); o += 64;
+        elpis_rrset_buf_add_sig(&set, sig, (uint16_t)o);
+
+        /* cbn.net.id's shape: a 1024-bit KSK and only a 512-bit ZSK. */
+        elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+        elpis_rrset_buf_add(&keys, k1024, (uint16_t)l1024);
+        elpis_rrset_buf_add(&keys, k512, (uint16_t)l512);
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EUNSUPPORTED,
+              "signed only by a 512-bit ZSK, with no usable ZSK: unsupported, "
+              "so unsigned (rc %d)", rc);
+        CHECK(ede == ELPIS_EDE_UNSUPPORTED_DNSKEY, "with EDE 1 (got %d)", ede);
+
+        /* A usable ZSK beside it: a stripped strong signature, not a weak zone. */
+        elpis_rrset_buf_add(&keys, z1024, (uint16_t)lz);
+        ede = -1;
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EBOGUS,
+              "the same signature with a usable ZSK in the set is bogus "
+              "(rc %d)", rc);
+
+        /* A weak key with the SEP bit only: no signing key at all. */
+        elpis_rrset_buf_init(&keys, &zone, ELPIS_T_DNSKEY, ELPIS_CLASS_IN, 3600);
+        k512[1] |= 0x01;
+        elpis_rrset_buf_add(&keys, k512, (uint16_t)l512);
+        sig[16] = (uint8_t)(elpis_dnskey_tag(k512, l512) >> 8);
+        sig[17] = (uint8_t)elpis_dnskey_tag(k512, l512);
+        elpis_rrset_buf_init(&set, &zone, ELPIS_T_A, ELPIS_CLASS_IN, 3600);
+        elpis_rrset_buf_add(&set, a, 4);
+        elpis_rrset_buf_add_sig(&set, sig, (uint16_t)o);
+        rc = elpis_rrset_validate(&c, &set, &keys, now, NULL, &ede);
+        CHECK(rc == ELPIS_EBOGUS,
+              "a weak key set with no ZSK at all stays bogus (rc %d)", rc);
+    }
+}
+
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -6946,6 +7193,8 @@ int main(void)
     test_conf_check();
     test_licence();
     test_insecure_delegation();
+    test_wildcard_nodata();
+    test_weak_rsa_keys();
     test_sec_link();
     test_ta_file();
     test_val_retry_budget();

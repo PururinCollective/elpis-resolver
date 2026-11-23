@@ -14,6 +14,43 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## 2.6.3 "Paper Locks" — 2026-11-23
+
+A lock made of paper is no lock, and no reason to bar the door either. Two
+names that 1.1.1.1 answers were SERVFAIL here. `tracker.tiny-vps.com` sits
+under a wildcard that has no A record, and Elpis did not accept that proof.
+`cbn.net.id` signs with 512-bit RSA keys, which Elpis will not use, and it
+treated them as forged; it now answers that zone as unsigned, without AD, as
+1.1.1.1 does.
+
+No config that worked stops working.
+
+### Fixed
+
+**A wildcard that lacks the type asked for is a NODATA, not bogus.**
+`tiny-vps.com` has a wildcard, `*.tiny-vps.com`, that holds only TXT. So
+`tracker.tiny-vps.com` A is answered "no such data", with two signed NSEC
+records: one shows the name itself does not exist, the other sits at the
+wildcard and shows it has no A. RFC 4035 section 3.1.3.4 calls this a wildcard
+NODATA. Elpis looked only for an NSEC at the name itself, so it called the
+answer bogus (EDE 12, NSEC Missing) and answered SERVFAIL, where 1.1.1.1,
+8.8.8.8 and 9.9.9.9 all answer it with AD. Elpis now accepts this proof, for
+NSEC and for NSEC3 (RFC 5155 section 8.7). It also accepts the NSEC proof of
+an empty non-terminal: a name with nothing at it but names below it.
+
+**A zone signed only with keys too small to use is answered as unsigned.**
+`cbn.net.id` signs its records with two 512-bit RSA keys. Elpis uses RSA keys
+of 1024 to 4096 bits, and it called every answer from that zone bogus, so
+`ns1.cbn.net.id` was SERVFAIL. 1.1.1.1 answers it without AD, with EDE 1
+(Unsupported DNSKEY Algorithm); 8.8.8.8 and 9.9.9.9 accept the keys and set
+AD. Elpis now does what 1.1.1.1 does, which is what RFC 4035 asks for a zone
+signed only with algorithms a validator does not support: the answer is
+served, without AD. That happens only when no signing key in the zone's key
+set is usable. With a usable key beside the weak one, a lone weak signature
+is still bogus, because stripping the strong signature would leave exactly
+that. EDE 1 is not attached, since Elpis sends EDE only with errors, and a
+signed zone delegated from such a zone is still SERVFAIL.
+
 ## 2.6.2 "Turned Hourglass" — 2026-10-30
 
 The sand had run out, and nobody turned the glass. A record in an answer
