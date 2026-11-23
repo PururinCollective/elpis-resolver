@@ -134,37 +134,76 @@ int elpis_nsec_proves_nxdomain(const elpis_denial_rr_t *rrs, unsigned n,
     return wildcard_denied;
 }
 
+/* Does this NSEC, at the name that would have answered, rule out qtype? */
+static int nsec_denies_type(const elpis_denial_rr_t *r, uint16_t qtype)
+{
+    if (bitmap_has(r, qtype))
+        return 0;
+    /*
+     * A CNAME at the name would have been followed instead of producing
+     * NODATA, so its presence makes the proof invalid.
+     */
+    if (qtype != ELPIS_T_CNAME && bitmap_has(r, ELPIS_T_CNAME))
+        return 0;
+    /*
+     * An NSEC at a delegation point proves nothing about the child zone's
+     * data (RFC 4035 section 5.4, "opt-out"-like case for NS without SOA).
+     */
+    if (bitmap_has(r, ELPIS_T_NS) && !bitmap_has(r, ELPIS_T_SOA) &&
+        qtype != ELPIS_T_DS)
+        return 0;
+    return 1;
+}
+
 int elpis_nsec_proves_nodata(const elpis_denial_rr_t *rrs, unsigned n,
                              const elpis_name_t *qname, uint16_t qtype)
 {
-    unsigned i;
+    unsigned i, ce_labels;
+    int covered = 0;
+    elpis_name_t ce, wc;
 
     for (i = 0; i < n; i++) {
-        if (!nsec_matches(&rrs[i], qname))
-            continue;
-        if (bitmap_has(&rrs[i], qtype))
-            return 0;
-        /*
-         * A CNAME at the name would have been followed instead of producing
-         * NODATA, so its presence makes the proof invalid.
-         */
-        if (qtype != ELPIS_T_CNAME && bitmap_has(&rrs[i], ELPIS_T_CNAME))
-            return 0;
-        /*
-         * An NSEC at a delegation point proves nothing about the child zone's
-         * data (RFC 4035 section 5.4, "opt-out"-like case for NS without SOA).
-         */
-        if (bitmap_has(&rrs[i], ELPIS_T_NS) && !bitmap_has(&rrs[i], ELPIS_T_SOA) &&
-            qtype != ELPIS_T_DS)
-            return 0;
-        return 1;
+        if (nsec_matches(&rrs[i], qname))
+            return nsec_denies_type(&rrs[i], qtype);
     }
 
     /*
-     * No NSEC matches the name itself.  That is still a valid NODATA proof
-     * for a wildcard-expanded answer: the name is covered and the wildcard
-     * exists but lacks the type.
+     * No NSEC matches the name itself, which leaves two honest NODATA
+     * answers, and this used to accept neither.
+     *
+     * An empty non-terminal (RFC 4035 section 3.1.3.2): nothing is stored at
+     * the name, but names below it exist, so the NSEC that covers it has a
+     * next name underneath it.
+     *
+     * A wildcard NODATA (RFC 4035 section 3.1.3.4): the name does not exist,
+     * the wildcard at its closest encloser does, and lacks the type.  One
+     * NSEC covers the name, another sits at the wildcard.  tiny-vps.com has
+     * a TXT-only *.tiny-vps.com, so every A query under it is answered this
+     * way, and Elpis called each of them bogus and answered SERVFAIL.
      */
+    for (i = 0; i < n; i++) {
+        elpis_name_t next;
+        if (!elpis_nsec_covers(&rrs[i], qname))
+            continue;
+        covered = 1;
+        if (nsec_next(&rrs[i], &next) && next.labels > qname->labels &&
+            elpis_name_is_subdomain(&next, qname))
+            return 1;                   /* the name is an empty non-terminal */
+    }
+    if (!covered)
+        return 0;
+
+    ce_labels = closest_encloser_labels(rrs, n, qname);
+    if (ce_labels >= qname->labels)
+        return 0;
+    if (elpis_name_suffix(qname, ce_labels, &ce) != 0)
+        return 0;
+    if (elpis_name_prepend(&wc, (const uint8_t *)"*", 1, &ce) != ELPIS_OK)
+        return 0;
+    for (i = 0; i < n; i++) {
+        if (nsec_matches(&rrs[i], &wc))
+            return nsec_denies_type(&rrs[i], qtype);
+    }
     return 0;
 }
 

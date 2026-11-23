@@ -6908,6 +6908,159 @@ static void test_tlscrypto(void)
     test_x25519();
 }
 
+/* ================================================================== */
+/*
+ * NODATA with no NSEC at the name itself, which Elpis called bogus and every
+ * public resolver answers.  tracker.tiny-vps.com A is a wildcard NODATA: no
+ * such name, and the wildcard that would have answered, *.tiny-vps.com, holds
+ * only TXT.  An empty non-terminal is the other case.
+ */
+static size_t t_bitmap(const uint16_t *types, unsigned nt, uint8_t *out)
+{
+    uint8_t bits[32];
+    unsigned k, hi = 0;
+
+    memset(bits, 0, sizeof bits);
+    for (k = 0; k < nt; k++) {
+        bits[types[k] / 8u] |= (uint8_t)(0x80u >> (types[k] % 8u));
+        if (types[k] / 8u > hi) hi = types[k] / 8u;
+    }
+    out[0] = 0;
+    out[1] = (uint8_t)(hi + 1u);
+    memcpy(out + 2, bits, hi + 1u);
+    return 2u + hi + 1u;
+}
+
+static void t_nsec(elpis_denial_rr_t *r, uint8_t *rd, const char *owner,
+                   const char *next, const uint16_t *types, unsigned nt)
+{
+    elpis_name_t nx;
+    size_t n;
+
+    (void)elpis_name_from_text(&r->owner, owner);
+    (void)elpis_name_from_text(&nx, next);
+    memcpy(rd, nx.d, nx.len);
+    n = nx.len;
+    n += t_bitmap(types, nt, rd + n);
+    r->rd = rd;
+    r->rdlen = (uint16_t)n;
+}
+
+/* An NSEC3 (SHA-1, no salt, no iterations) at `h` whose next hash is `next`. */
+static void t_nsec3(elpis_denial_rr_t *r, uint8_t *rd, const uint8_t *h,
+                    const uint8_t *next, const char *zone,
+                    const uint16_t *types, unsigned nt)
+{
+    char b32[64], owner[128];
+    size_t n = 0;
+
+    (void)elpis_base32hex_encode(h, 20, b32, sizeof b32);
+    snprintf(owner, sizeof owner, "%s.%s", b32, zone);
+    (void)elpis_name_from_text(&r->owner, owner);
+    rd[n++] = 1;                        /* SHA-1 */
+    rd[n++] = 0;                        /* flags */
+    rd[n++] = 0; rd[n++] = 0;           /* iterations */
+    rd[n++] = 0;                        /* salt length */
+    rd[n++] = 20;
+    memcpy(rd + n, next, 20); n += 20;
+    n += t_bitmap(types, nt, rd + n);
+    r->rd = rd;
+    r->rdlen = (uint16_t)n;
+}
+
+static void test_wildcard_nodata(void)
+{
+    static const uint16_t t_cname[] = { ELPIS_T_CNAME, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_txt[]   = { ELPIS_T_TXT, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_cn_wc[] = { ELPIS_T_CNAME, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_a[]     = { ELPIS_T_A, ELPIS_T_RRSIG, ELPIS_T_NSEC };
+    static const uint16_t t_soa[]   = { ELPIS_T_SOA, ELPIS_T_NS, ELPIS_T_RRSIG,
+                                        ELPIS_T_DNSKEY, ELPIS_T_NSEC3PARAM };
+    static const uint16_t t3_txt[]  = { ELPIS_T_TXT, ELPIS_T_RRSIG };
+    static const uint16_t t3_a[]    = { ELPIS_T_A, ELPIS_T_RRSIG };
+    elpis_denial_rr_t rrs[3];
+    uint8_t rd[3][128];
+    elpis_name_t q;
+
+    section("wildcard NODATA");
+
+    /* tiny-vps.com as it answers tracker.tiny-vps.com A. */
+    t_nsec(&rrs[0], rd[0], "tpxy.tiny-vps.com.", "u42.tiny-vps.com.",
+           t_cname, ELPIS_ARRAY_LEN(t_cname));
+    t_nsec(&rrs[1], rd[1], "*.tiny-vps.com.", "_acme-challenge.tiny-vps.com.",
+           t_txt, ELPIS_ARRAY_LEN(t_txt));
+    (void)elpis_name_from_text(&q, "tracker.tiny-vps.com.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 1,
+          "a covered name and a TXT-only wildcard prove A NODATA");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_AAAA) == 1,
+          "and AAAA NODATA");
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_TXT) == 0,
+          "but not TXT NODATA: the wildcard has TXT");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 0,
+          "without the wildcard's NSEC there is no proof");
+    CHECK(elpis_nsec_proves_nodata(rrs + 1, 1, &q, ELPIS_T_A) == 0,
+          "nor without the NSEC covering the name");
+
+    t_nsec(&rrs[1], rd[1], "*.tiny-vps.com.", "_acme-challenge.tiny-vps.com.",
+           t_cn_wc, ELPIS_ARRAY_LEN(t_cn_wc));
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 0,
+          "a CNAME at the wildcard would have answered: no proof");
+
+    /* A wildcard below the closest encloser is not the one that applies. */
+    t_nsec(&rrs[1], rd[1], "*.other.tiny-vps.com.", "pa.tiny-vps.com.",
+           t_txt, ELPIS_ARRAY_LEN(t_txt));
+    CHECK(elpis_nsec_proves_nodata(rrs, 2, &q, ELPIS_T_A) == 0,
+          "a wildcard that is not at the closest encloser proves nothing");
+
+    /* An empty non-terminal: b.example. has nothing, x.b.example. exists. */
+    t_nsec(&rrs[0], rd[0], "a.example.", "x.b.example.",
+           t_a, ELPIS_ARRAY_LEN(t_a));
+    (void)elpis_name_from_text(&q, "b.example.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 1,
+          "an NSEC whose next name is below the name proves an empty "
+          "non-terminal");
+    (void)elpis_name_from_text(&q, "ab.example.");
+    CHECK(elpis_nsec_proves_nodata(rrs, 1, &q, ELPIS_T_A) == 0,
+          "a covered name with nothing below it is NXDOMAIN, not NODATA");
+
+    /* The same wildcard NODATA, NSEC3. */
+    {
+        elpis_name_t zone, wc, nm;
+        uint8_t hz[32], hw[32], hq[32], lo[20], hi[20];
+        size_t l;
+        unsigned k;
+
+        (void)elpis_name_from_text(&zone, "example.");
+        (void)elpis_name_from_text(&wc, "*.example.");
+        (void)elpis_name_from_text(&nm, "a.example.");
+        (void)elpis_nsec3_hash(&zone, NULL, 0, 0, 1, hz, &l);
+        (void)elpis_nsec3_hash(&wc,   NULL, 0, 0, 1, hw, &l);
+        (void)elpis_nsec3_hash(&nm,   NULL, 0, 0, 1, hq, &l);
+        /* A span just around a.example.'s hash. */
+        memcpy(lo, hq, 20);
+        memcpy(hi, hq, 20);
+        for (k = 20; k-- > 0;) { if (lo[k]-- != 0) break; }
+        for (k = 20; k-- > 0;) { if (++hi[k] != 0) break; }
+
+        t_nsec3(&rrs[0], rd[0], hz, hi, "example.", t_soa,
+                ELPIS_ARRAY_LEN(t_soa));
+        t_nsec3(&rrs[1], rd[1], lo, hi, "example.", t3_a,
+                ELPIS_ARRAY_LEN(t3_a));
+        t_nsec3(&rrs[2], rd[2], hw, hi, "example.", t3_txt,
+                ELPIS_ARRAY_LEN(t3_txt));
+        CHECK(elpis_nsec3_proves_nodata(rrs, 3, &nm, ELPIS_T_A, &zone) == 1,
+              "NSEC3: encloser, covered next closer and a TXT-only wildcard "
+              "prove A NODATA");
+        CHECK(elpis_nsec3_proves_nodata(rrs, 3, &nm, ELPIS_T_TXT, &zone) == 0,
+              "NSEC3: but not TXT NODATA");
+        CHECK(elpis_nsec3_proves_nodata(rrs, 2, &nm, ELPIS_T_A, &zone) == 0,
+              "NSEC3: no wildcard record, no proof");
+        CHECK(elpis_nsec3_proves_nxdomain(rrs, 3, &nm, &zone) == 0,
+              "NSEC3: and the wildcard's existence still refutes NXDOMAIN");
+    }
+
+}
+
 int main(void)
 {
     elpis_log_init(ELPIS_LOG_DST_STDERR, NULL, ELPIS_LOG_ERROR);
@@ -6946,6 +7099,7 @@ int main(void)
     test_conf_check();
     test_licence();
     test_insecure_delegation();
+    test_wildcard_nodata();
     test_sec_link();
     test_ta_file();
     test_val_retry_budget();

@@ -14,6 +14,21 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
+## Unreleased
+
+### Fixed
+
+**A wildcard that lacks the type asked for is a NODATA, not bogus.**
+`tiny-vps.com` has a wildcard, `*.tiny-vps.com`, that holds only TXT. So
+`tracker.tiny-vps.com` A is answered "no such data", with two signed NSEC
+records: one shows the name itself does not exist, the other sits at the
+wildcard and shows it has no A. RFC 4035 section 3.1.3.4 calls this a wildcard
+NODATA. Elpis looked only for an NSEC at the name itself, so it called the
+answer bogus (EDE 12, NSEC Missing) and answered SERVFAIL, where 1.1.1.1,
+8.8.8.8 and 9.9.9.9 all answer it with AD. Elpis now accepts this proof, for
+NSEC and for NSEC3 (RFC 5155 section 8.7). It also accepts the NSEC proof of
+an empty non-terminal: a name with nothing at it but names below it.
+
 ## 2.6.2 "Turned Hourglass" — 2026-10-30
 
 The sand had run out, and nobody turned the glass. A record in an answer
