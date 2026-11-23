@@ -26,6 +26,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | 2.6.0 "Borrowed Wings" | 2026-10-12 | A built-in forward list (`src/forwardlist.c`: `charter.com`, `usda.gov`) asks Cloudflare and Google, IPv4 and IPv6, never with ECS, and falls back to the zone's own servers when they all fail; `forwardlist: no` turns it off. A route's addresses past 4 IPv4 / 2 IPv6 were dropped and all took the last port; fixed. Tested on scratch instances only, not on the maintainer's resolver, before the bump |
 | 2.6.1 "Faded Signposts" | 2026-10-23 | A nameserver's address that fails validation is used to reach that server and for nothing else, never served or cached: `fitgirl-repacks.site` (NS `ns1`/`ns2.terradns.org`, whose zone's signatures had expired) had been SERVFAIL EDE 22. Tested on scratch instances only, with gcc only (no clang on the box) |
 | 2.6.2 "Turned Hourglass" | 2026-10-30 | An answer built from the RRset cache with a link past its TTL sends one throttled background refresh of the question; before, it went out at TTL 0 and was never refreshed (`admin.microsoft.com`: two links at TTL 0 for 10 min on the user's 192.168.89.101). Rebuilt with the fix and run on the user's 192.168.89.102 before the bump, where `admin.microsoft.com` answered. gcc 13.3 and clang 18.1 |
+| 2.6.3 "Paper Locks" | 2026-11-23 | Wildcard NODATA and empty non-terminals are proven, for NSEC and NSEC3 (`tracker.tiny-vps.com` A had been SERVFAIL EDE 12). A zone whose every ZSK is RSA outside 1024–4096 bits is insecure, as on 1.1.1.1, not bogus (`ns1.cbn.net.id`: two 512-bit ZSKs). Tested on a scratch instance against 1.1.1.1, not on the user's resolvers, before the bump. gcc 13.3 and clang 18.1 |
 
 ## 🧭 Decisions, and why
 
@@ -120,7 +121,7 @@ when you learn something that isn't obvious from the code or `CHANGELOG.md`.
 | An NXDOMAIN from such a refresh counts as a failure | There's no message-cache entry to count `refresh-nxdomain-confirmations` in, so the stale answer stays, as before, with backoff. Deleting `orig_qname`'s records, as `note_refresh_outcome()` does, wouldn't reach a stale link deeper in the chain. Open. |
 | No EDE 3 and no `serve-stale-reply-ttl` on these answers | Left as it was: they still go out at TTL 0 with no EDE, unlike a stale message-cache hit (TTL 30, EDE 3). Now it lasts for one answer, not a day. |
 
-### Wildcard NODATA and weak RSA keys (unreleased)
+### Wildcard NODATA and weak RSA keys (2.6.3)
 
 | decision | why |
 |---|---|

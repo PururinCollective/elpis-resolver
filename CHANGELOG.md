@@ -14,7 +14,16 @@ on the status page shows it, and so does the identity probe:
 nslookup -q=txt elpis.sakurako.oomuro 127.0.0.1
 ```
 
-## Unreleased
+## 2.6.3 "Paper Locks" — 2026-11-23
+
+A lock made of paper is no lock, and no reason to bar the door either. Two
+names that 1.1.1.1 answers were SERVFAIL here. `tracker.tiny-vps.com` sits
+under a wildcard that has no A record, and Elpis did not accept that proof.
+`cbn.net.id` signs with 512-bit RSA keys, which Elpis will not use, and it
+treated them as forged; it now answers that zone as unsigned, without AD, as
+1.1.1.1 does.
+
+No config that worked stops working.
 
 ### Fixed
 
